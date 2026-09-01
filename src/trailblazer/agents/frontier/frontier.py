@@ -4,6 +4,9 @@ Frontier agent: decision maker for form-filling strategy.
 Frontier maintains the "board" (state of gates, what's been walked, what's pending)
 and decides ONE action at a time. It communicates only with Loop.
 
+
+
+
 Frontier is stateless across invocations (it receives board state from Loop).
 Loop persists the board and orchestrates all agent calls.
 """

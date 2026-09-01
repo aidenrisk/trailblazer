@@ -1,21 +1,4 @@
-"""
-Loop: the main orchestrator.
 
-Loop coordinates all agents:
-- Scraper (reads the page)
-- Frontier (decides next action)
-- FormFiller (executes the action)
-- ReplayGen (compiles walks into scripts)
-- Validator (tests scripts on lab fixtures)
-
-Each agent is stateless or minimal-state. Loop persists all state and routes
-data between agents.
-
-Architecture:
-- Agents don't call each other; they only talk to Loop
-- Loop persists board state and pages between steps
-- Loop is the glue; agents are pluggable components
-"""
 
 from typing import Any
 
@@ -30,20 +13,7 @@ from trailblazer.contracts import (
 
 
 class Loop:
-    """
-    Main orchestrator for filling forms.
-
-    The Loop:
-    1. Calls Scraper to read the page
-    2. Calls Frontier to decide what to do
-    3. Calls FormFiller to execute the action
-    4. Compares pages (builds Diff)
-    5. Calls Frontier again to react to the diff
-    6. Repeats until a stable walk is produced
-    7. Hands off to ReplayGen and Validator
-
-    Loop is the "boss". All agents do what Loop tells them to.
-    """
+  
 
     def __init__(
         self,
@@ -53,16 +23,7 @@ class Loop:
         replaygen: Any = None,
         validator: Any = None,
     ) -> None:
-        """
-        Initialize Loop with agent instances.
-
-        Args:
-        - scraper: Scraper agent (reads pages)
-        - frontier: Frontier agent (decides actions)
-        - formfiller: FormFiller agent (executes actions)
-        - replaygen: ReplayGen agent (compiles walks to scripts) [optional for v0]
-        - validator: Validator agent (tests scripts) [optional for v0]
-        """
+    
         self.scraper = scraper
         self.frontier = frontier
         self.formfiller = formfiller
