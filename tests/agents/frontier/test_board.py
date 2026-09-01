@@ -227,19 +227,19 @@ class TestApplyDiff:
 
         # Apply a +ve diff (page changed after setting LLC)
         diff = Diff(polarity="+ve")
-        action, is_slice = board_state.apply_diff(diff, assignment)
+        is_complete = board_state.apply_diff(diff, assignment)
 
         # Option should be in walked
         assert board_state.board.gates[0].walked == ["LLC"]
         assert board_state.board.gates[0].pending == ["Corporation"]
         assert board_state.board.status == "exploring"
-        assert not is_slice
+        assert not is_complete  # Walk still in progress
 
-    def test_negative_diff_after_last_option_returns_walk_slice(
+    def test_negative_diff_after_last_option_completes_walk(
         self, board_state, page_with_one_gate
     ):
         """
-        -ve diff after the last option is set -> status=slice_stable, return WalkSlice.
+        -ve diff after the last option is set -> status=slice_stable, walk complete.
         """
         gates = board_state.identify_gates(page_with_one_gate)
         board_state.board.gates = gates
@@ -257,12 +257,45 @@ class TestApplyDiff:
 
         # Apply -ve diff (page settled)
         diff2 = Diff(polarity="-ve")
-        action, is_slice = board_state.apply_diff(diff2, assignment2)
+        is_complete = board_state.apply_diff(diff2, assignment2)
 
-        assert is_slice
+        assert is_complete  # Walk is complete
         assert board_state.board.status == "slice_stable"
-        # v0: walk_slice is empty (populated in v1)
-        assert action == []
+
+
+class TestComparePages:
+    """Test page comparison logic."""
+
+    def test_more_controls_equals_positive_diff(
+        self, board_state, page_with_one_gate
+    ):
+        """Page with more controls after action -> +ve diff."""
+        page_before = page_with_one_gate
+        page_after = page_with_one_gate.model_copy(deep=True)
+        # Add a new control (revealed field)
+        page_after.controls.append(
+            Control(
+                fieldId="q_new",
+                label="Revealed Field",
+                type="text",
+                required=True,
+                locator="#revealed",
+                unique=True,
+            )
+        )
+
+        diff = board_state.compare_pages(page_before, page_after)
+        assert diff.polarity == "+ve"
+
+    def test_same_controls_equals_negative_diff(
+        self, board_state, page_with_one_gate
+    ):
+        """Page with same controls after action -> -ve diff."""
+        page_before = page_with_one_gate
+        page_after = page_with_one_gate.model_copy()
+
+        diff = board_state.compare_pages(page_before, page_after)
+        assert diff.polarity == "-ve"
 
 
 class TestBoardSerialization:

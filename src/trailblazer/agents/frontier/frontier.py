@@ -1,14 +1,11 @@
 """
-Frontier agent: the contract-facing interface to the board logic.
+Frontier agent: decision maker for form-filling strategy.
 
-This module wraps FrontierBoardState to provide two clean, simple methods
-that Loop calls at the right times. Think of FrontierAgent as the "public API"
-and FrontierBoardState as the internal implementation.
+Frontier maintains the "board" (state of gates, what's been walked, what's pending)
+and decides ONE action at a time. It communicates only with Loop.
 
-Why split it this way?
-- FrontierBoardState focuses on pure logic and state (easy to test, easy to reason about)
-- FrontierAgent is the thin wrapper that handles the interaction protocol with Loop
-  (simpler to change protocol later without touching core logic)
+Frontier is stateless across invocations (it receives board state from Loop).
+Loop persists the board and orchestrates all agent calls.
 """
 
 from trailblazer.agents.frontier.board import FrontierBoardState
@@ -23,76 +20,81 @@ from trailblazer.contracts import (
 
 class FrontierAgent:
     """
-    Frontier agent: contract-facing interface.
+    Frontier: decides what to do next in a form fill.
 
-    This agent is responsible for deciding what FormFiller should do next,
-    given what's on the page and how the page changed after the last action.
+    Frontier is called by Loop at two points:
+    1. When a new page is discovered (on_page_description)
+    2. When the page has been acted upon and changed/settled (on_diff)
 
-    Public interface:
-    - on_page_description(): "Here's a new page, what should we do?"
-    - on_diff(): "The page changed (or didn't), now what?"
-
-    Both methods are called by Loop at the right times in the orchestration.
+    Each call is stateless — the board state comes from Loop, gets updated,
+    and returned to Loop for persistence.
     """
 
     def __init__(self) -> None:
-        # Internal state manager (pure logic, no I/O).
         self.state = FrontierBoardState()
 
     def on_page_description(
-        self, job: str, page: PageDescription
+        self, job: str, page: PageDescription, board: FrontierBoard | None = None
     ) -> tuple[FrontierBoard, Assignment]:
         """
-        Called by Loop when Scraper has analyzed a page.
-        Input: job ID (for logging), PageDescription (what's on the page)
-        Output: (updated FrontierBoard, next Assignment for FormFiller)
+        Loop calls this when Scraper returns a new page.
+        "Here's what's on the page now. What should we do?"
 
-        Process:
-        1. Extract gates from candidateGates in the page (branching points)
-        2. Update board's current stage
-        3. Decide the next single action (set_option, fill_page, next, etc.)
-        4. Return the board (so Loop can persist it) and the assignment (so FormFiller knows what to do)
+        Args:
+        - job: job ID (for logging)
+        - page: PageDescription from Scraper
+        - board: existing board state (if any). If None, initialize new board.
+
+        Returns:
+        - (updated_board, assignment): the board state and one action for FormFiller
         """
-        # Step 1: Are there any branching points on this page?
+        # Initialize or restore board state
+        if board is None:
+            self.state.board = FrontierBoard(currentStageId=page.stageId, status="exploring")
+        else:
+            self.state.board = board
+
+        # Identify gates on this page
         gates = self.state.identify_gates(page)
-        # Only set gates once (on first page encounter). On revisits, keep previous gate state.
         if not self.state.board.gates:
             self.state.board.gates = gates
 
-        # Step 2: Remember where we are.
+        # Update current stage
         self.state.board.currentStageId = page.stageId
 
-        # Step 3: Decide the next move given the current page.
+        # Decide next action
         assignment = self.state.next_assignment_for_page(page)
 
-        # Step 4: Return the updated board and the assignment.
-        # Loop will:
-        # - Save the board (so if it crashes, it knows the history)
-        # - Give the assignment to FormFiller
-        # - After FormFiller executes, compare pages and call on_diff()
         return (self.state.board, assignment)
 
     def on_diff(
-        self, job: str, diff: Diff, last_assignment: Assignment
+        self, job: str, diff: Diff, last_assignment: Assignment, board: FrontierBoard
     ) -> tuple[FrontierBoard, Assignment | WalkSlice]:
         """
-        Called by Loop after comparing page states before/after FormFiller.
-        Input: job ID, what changed (Diff), what FormFiller just did (last_assignment)
-        Output: (updated FrontierBoard, next Assignment OR a WalkSlice for ReplayGen)
+        Loop calls this after FormFiller executes and page is compared.
+        "The page changed (or didn't). Now what?"
 
-        The Diff tells us whether the click had an effect:
-        - "+ve" (positive): page changed (e.g., new fields revealed)
-                          → continue exploring this gate option
-        - "-ve" (negative): page settled (e.g., field validation blocked navigation)
-                          → finalize this walk, send to ReplayGen
+        Args:
+        - job: job ID
+        - diff: what changed on the page
+        - last_assignment: what FormFiller just executed
+        - board: current board state
 
-        Returns an Assignment most of the time, but when a walk is complete (slice_stable),
-        returns a WalkSlice instead for ReplayGen to compile into a script.
+        Returns:
+        - (updated_board, action): either next Assignment or WalkSlice if complete
         """
-        # Let the board logic decide how to react to the diff.
-        action, is_slice = self.state.apply_diff(diff, last_assignment)
+        # Restore board state
+        self.state.board = board
 
-        # Return the updated board and the action.
-        # If is_slice=True, action is a WalkSlice (list of steps).
-        # If is_slice=False, action is an Assignment (next instruction for FormFiller).
-        return (self.state.board, action)
+        # React to diff
+        is_walk_complete = self.state.apply_diff(diff, last_assignment)
+
+        # If walk is complete, return slice; otherwise return next assignment
+        if is_walk_complete:
+            walk_slice = self.state._build_walk_slice(last_assignment)
+            return (self.state.board, walk_slice)
+        else:
+            # Walk still in progress, need to fetch the new page and decide next action
+            # Loop will call on_page_description() with the updated page
+            # For now, return a placeholder assignment
+            return (self.state.board, last_assignment)

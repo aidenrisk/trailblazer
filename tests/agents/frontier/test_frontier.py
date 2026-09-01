@@ -44,24 +44,28 @@ class TestFrontierAgentOnPageDescription:
     """Test on_page_description contract method."""
 
     def test_initializes_board_with_gates(self, agent, page_with_gate):
-        """Calling on_page_description initializes board and emits first assignment."""
+        """on_page_description initializes board and emits first assignment."""
         board, assignment = agent.on_page_description("job1", page_with_gate)
 
         assert len(board.gates) == 1
         assert board.currentStageId == "page_entity"
         assert isinstance(assignment, SetOptionAssignment)
-        assert assignment.type == "set_option"
         assert assignment.option == "LLC"
 
-    def test_updates_current_stage(self, agent, page_with_gate):
-        """Each call updates currentStageId."""
-        board1, _ = agent.on_page_description("job1", page_with_gate)
-        assert board1.currentStageId == "page_entity"
+    def test_restores_board_state(self, agent, page_with_gate):
+        """on_page_description can restore existing board state."""
+        # First call: initialize board
+        board1, assignment1 = agent.on_page_description("job1", page_with_gate)
+        assert len(board1.gates) == 1
 
-        next_page = page_with_gate.model_copy()
-        next_page.stageId = "page_next_stage"
-        board2, _ = agent.on_page_description("job1", next_page)
-        assert board2.currentStageId == "page_next_stage"
+        # Second call: restore board state
+        page_updated = page_with_gate.model_copy()
+        page_updated.stageId = "page_2"
+        board2, assignment2 = agent.on_page_description("job1", page_updated, board1)
+
+        # Board should retain gates from first call
+        assert len(board2.gates) >= 1
+        assert board2.currentStageId == "page_2"
 
 
 class TestFrontierAgentOnDiff:
@@ -69,50 +73,39 @@ class TestFrontierAgentOnDiff:
 
     def test_positive_diff_returns_assignment(self, agent, page_with_gate):
         """
-        +ve diff -> returns next Assignment (not a WalkSlice).
+        +ve diff after set_option → walk continues.
         """
-        _, assignment = agent.on_page_description("job1", page_with_gate)
+        board, assignment = agent.on_page_description("job1", page_with_gate)
         assert isinstance(assignment, SetOptionAssignment)
         assert assignment.option == "LLC"
 
         # Apply +ve diff
         diff = Diff(polarity="+ve")
-        board, action = agent.on_diff("job1", diff, assignment)
+        updated_board, action = agent.on_diff("job1", diff, assignment, board)
 
-        # Result is an Assignment, not a WalkSlice (is_slice=False)
-        assert isinstance(action, SimpleAssignment)
-        assert board.status == "exploring"
+        # Board should have option marked as walked
+        assert "LLC" in updated_board.gates[0].walked
+        assert updated_board.status == "exploring"
 
     def test_negative_diff_returns_walk_slice(self, agent, page_with_gate):
         """
-        -ve diff after walking all options -> returns WalkSlice.
+        -ve diff after walking all options → returns WalkSlice.
         """
-        # First option
-        _, assignment1 = agent.on_page_description("job1", page_with_gate)
-        diff1 = Diff(polarity="+ve")
-        agent.on_diff("job1", diff1, assignment1)
+        board, assignment1 = agent.on_page_description("job1", page_with_gate)
 
-        # Second option
-        _, assignment2 = agent.on_page_description("job1", page_with_gate)
+        # Walk first option
+        diff1 = Diff(polarity="+ve")
+        board, _ = agent.on_diff("job1", diff1, assignment1, board)
+
+        # Get second option
+        board, assignment2 = agent.on_page_description("job1", page_with_gate, board)
         assert isinstance(assignment2, SetOptionAssignment)
         assert assignment2.option == "Corp"
 
-        # -ve diff -> walk slice
+        # Walk second option with -ve diff (complete)
         diff2 = Diff(polarity="-ve")
-        board, action = agent.on_diff("job1", diff2, assignment2)
+        board, action = agent.on_diff("job1", diff2, assignment2, board)
 
-        assert isinstance(action, list)  # WalkSlice is a list[WalkStep]
+        # Should return WalkSlice
+        assert isinstance(action, list)
         assert board.status == "slice_stable"
-
-
-class TestFrontierAgentBoardPersistence:
-    """Test that agent's board state persists across calls."""
-
-    def test_board_state_maintained(self, agent, page_with_gate):
-        """Agent's internal board state is maintained across calls."""
-        board1, _ = agent.on_page_description("job1", page_with_gate)
-        original_gates = len(board1.gates)
-
-        board2, _ = agent.on_page_description("job1", page_with_gate)
-        # On second call with same page, board already has gates
-        assert len(board2.gates) >= original_gates

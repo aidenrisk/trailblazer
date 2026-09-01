@@ -173,9 +173,7 @@ class FrontierBoardState:
             self.board.status = "complete"
             return SimpleAssignment(type="submit")
 
-    def apply_diff(
-        self, diff: Diff, last_assignment: Assignment
-    ) -> tuple[Assignment | WalkSlice, bool]:
+    def apply_diff(self, diff: Diff, last_assignment: Assignment) -> bool:
         """
         React to what changed (or didn't change) after FormFiller executed the last assignment.
 
@@ -185,11 +183,11 @@ class FrontierBoardState:
                            Action: Mark option as walked, keep exploring, try next option.
         - "-ve" (negative): page didn't change (or settled). We're done with this option.
                            Example: clicking "next" didn't navigate (validation blocked it).
-                           Action: Finalize this walk, send to ReplayGen, prepare next.
+                           Action: This walk is complete, ready to return.
 
-        Returns: (action_or_slice, is_walk_slice)
-                 is_walk_slice = True means first element is a WalkSlice, not an Assignment.
-                 is_walk_slice = False means first element is an Assignment.
+        Returns: is_walk_complete (bool)
+                 True = walk is complete, ready to finalize (call _build_walk_slice())
+                 False = walk is still in progress, call next_assignment_for_page() again
 
         NOTE: v0 does not implement backtracking or multi-gate juggling.
         When a gate is fully walked (-ve diff after last option), v0 just stops.
@@ -208,17 +206,13 @@ class FrontierBoardState:
             # Continue exploring this gate: next_assignment_for_page() will pick
             # the next pending option, or move on if this gate is done.
             self.board.status = "exploring"
-            # Return a placeholder. Loop will call next_assignment_for_page() next.
-            return (SimpleAssignment(type="stop"), False)
+            return False  # Walk still in progress
 
         else:  # -ve: page settled (no change)
             # Page didn't change. This walk is stable.
-            # Send the slice to ReplayGen for compilation into a script.
-            # TODO (v1): After building slice, if gate has more pending options,
-            # emit "back" and try the next option. For now, just mark stable.
+            # Signal that the walk is complete.
             self.board.status = "slice_stable"
-            walk_slice = self._build_walk_slice(last_assignment)
-            return (walk_slice, True)
+            return True  # Walk complete, ready to return
 
     def _find_control_locator(self, page: PageDescription, field_id: str) -> str:
         """
@@ -251,6 +245,22 @@ class FrontierBoardState:
                 unfilled.append(control)
 
         return unfilled
+
+    def compare_pages(
+        self, page_before: PageDescription, page_after: PageDescription
+    ) -> Diff:
+        """
+        Compare two PageDescriptions (before and after a FormFiller action).
+        Returns a Diff describing what changed.
+
+        v0: simple heuristic — if same number of controls, assume -ve; if more, assume +ve.
+        v1: actual diff logic (compare control fieldIds, detect added/removed/changed).
+        """
+        # Simple heuristic: if page grew in controls, something changed (+ve)
+        if len(page_after.controls) > len(page_before.controls):
+            return Diff(polarity="+ve")
+        # Otherwise, assume page settled (-ve)
+        return Diff(polarity="-ve")
 
     def _build_walk_slice(self, last_assignment: Assignment) -> WalkSlice:
         """
