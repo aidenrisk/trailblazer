@@ -12,6 +12,11 @@ dependencies = [
     "pydantic>=2.13.5",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 trailblazer = "trailblazer:main"
 
