@@ -188,9 +188,8 @@ class FrontierAgent:
 
     def _sync_controls(self, state: FrontierState) -> FrontierState:
         """Track new controls (including ones just revealed) and any new options."""
-        page = state["page"]
-        self.state.board.currentStageId = page.stageId
-        self.state.sync_controls(page)
+        # sync_controls records currentStageId itself.
+        self.state.sync_controls(state["page"])
         return state
 
     def _select_control(self, state: FrontierState) -> FrontierState:

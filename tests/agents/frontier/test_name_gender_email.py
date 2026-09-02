@@ -16,7 +16,7 @@ import pytest
 from trailblazer.agents.form_filler.stub import StubFormFiller
 from trailblazer.agents.frontier.frontier import FrontierAgent
 from trailblazer.agents.scraper.stub import StubScraper
-from trailblazer.contracts import Diff, FillReport, Option, PageDescription, Walk
+from trailblazer.contracts import FillReport, Option, PageDescription, ScraperResult, Walk
 from trailblazer.loop.orchestrator import Loop
 from tests.agents.frontier.frontier_test_data import (
     GENDER_OPTIONS,
@@ -54,7 +54,13 @@ def chose(field_id, label):
     return FillReport(ok=True, fieldId=field_id, chosenOption=label)
 
 
-SETTLED = Diff(polarity="-ve")
+SETTLED = ScraperResult(
+    page=PageDescription(**PAGE_NAME_GENDER_EMAIL),
+    polarity="-ve",
+    addedControls=[],
+    removedControls=[],
+    changedControls=[],
+)
 
 
 class TestStepByStep:

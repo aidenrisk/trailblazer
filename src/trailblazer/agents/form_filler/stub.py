@@ -139,8 +139,12 @@ class StubFormFiller:
 
     def _navigate(self, job: str, assignment: SimpleAssignment) -> FillReport:
         logger.info("[%s] %s", job, assignment.type)
+        # advance=False, always. This stub never touches the page, so it
+        # cannot have navigated, and saying otherwise makes Loop bump
+        # page_index -- which renames the stage and throws away Frontier's
+        # board. A real FormFiller reports what actually happened.
         return FillReport(
             ok=True,
             steps=[FillStep(action="click", locator=f"<{assignment.type}>")],
-            advance=assignment.type in ("next", "back", "submit"),
+            advance=False,
         )

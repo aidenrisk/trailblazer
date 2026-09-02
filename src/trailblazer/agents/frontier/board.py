@@ -156,11 +156,21 @@ class FrontierBoardState:
 
         Returns: the ControlStates that were newly added (for logging).
         """
-        known = {c.fieldId for c in self.board.controls}
+        # Keyed by (stageId, fieldId), NOT fieldId alone. The scraper resets
+        # the counter on every look -- "Per-page counter, q_001. Reset every
+        # perceive; not cross-page identity." So page 2's q_001 is a different
+        # control from page 1's, and deduping on fieldId alone silently drops
+        # every control on every page after the first.
+        # This method is where the board learns which page it is looking at, so
+        # it records that rather than leaving it to the caller -- stage-scoped
+        # lookups below depend on it being right.
+        self.board.currentStageId = page.stageId
+
+        known = {(c.stageId, c.fieldId) for c in self.board.controls}
         added: list[ControlState] = []
 
         for control in page.controls:
-            if control.fieldId not in known:
+            if (page.stageId, control.fieldId) not in known:
                 entry = ControlState(
                     fieldId=control.fieldId,
                     label=control.label,
@@ -185,7 +195,7 @@ class FrontierBoardState:
                 continue
 
             # Already tracked. Did the PD just teach us its options?
-            entry = self._entry(control.fieldId)
+            entry = self._entry(control.fieldId, stage_id=page.stageId)
             if entry is not None and entry.options is None and control.options is not None:
                 self._set_options(entry, control.options, chosen=None)
                 logger.info(
@@ -392,12 +402,22 @@ class FrontierBoardState:
     # Internals
     # ------------------------------------------------------------------
 
-    def _entry(self, field_id: str, warn: bool = True) -> ControlState | None:
+    def _entry(
+        self, field_id: str, stage_id: str | None = None, warn: bool = True
+    ) -> ControlState | None:
+        """Find a control, scoped to a stage.
+
+        fieldIds repeat across pages, so an unscoped lookup can return the
+        wrong page's control. Defaults to the stage we are on.
+        """
+        stage_id = stage_id or self.board.currentStageId
         for entry in self.board.controls:
-            if entry.fieldId == field_id:
+            if entry.fieldId == field_id and entry.stageId == stage_id:
                 return entry
         if warn:
-            logger.warning("No board entry for fieldId %s", field_id)
+            logger.warning(
+                "No board entry for fieldId %s on stage %s", field_id, stage_id
+            )
         return None
 
     def _set_options(

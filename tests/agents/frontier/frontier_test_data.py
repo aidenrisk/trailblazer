@@ -30,6 +30,7 @@ PAGE_NAME_GENDER_EMAIL = {
     "controls": [
         {
             "fieldId": "q_name",
+            "key": "el_0",
             "label": "Name",
             "type": "text",
             "required": True,
@@ -42,6 +43,7 @@ PAGE_NAME_GENDER_EMAIL = {
             # Scraper sees a control it can't read options from. FormFiller will
             # discover it's a dropdown with Male / Female.
             "fieldId": "q_gender",
+            "key": "el_1",
             "label": "Gender",
             "type": "select",
             "required": True,
@@ -52,6 +54,7 @@ PAGE_NAME_GENDER_EMAIL = {
         },
         {
             "fieldId": "q_email",
+            "key": "el_2",
             "label": "Email",
             "type": "text",
             "required": True,
@@ -81,6 +84,7 @@ PAGE_SIMPLE = {
     "controls": [
         {
             "fieldId": "q_name",
+            "key": "el_3",
             "label": "Name",
             "type": "text",
             "required": True,
@@ -93,6 +97,7 @@ PAGE_SIMPLE = {
             # Looks like a plain field to Scraper. FormFiller will find out it's
             # a dropdown with Male/Female and report those back.
             "fieldId": "q_gender",
+            "key": "el_4",
             "label": "Gender",
             "type": "select",
             "required": True,
@@ -105,6 +110,7 @@ PAGE_SIMPLE = {
             # Options ARE in the PageDescription, each with its own locator.
             # Selecting "Yes" must click #consent-yes, NOT #consent.
             "fieldId": "q_consent",
+            "key": "el_5",
             "label": "Consent to contact",
             "type": "select",
             "required": True,
@@ -118,6 +124,7 @@ PAGE_SIMPLE = {
         },
         {
             "fieldId": "q_email",
+            "key": "el_6",
             "label": "Email",
             "type": "text",
             "required": True,
@@ -140,6 +147,7 @@ PAGE_SIMPLE_2 = {
     "controls": [
         {
             "fieldId": "q_phone",
+            "key": "el_7",
             "label": "Phone",
             "type": "text",
             "required": True,
@@ -150,6 +158,7 @@ PAGE_SIMPLE_2 = {
         },
         {
             "fieldId": "q_start",
+            "key": "el_8",
             "label": "Start Date",
             "type": "date",
             "required": False,
@@ -169,13 +178,15 @@ PAGE_SIMPLE_2 = {
 # fields join the exploration queue and get explored before the page finishes.
 REVEALED_PRONOUNS = {
     "fieldId": "q_pronouns",
+            "key": "el_9",
     "label": "Preferred Pronouns",
     "type": "text",
     "required": False,
     "options": None,
     "locator": "#pronouns",
     "unique": True,
-    "revealedBy": {"fieldId": "q_gender", "equals": "Female"},
+    "revealedBy": {"fieldId": "q_gender",
+            "key": "el_10", "equals": "Female"},
 }
 
 # ---------------------------------------------------------------------------
@@ -209,6 +220,7 @@ PAGE_1_BUSINESS_INFO = {
     "controls": [
         {
             "fieldId": "q_001",
+            "key": "el_11",
             "label": "Agency / Program",
             "type": "other",
             "required": True,
@@ -219,6 +231,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_002",
+            "key": "el_12",
             "label": "Policy Effective Date",
             "type": "date",
             "required": True,
@@ -229,6 +242,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_003",
+            "key": "el_13",
             "label": "Business Zip Code",
             "type": "text",
             "required": True,
@@ -239,6 +253,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_004",
+            "key": "el_14",
             "label": "Legal Business Name",
             "type": "text",
             "required": True,
@@ -249,6 +264,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_005",
+            "key": "el_15",
             "label": "DBA (Doing Business As)",
             "type": "text",
             "required": False,
@@ -259,6 +275,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_006",
+            "key": "el_16",
             "label": "Legal Entity Type",
             "type": "other",
             "required": True,
@@ -269,6 +286,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_007",
+            "key": "el_17",
             "label": "FEIN",
             "type": "text",
             "required": True,
@@ -279,6 +297,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_008",
+            "key": "el_18",
             "label": "Target or Incumbent Premium",
             "type": "number",
             "required": False,
@@ -289,6 +308,7 @@ PAGE_1_BUSINESS_INFO = {
         },
         {
             "fieldId": "q_009",
+            "key": "el_19",
             "label": "Does this business have multiple locations?",
             "type": "select",
             "required": True,
@@ -334,11 +354,13 @@ PIE_DISCOVERABLE = {
 # field. Exercises the revealed-control path on real data.
 PIE_REVEALED_LOCATION_COUNT = {
     "fieldId": "q_012",
+            "key": "el_20",
     "label": "How many locations?",
     "type": "number",
     "required": True,
     "options": None,
     "locator": "#locationCount",
     "unique": True,
-    "revealedBy": {"fieldId": "q_009", "equals": "Yes"},
+    "revealedBy": {"fieldId": "q_009",
+            "key": "el_21", "equals": "Yes"},
 }

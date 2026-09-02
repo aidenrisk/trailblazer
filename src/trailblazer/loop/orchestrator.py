@@ -203,10 +203,20 @@ class Loop:
 
     def _perceive(self, state: LoopState) -> LoopState:
         last = state["last_assignment"]
+        report = state["fill_report"]
 
-        # Navigation is the only thing that moves us to a different page, and so
-        # the only thing that advances the counter the scraper keys on.
-        if getattr(last, "type", None) in ("next", "back"):
+        # The scraper folds page_index into the stageId it returns
+        # (`form_page_{n}_{slug}`), and Frontier keys its board on stageId. So
+        # bumping this counter renames the page as far as Frontier is
+        # concerned, and it loses every control it was tracking.
+        #
+        # Which means: only bump on EVIDENCE that we actually left the page,
+        # not on the intent to. `FillReport.advance` is that evidence -- it is
+        # the filler saying the page navigated. Keying off the assignment type
+        # instead ("we asked for next, so we must have moved") renames the page
+        # every time a Next click fails, and Frontier then re-explores an empty
+        # stage and asks for Next again, forever.
+        if report is not None and report.advance:
             state["page_index"] += 1
 
         result = self.perceiver(
@@ -234,18 +244,20 @@ def run_crawl(
     url: str,
     insurance_types: list[str],
     business_types: list[str],
-    frontier: FrontierAgent | None = None,
-    formfiller: Any = None,
     headed: bool = False,
     settings: Settings | None = None,
-) -> Walk:
-    """Crawl one carrier portal and return every path Frontier walked.
+) -> ScraperResult:
+    """Crawl one carrier portal and return what the scraper saw.
 
-    Owns the browser session and binds `perceive` to the live page, so `Loop`
-    itself never touches Playwright.
+    ONE perceive, no Loop. This is the scraper's live entry point and the shape
+    `api.py` publishes, so it deliberately stays as it was: widening it to run
+    the whole pipeline would change the endpoint's response type every time an
+    agent is added, and `Walk` cannot even say whether the page was blocked.
 
-    `insurance_types` and `business_types` shape the objective handed to the
-    model and are carried for logging.
+    Driving the full walk is `run_walk` below.
+
+    `insurance_types` and `business_types` are carried for logging and for the
+    objective handed to the model.
     """
     settings = settings or get_settings()
     job_id = uuid.uuid4().hex[:12]
@@ -259,10 +271,57 @@ def run_crawl(
     )
 
     objective = (
+        f"Describe this form page. The application is for {', '.join(insurance_types) or 'any'} "
+        f"insurance for a {', '.join(business_types) or 'general'} business."
+    )
+
+    with BrowserSession(cdp_port=settings.cdp_port, headed=headed or settings.headed) as session:
+        page = session.goto(url)
+        result = perceive(
+            page,
+            PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
+            settings,
+        )
+
+    logger.info(
+        "crawl end job_id=%s stage_id=%s polarity=%s",
+        job_id,
+        result.page.stageId,
+        result.polarity,
+    )
+    return result
+
+
+def run_walk(
+    url: str,
+    insurance_types: list[str] | None = None,
+    business_types: list[str] | None = None,
+    frontier: FrontierAgent | None = None,
+    formfiller: Any = None,
+    headed: bool = False,
+    settings: Settings | None = None,
+) -> Walk:
+    """Walk a whole form with the real scraper and return every path found.
+
+    The Loop's live entry point, as opposed to `run_crawl`'s single look. Owns
+    the browser session and binds `perceive` to the live page, so `Loop` itself
+    never touches Playwright.
+
+    Not exposed over the API yet, and deliberately so: without a real
+    FormFiller nothing types into the page, so the walk cannot see the form
+    react. `scripts/narrate_pipeline.py` drives this for inspection.
+    """
+    settings = settings or get_settings()
+    job_id = uuid.uuid4().hex[:12]
+    insurance_types = insurance_types or []
+    business_types = business_types or []
+
+    objective = (
         f"Describe this form page. The application is for "
         f"{', '.join(insurance_types) or 'any'} insurance for a "
         f"{', '.join(business_types) or 'general'} business."
     )
+    logger.info("walk start job_id=%s url=%s", job_id, url)
 
     with BrowserSession(
         cdp_port=settings.cdp_port, headed=headed or settings.headed
@@ -279,9 +338,11 @@ def run_crawl(
         )
         loop = Loop(perceiver, frontier or FrontierAgent(), formfiller)
         walk = loop.fill_form(job_id, first.page)
-
+    logger.info("*****************************************************************")
+    logger.debug(first.page)
+    logger.info("*****************************************************************")
     logger.info(
-        "crawl end job_id=%s stage_id=%s paths=%d",
+        "walk end job_id=%s stage_id=%s paths=%d",
         job_id,
         first.page.stageId,
         len(walk.paths),

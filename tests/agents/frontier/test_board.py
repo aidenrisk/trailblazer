@@ -121,6 +121,7 @@ class TestSyncControls:
         consent_assignment = SetOptionAssignment(
             type="set_option",
             fieldId="q_consent",
+            key="el_q_consent",
             option="Yes",
             locator="#consent-yes",
             controlLocator="#consent",
@@ -170,6 +171,7 @@ class TestAbsorbFillReport:
             SetOptionAssignment(
                 type="set_option",
                 fieldId="q_gender",
+                key="el_q_gender",
                 option="Male",
                 locator="#gender-male",
                 controlLocator="#gender",
@@ -268,11 +270,23 @@ class TestAssignmentFor:
         assert assignment.locator == "#consent-yes"  # NOT "#consent"
         assert assignment.controlLocator == "#consent"
 
-    def test_locator_falls_back_to_control_when_option_has_none(self, synced):
+    def test_option_with_no_node_passes_none_through(self, synced):
+        """
+        A native `<select>`'s choices are not clickable: the answer is set with
+        `select_option(label)` against the select itself, and the scraper says
+        so by leaving `Option.locator` None.
+
+        Frontier must NOT collapse that to the control's locator. Doing so
+        looks harmless and silently makes native selects unfillable, because
+        FormFiller can no longer tell "click this" from "select on this".
+        """
         synced.absorb_fill_report(
             discovery_report(
                 "q_gender",
-                [Option(label="Male", locator=""), Option(label="Female", locator="")],
+                [
+                    Option(label="Male", locator=None),
+                    Option(label="Female", locator=None),
+                ],
                 None,
             ),
             fill("q_gender", "#gender"),
@@ -280,8 +294,9 @@ class TestAssignmentFor:
         gender = next(c for c in synced.board.controls if c.fieldId == "q_gender")
         assignment = synced.assignment_for(gender)
 
-        assert assignment.locator == "#gender"
+        assert assignment.locator is None
         assert assignment.controlLocator == "#gender"
+        assert assignment.option == "Male"
 
     def test_does_not_consume_the_option(self, synced):
         """
@@ -315,6 +330,7 @@ class TestWalkLog:
             SetOptionAssignment(
                 type="set_option",
                 fieldId="q_consent",
+                key="el_q_consent",
                 option="Yes",
                 locator="#consent-yes",
                 controlLocator="#consent",
@@ -402,6 +418,7 @@ class TestLiveRevealPriority:
     def revealed_control(self, equals):
         return Control(
             fieldId="q_extra",
+            key="el_q_extra",
             label="Extra",
             type="text",
             required=False,
@@ -472,6 +489,7 @@ class TestBuildWalk:
             SetOptionAssignment(
                 type="set_option",
                 fieldId="q_gender",
+                key="el_q_gender",
                 option="Female",
                 locator="#gender-female",
                 controlLocator="#gender",
@@ -520,6 +538,7 @@ class TestBuildWalk:
         page.controls.append(
             Control(
                 fieldId="q_extra",
+                key="el_q_extra",
                 label="Extra",
                 type="text",
                 required=False,
@@ -552,6 +571,7 @@ class TestBuildWalk:
             SetOptionAssignment(
                 type="set_option",
                 fieldId="q_gender",
+                key="el_q_gender",
                 option="Female",
                 locator="#gender-female",
                 controlLocator="#gender",
@@ -576,6 +596,7 @@ class TestRevealedChooser:
 
     STYLE = Control(
         fieldId="q_style",
+        key="el_q_style",
         label="Style",
         type="select",
         required=False,
@@ -627,6 +648,7 @@ class TestRevealedChooser:
                 SetOptionAssignment(
                     type="set_option",
                     fieldId="q_style",
+                    key="el_q_style",
                     option=label,
                     locator=f"#style-{label.lower()}",
                     controlLocator="#style",
@@ -657,6 +679,7 @@ class TestRevealedChooser:
                 SetOptionAssignment(
                     type="set_option",
                     fieldId="q_style",
+                    key="el_q_style",
                     option=label,
                     locator=f"#style-{label.lower()}",
                     controlLocator="#style",
@@ -667,6 +690,7 @@ class TestRevealedChooser:
             SetOptionAssignment(
                 type="set_option",
                 fieldId="q_gender",
+                key="el_q_gender",
                 option="Female",
                 locator="#gender-female",
                 controlLocator="#gender",
@@ -699,6 +723,7 @@ class TestRevealedChooser:
                 SetOptionAssignment(
                     type="set_option",
                     fieldId="q_style",
+                    key="el_q_style",
                     option=label,
                     locator=f"#style-{label.lower()}",
                     controlLocator="#style",
@@ -709,6 +734,7 @@ class TestRevealedChooser:
             SetOptionAssignment(
                 type="set_option",
                 fieldId="q_gender",
+                key="el_q_gender",
                 option="Female",
                 locator="#gender-female",
                 controlLocator="#gender",

@@ -10,7 +10,7 @@ import pytest
 from trailblazer.agents.frontier.frontier import FrontierAgent
 from trailblazer.contracts import (
     Control,
-    Diff,
+    ScraperResult,
     FillReport,
     Option,
     PageDescription,
@@ -25,6 +25,17 @@ from tests.agents.frontier.frontier_test_data import (
 )
 
 JOB = "job_test"
+
+# What the scraper reports. Frontier reads only polarity and the added/removed
+# lists off this, so a bare result is enough to drive it.
+SETTLED = ScraperResult(
+    page=PageDescription(**PAGE_SIMPLE),
+    polarity="-ve",
+    addedControls=[],
+    removedControls=[],
+    changedControls=[],
+)
+CHANGED = SETTLED.model_copy(update={"polarity": "+ve"})
 MALE = Option(label="Male", locator="#gender-male")
 FEMALE = Option(label="Female", locator="#gender-female")
 
@@ -58,7 +69,7 @@ class TestWalkthrough:
 
     def test_moves_to_the_second_control(self, agent, page):
         agent.on_page(JOB, page)
-        assignment = agent.on_page(JOB, page, Diff(polarity="-ve"), landed("q_name"))
+        assignment = agent.on_page(JOB, page, SETTLED, landed("q_name"))
 
         assert assignment.type == "fill_field"
         assert assignment.fieldId == "q_gender"
@@ -69,12 +80,12 @@ class TestWalkthrough:
         Female. Frontier must come back for Male, NOT skip to q_consent.
         """
         agent.on_page(JOB, page)
-        agent.on_page(JOB, page, Diff(polarity="-ve"), landed("q_name"))
+        agent.on_page(JOB, page, SETTLED, landed("q_name"))
 
         assignment = agent.on_page(
             JOB,
             page,
-            Diff(polarity="-ve"),
+            SETTLED,
             landed("q_gender", options=[MALE, FEMALE], chosen="Female"),
         )
 
@@ -90,7 +101,7 @@ class TestWalkthrough:
         report = None
 
         for _ in range(12):
-            action = agent.on_page(JOB, page, Diff(polarity="-ve"), report)
+            action = agent.on_page(JOB, page, SETTLED, report)
             if isinstance(action, Walk):
                 sequence.append(("walk_slice", len(action)))
                 break
@@ -125,7 +136,7 @@ class TestWalkthrough:
         report = None
 
         for _ in range(12):
-            action = agent.on_page(JOB, page, Diff(polarity="-ve"), report)
+            action = agent.on_page(JOB, page, SETTLED, report)
             if isinstance(action, Walk) or action.type == "next":
                 break
             if action.type == "set_option" and action.fieldId == "q_consent":
@@ -148,7 +159,7 @@ class TestRevealedControls:
         report = None
 
         for _ in range(14):
-            action = agent.on_page(JOB, page, Diff(polarity="-ve"), report)
+            action = agent.on_page(JOB, page, SETTLED, report)
             if isinstance(action, Walk) or action.type == "next":
                 break
 
@@ -177,7 +188,7 @@ class TestPageCompletion:
         action = None
 
         for _ in range(8):
-            action = agent.on_page(JOB, page, Diff(polarity="-ve"), report)
+            action = agent.on_page(JOB, page, SETTLED, report)
             if isinstance(action, Walk):
                 break
             report = landed(action.fieldId)
@@ -196,7 +207,7 @@ class TestPageCompletion:
         current = page
 
         for _ in range(16):
-            action = agent.on_page(JOB, current, Diff(polarity="-ve"), report)
+            action = agent.on_page(JOB, current, SETTLED, report)
             if isinstance(action, Walk):
                 break
             if action.type == "next":
@@ -247,7 +258,7 @@ class TestPageCompletion:
         for entry_page in (page,):
             report = None
             for _ in range(12):
-                action = agent.on_page(JOB, entry_page, Diff(polarity="-ve"), report)
+                action = agent.on_page(JOB, entry_page, SETTLED, report)
                 if action.type == "next":
                     break
                 if action.type == "set_option":
@@ -261,7 +272,7 @@ class TestPageCompletion:
 
         second = PageDescription(**PAGE_SIMPLE_2)
         action = agent.on_page(
-            JOB, second, Diff(polarity="+ve"), FillReport(ok=True, advance=True)
+            JOB, second, CHANGED, FillReport(ok=True, advance=True)
         )
 
         assert action.type == "fill_field"
@@ -298,7 +309,7 @@ class TestMasterPageDescription:
         report = None
 
         for _ in range(limit):
-            action = agent.on_page(JOB, page, Diff(polarity="-ve"), report)
+            action = agent.on_page(JOB, page, SETTLED, report)
             if isinstance(action, Walk):
                 return emitted, action
 
