@@ -58,6 +58,21 @@ class Settings(BaseSettings):
     login_test_mfa_timeout_ms: int = 180_000
     """The shorter wait a login health check allows; an operator is watching."""
 
+    mfa_poll_s: float = 2.0
+    """How often the code screen is re-read while waiting for the one-time code."""
+
+    mfa_fetch_retries: int = 3
+    """Transport retries per inbox poll. A 204 (nothing waiting yet) is never retried."""
+
+    mfa_fetch_timeout_s: float = 10.0
+
+    login_lock_acquire_timeout_s: float = 900.0
+    """How long a run waits in the per-carrier login queue before failing. Generous by
+    design: ten logins at tens of seconds each must wait, not fail."""
+
+    login_lock_max_hold_s: float = 120.0
+    """Safety cap on holding the lock; a login that wedges must not block every other run."""
+
     sessions_dir: str = ".sessions"
     """Where per-carrier cookie jars and browser profiles are kept."""
 

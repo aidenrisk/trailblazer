@@ -1,10 +1,11 @@
 """The Scraper on login pages: credentials are measured, the stage is named for it.
 
-Real browser and real perceiver against three fixture pages; no model. What is
-asserted is what the extractor reads off the markup -- which inputs are
-credentials, that six digit boxes are one control, that a hidden look-alike
-submit button does not hide the visible one -- and that `finalize` turns a page
-with a credential into a `login_*` stage.
+Real browser and real perceiver against three stand-in pages (tests/pages.py,
+written to a temp dir for the module); no model. What is asserted is what the
+extractor reads off the markup -- which inputs are credentials, that six digit
+boxes are one control, that a hidden look-alike submit button does not hide the
+visible one -- and that `finalize` turns a page with a credential into a
+`login_*` stage.
 """
 
 from pathlib import Path
@@ -15,18 +16,20 @@ from trailblazer.agents.browser.session import BrowserSession
 from trailblazer.agents.scraper.perceive import DomSnapshotPerceiver
 from trailblazer.agents.scraper.scraper import finalize, restore_measured_locators
 from trailblazer.contracts import Control, PageDescription
+from tests.pages import page_uri, write_pages
 
-FIXTURES = Path(__file__).parents[2] / "fixtures"
+_PAGES: dict[str, Path] = {}
 
 
-def _url(name: str) -> str:
-    return (FIXTURES / name).resolve().as_uri()
+@pytest.fixture(scope="module", autouse=True)
+def _pages_dir(tmp_path_factory):
+    _PAGES["dir"] = write_pages(tmp_path_factory.mktemp("login-pages"))
 
 
 def _perceive(name: str, port: int) -> tuple[dict, dict[str, int]]:
-    """Perceive one fixture and also count what its `next` locator resolves to."""
+    """Perceive one page and also count what its `next` locator resolves to."""
     with BrowserSession(cdp_port=port) as session:
-        page = session.goto(_url(name))
+        page = session.goto(page_uri(_PAGES["dir"], name))
         payload = DomSnapshotPerceiver().perceive(page)
         counts = {
             "next": page.locator(payload["next"]).count() if payload["next"] else 0,
