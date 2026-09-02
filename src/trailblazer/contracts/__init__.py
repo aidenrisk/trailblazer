@@ -28,6 +28,20 @@ class RevealedBy(BaseModel):
     equals: str
 
 
+class Option(BaseModel):
+    """
+    One choice for a select/toggle control, with its own locator to select it.
+
+    A shared control locator isn't enough on its own: a native <select> needs a
+    distinct locator per <option>, and a gate made of separate elements (e.g. a
+    "Yes" button and a "No" button) needs a distinct locator per option too.
+    Every Option is grounded in a real locator scraped/probed from the page —
+    never invented.
+    """
+    label: str
+    locator: str
+
+
 class Control(BaseModel):
     """
     A single form field (input, dropdown, checkbox, etc.) on a page.
@@ -37,7 +51,15 @@ class Control(BaseModel):
     - label: human-readable name (e.g., "Business Name")
     - type: what kind of input it is (text box, dropdown, toggle, etc.)
     - required: must this field be filled before moving forward?
-    - options: if it's a select/toggle, the list of choices (e.g., ["LLC", "Corp"])
+    - options: if it's a chooser, the list of choices, each with its own
+              locator (e.g., [{"label": "LLC", "locator": "..."}, ...]).
+              None means UNKNOWN, not "no options" — many widgets (custom
+              dropdowns, comboboxes) don't render their option list in the DOM
+              until clicked open, so Scraper often can't report this up front.
+              An empty list means "confirmed: this control has no options"
+              (i.e. it's a plain field). FormFiller may discover options for a
+              control Scraper reported as None; it reports them back on
+              FillReport.discoveredOptions and Frontier walks them.
     - locator: Playwright address to find this field on the page (e.g., "#entityType").
               This is stable across page reloads, not a screenshot reference.
     - unique: is this locator guaranteed to match only one element on the page?
@@ -47,7 +69,7 @@ class Control(BaseModel):
     label: str
     type: Literal["text", "select", "toggle", "date", "number", "other"]
     required: bool
-    options: list[str] = Field(default_factory=list)
+    options: list[Option] | None = None
     locator: str
     unique: bool
     revealedBy: RevealedBy | None = None
@@ -65,7 +87,10 @@ class PageDescription(BaseModel):
     - next: locator for the "Next" button (if present), or None if this is the last page
     - back: locator for "Back" button (if present)
     - candidateGates: fieldIds that look like they branch (select/toggle with options).
-                      These are hints to Frontier: "you might want to walk all options of these"
+                      NOTE: no longer consumed. Frontier explores every control one
+                      by one, so it doesn't need to be told in advance which ones
+                      branch. Kept because it's legitimate Scraper output, but
+                      nothing reads it — don't wire new logic to it.
     - blockers: validation errors, overlays, or decline messages on the page that prevent proceeding
     """
     stageId: str
@@ -77,59 +102,75 @@ class PageDescription(BaseModel):
     blockers: list[str] = Field(default_factory=list)
 
 
-class Gate(BaseModel):
+class ControlState(BaseModel):
     """
-    A branching point that Frontier is tracking.
-    "This form has a choice (Entity Type: LLC or Corporation) we need to explore."
+    Frontier's exploration record for ONE control on the form.
 
-    A gate is a select/toggle field with 2+ options that Frontier decides to walk all paths for.
-    Frontier's job: try each option, see how the form changes, record what happened.
+    Frontier tracks every control, not just the branching ones. It doesn't need
+    to know in advance which controls branch: it walks them in page order, and a
+    control turns out to be a chooser either because Scraper reported `options`
+    or because FormFiller discovered them while filling it.
 
     Attributes:
-    - gateId: unique ID for this gate (e.g., "g_entity_type")
-    - fieldId: which Control is this gate based on?
-    - stageId: which page did this gate appear on?
-    - kind: "same-page" if clicking this option keeps us on the same page (reveals/hides fields),
-            "last-page" if this is the final page (choices just change the walk, don't navigate)
-    - options: all possible values for this gate (e.g., ["LLC", "Corporation"])
-    - walked: which options have we already tried? (e.g., ["LLC"])
-    - pending: which options still need trying? (e.g., ["Corporation"])
+    - fieldId / label / stageId / locator / type / required: copied from the Control
+    - explored: True once this control is completely done (filled, or all its
+                options walked). Frontier will not move past a control that is
+                not explored.
+    - options: None = we don't know whether this control has options yet.
+               []   = confirmed plain field, no options.
+               [..] = the choices, each with its own locator.
+    - walked: options already tried, in the order tried. walked[-1] is what is
+              currently set on the page.
+    - pending: options still to try
+    - revealedBy: the gate condition that makes this control exist, if any
 
-    Walk strategy:
-      Start: pending=[all options], walked=[]
-      Click option 1: FormFiller sets it, Frontier sees page change (+ve diff)
-      Move option 1: pending=[opt2, opt3], walked=[opt1]
-      Click option 2: FormFiller sets it
-      ... continue until pending is empty
+    Walk strategy for a chooser:
+      Discover:     options=[Male, Female], pending=[Male, Female], walked=[]
+      Pick Female:  pending=[Male],         walked=[Female],        explored=False
+      Pick Male:    pending=[],             walked=[Female, Male],  explored=True
+    Only now may Frontier move to the next control.
     """
-    
-    gateId: str
+
     fieldId: str
+    label: str
     stageId: str
-    kind: Literal["same-page", "last-page"]
-    options: list[str]
-    walked: list[str] = Field(default_factory=list)
-    pending: list[str] = Field(default_factory=list)
+    locator: str
+    type: Literal["text", "select", "toggle", "date", "number", "other"]
+    required: bool = False
+    explored: bool = False
+    options: list[Option] | None = None
+    walked: list[Option] = Field(default_factory=list)
+    pending: list[Option] = Field(default_factory=list)
+    revealedBy: RevealedBy | None = None
+    """
+    Copied from the Control. This is how an action gets attributed to a branch:
+    a field that only exists when q_gender == "Female" belongs to the Female
+    path and must be left out of the Male one.
+    """
 
 
 class FrontierBoard(BaseModel):
     """
     Frontier's memory: the state of the entire walk so far.
-    Persisted and updated after every PageDescription and Diff.
+
+    Lives inside Frontier — Loop does NOT pass this in or out. Frontier is the
+    only agent that needs it, so it owns it. This model exists so the board can
+    still be serialized for logging/debugging.
 
     Attributes:
-    - gates: all gates discovered so far and their walked/pending progress
+    - controls: exploration record for every control seen so far, in the order
+                they were first seen (page order, with revealed controls appended)
     - currentStageId: which page are we on right now?
     - status: high-level state machine
-        * "exploring": actively finding/trying gates
-        * "awaiting_fill": last assignment was issued, waiting for FormFiller to execute
+        * "exploring": absorbing feedback, deciding what's next
+        * "awaiting_fill": an assignment was issued, waiting for FormFiller
         * "slice_stable": a walk slice is ready to send to ReplayGen
-        * "advancing": ready to click Next to move to next page
+        * "advancing": page fully explored, clicking Next
         * "backtracking": (v1) undoing a choice to try another option
-        * "complete": entire form filled successfully
+        * "complete": entire form walked, walk slice published
         * "blocked": validation error or blocker prevents moving forward
     """
-    gates: list[Gate] = Field(default_factory=list)
+    controls: list[ControlState] = Field(default_factory=list)
     currentStageId: str
     status: Literal[
         "exploring",
@@ -144,30 +185,40 @@ class FrontierBoard(BaseModel):
 
 class SetOptionAssignment(BaseModel):
     """
-    "Click one option of a gate to see how the form reacts."
-    Frontier → FormFiller, when exploring a branching choice.
+    "Select this specific option of this control."
+    Frontier → FormFiller, once a control's options are known.
+
+    IMPORTANT — which locator to use:
+      `locator` is the OPTION's own locator whenever the option has one. A native
+      <select> gives each <option> a distinct locator, and a split control (paired
+      "Yes" / "Maybe" buttons) gives each button its own locator. In both cases
+      FormFiller must act on `locator`, NOT on `controlLocator`.
+
+      `controlLocator` is the parent control's locator. It's there so FormFiller
+      can open a custom widget before picking, and it's what `locator` falls back
+      to when the discovered options carry no distinct locator of their own.
     """
     type: Literal["set_option"] = "set_option"
-    gateId: str  # which gate's option are we setting?
-    option: str  # the specific value to select (e.g., "LLC")
-    locator: str  # where to click/select it
+    fieldId: str  # which control's option are we setting?
+    option: str  # the option's label (e.g., "LLC")
+    locator: str  # the OPTION's locator when it has one, else == controlLocator
+    controlLocator: str  # the parent control's locator
 
 
-class FillPageAssignment(BaseModel):
+class FillFieldAssignment(BaseModel):
     """
-    "Fill in all the required fields on this page."
-    Frontier → FormFiller, when no gates are left to explore, just fill blanks.
-    """
-    type: Literal["fill_page"] = "fill_page"
-    applicantSlice: dict[str, str]  # fieldId → value mapping (e.g., {"q_001": "Business Name Inc"})
+    "Fill this ONE control with this value."
+    Frontier → FormFiller, for a control with no known options.
 
+    This is also how a hidden chooser gets discovered: FormFiller tries to fill
+    it, finds it's actually a dropdown, and reports the options it found back on
+    FillReport.discoveredOptions. Frontier then walks the remaining options
+    before moving on to the next control.
 
-class FillRevealedAssignment(BaseModel):
+    One control per assignment — Frontier never fills a whole page at once,
+    because it has to see what each individual fill does to the page.
     """
-    "Fill a field that was just revealed by a gate choice."
-    (v1+: for now we don't use this much in v0)
-    """
-    type: Literal["fill_revealed"] = "fill_revealed"
+    type: Literal["fill_field"] = "fill_field"
     fieldId: str
     locator: str
     value: str
@@ -194,7 +245,7 @@ class LastPageProbeAssignment(BaseModel):
 
 # Assignment is a "discriminated union": one of several types, picked based on the "type" field.
 # This lets Pydantic automatically parse JSON and create the right class.
-# E.g., {"type": "set_option", "gateId": "...", ...} → SetOptionAssignment
+# E.g., {"type": "set_option", "fieldId": "...", ...} → SetOptionAssignment
 #       {"type": "next"} → SimpleAssignment
 # Without this, you'd have to manually check the type and cast. This is cleaner.
 def _assignment_discriminator(v: Union[dict, BaseModel]) -> str:
@@ -206,13 +257,70 @@ def _assignment_discriminator(v: Union[dict, BaseModel]) -> str:
 Assignment = Annotated[
     Union[
         SetOptionAssignment,
-        FillPageAssignment,
-        FillRevealedAssignment,
+        FillFieldAssignment,
         SimpleAssignment,
         LastPageProbeAssignment,
     ],
     Discriminator(_assignment_discriminator),
 ]
+
+
+class FillStep(BaseModel):
+    """
+    One thing FormFiller actually did on the page while executing an Assignment.
+
+    Attributes:
+    - fieldId: which control (None for navigation clicks)
+    - action: what kind of interaction it performed
+    - locator: the Playwright address it acted on
+    - value: what it typed/selected, if anything
+    - required: was the control required?
+    """
+    fieldId: str | None = None
+    action: Literal["fill", "select", "toggle", "click", "type"]
+    locator: str
+    value: str | None = None
+    required: bool = False
+
+
+class FillReport(BaseModel):
+    """
+    FormFiller → Loop: "here's what I did, and here's what I learned."
+
+    The bottom three fields are how FormFiller talks to Frontier. Agents never
+    call each other, so this travels via Loop: Loop hands the FillReport to
+    Frontier on its next call, and Frontier absorbs it.
+
+    Attributes:
+    - ok: did the assignment execute?
+    - steps: the interactions performed
+    - advance: did the page navigate as a result?
+    - landed: fieldIds that actually took a value
+    - errorClass: why it failed, if it failed
+
+    Filler → Frontier feedback:
+    - fieldId: which control this report concerns
+    - discoveredOptions:
+        None = "not a chooser" (or nothing new learned) — leave Frontier's
+               knowledge of this control alone.
+        []   = "I opened it and it genuinely has no options."
+        [..] = "This control I was asked to fill is actually a chooser, and
+               these are its options." Frontier must then walk them all before
+               moving to the next control.
+      The None-vs-[] distinction matters: a chooser with zero options would
+      otherwise be asked to reveal its options forever and block the page.
+    - chosenOption: the label FormFiller actually picked, so Frontier can mark
+                    that one walked and not repeat it.
+    """
+    ok: bool
+    steps: list[FillStep] = Field(default_factory=list)
+    advance: bool = False
+    landed: list[str] = Field(default_factory=list)
+    errorClass: Literal["not_found", "not_unique", "widget", "validation"] | None = None
+
+    fieldId: str | None = None
+    discoveredOptions: list[Option] | None = None
+    chosenOption: str | None = None
 
 
 class ChangedControl(BaseModel):
@@ -222,18 +330,21 @@ class ChangedControl(BaseModel):
     """
     label: str
     locator: str
+    fieldId: str | None = None
 
 
 class Diff(BaseModel):
     """
     What changed on the page after FormFiller executed an Assignment.
-    Loop compares PageDescription before and after, produces this.
+    Scraper reports it alongside the fresh PageDescription.
 
-    This is the signal Frontier uses to decide what to do next:
-    - "+ve" (positive diff): page changed after the click (revealed new fields, etc.)
-             → keep going, the action had an effect
-    - "-ve" (negative diff): page didn't change (or settled)
-             → this option's walk is complete, time to finalize and try next option
+    - "+ve" (positive diff): the page changed (revealed new fields, navigated, etc.)
+    - "-ve" (negative diff): the page settled, nothing structural changed
+
+    Advisory only. Frontier does NOT drive its queue from addedControls — it
+    re-derives what's new by comparing the fresh PageDescription against the
+    board, which is robust even if the diff is imprecise. The polarity is used
+    for logging and to explain what just happened.
 
     Attributes:
     - polarity: did the page change?
@@ -260,39 +371,92 @@ class WalkStep(BaseModel):
     - action: what kind of action is this?
     - fieldId: which field (if applicable)?
     - locator: Playwright address to find the element
+    - value: the literal value that was typed, if it came from neither applicant
+             data nor credentials (today Frontier uses synthetic values, so this
+             is what actually landed and what ReplayGen needs to compile)
     - canonical: if filling with applicant data, which field path? (e.g., "business.legal_name")
     - credentialKey: if using a secret, which credential? (e.g., "LOGIN_EMAIL")
-    - option: if choosing from a gate, which option? (e.g., "LLC")
+    - option: if choosing an option, which one? (e.g., "LLC")
     """
     action: Literal["type", "choose", "toggle", "click", "wait-for", "back"]
     fieldId: str | None = None
     locator: str
+    value: str | None = None  # literal value typed
     canonical: str | None = None  # applicant data field path
     credentialKey: str | None = None  # secret/credential key
-    option: str | None = None  # for gate choices
+    option: str | None = None  # for option choices
 
 
-# WalkSlice is just a list of steps. Each successful walk creates one.
-# Example: filling entity type = LLC creates a slice with:
+# WalkSlice is one replayable path's worth of ordered steps.
+# Example: entity type = LLC produces a slice with:
 #   [WalkStep(action="choose", option="LLC", locator="#entityType", ...),
 #    WalkStep(action="type", canonical="business.legal_name", locator="#businessName", ...),
 #    WalkStep(action="click", locator="button:has-text('Next')", ...)]
 WalkSlice = list[WalkStep]
 
+
+class WalkPath(BaseModel):
+    """
+    One replayable path through the form, with the branch it represents.
+
+    `choices` pins exactly one option per chooser on this path, so ReplayGen can
+    name the Program it compiles and Validator can report which branch failed.
+
+    Attributes:
+    - choices: fieldId -> option label held fixed on this path
+    - steps: the ordered actions for this path, and only this path
+    """
+
+    choices: dict[str, str] = Field(default_factory=dict)
+    steps: WalkSlice = Field(default_factory=list)
+
+
+class Walk(BaseModel):
+    """
+    Frontier -> ReplayGen: every path captured, one WalkPath per branch.
+
+    NOT one slice per walk. A form with a two-option chooser has two distinct
+    paths through it, and each needs its own Program — a single slice containing
+    both options would replay as "click Male, click Female", which ends on
+    Female and never exercises Male at all.
+
+    Path count follows MASTER.md's "do not walk combinations of independent
+    gates": a baseline path taking each chooser's first option, plus one variant
+    per remaining option. Three choosers with 2/3/2 options give
+    1 + 1 + 2 + 1 = 5 paths, not 2 x 3 x 2 = 12.
+    """
+
+    paths: list[WalkPath] = Field(default_factory=list)
+
+    @property
+    def slices(self) -> list[WalkSlice]:
+        """Just the step sequences, for callers that don't care which branch."""
+        return [p.steps for p in self.paths]
+
 __all__ = [
+    # Scraper output
     "RevealedBy",
+    "Option",
     "Control",
     "PageDescription",
-    "Gate",
+    # Frontier memory
+    "ControlState",
     "FrontierBoard",
+    # Frontier -> FormFiller
     "SetOptionAssignment",
-    "FillPageAssignment",
-    "FillRevealedAssignment",
+    "FillFieldAssignment",
     "SimpleAssignment",
     "LastPageProbeAssignment",
     "Assignment",
+    # FormFiller -> Loop -> Frontier
+    "FillStep",
+    "FillReport",
+    # Scraper -> Frontier
     "ChangedControl",
     "Diff",
+    # Frontier -> ReplayGen
     "WalkStep",
     "WalkSlice",
+    "WalkPath",
+    "Walk",
 ]

@@ -5,3 +5,9 @@ outputs/
 # Markdown files (docs, guides, etc.) - keep only README.md in git
 *.md
 !README.md
+logs/
+
+# Secrets and caches
+.env
+__pycache__/
+*.pyc

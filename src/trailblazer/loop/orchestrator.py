@@ -1,20 +1,56 @@
+"""
+Loop: orchestrates all agents to walk a form end-to-end.
 
+Implemented as a LangGraph StateGraph. Each node wraps exactly one agent call
+(matching the "agents never call each other, only Loop calls agents" rule).
 
-from typing import Any
+    frontier_decide -> formfiller_execute -> rescrape -> frontier_decide
+           |                     |
+      result / stop           not ok
+           v                     v
+          END                   END
+
+Loop no longer carries the board: Frontier owns its own state, since it's the
+only agent that needs it. What Loop does carry is the FillReport — that's how
+FormFiller's discoveries reach Frontier without the two agents talking directly.
+Loop doesn't diff either; Scraper returns the Diff alongside the fresh page.
+"""
+
+import logging
+from typing import Any, TypedDict
+
+from langgraph.graph import END, StateGraph
 
 from trailblazer.agents.frontier.frontier import FrontierAgent
 from trailblazer.contracts import (
     Assignment,
     Diff,
-    FrontierBoard,
+    FillReport,
     PageDescription,
-    WalkSlice,
+    Walk,
 )
+
+logger = logging.getLogger(__name__)
+
+# Nodes burned per control explored: decide -> execute -> rescrape. LangGraph's
+# default recursion_limit of 25 runs out about eight controls in, so derive a
+# real budget instead. Walks are bounded by controls x options x pages, none of
+# which we know up front, so this is a generous ceiling that still fails fast on
+# a genuine cycle.
+DEFAULT_RECURSION_LIMIT = 400
+
+
+class LoopState(TypedDict):
+    job: str
+    current_page: PageDescription
+    assignment: Assignment | None
+    last_assignment: Assignment | None
+    fill_report: FillReport | None
+    diff: Diff | None
+    result: Walk | None
 
 
 class Loop:
-  
-
     def __init__(
         self,
         scraper: Any,
@@ -22,91 +58,122 @@ class Loop:
         formfiller: Any,
         replaygen: Any = None,
         validator: Any = None,
+        recursion_limit: int = DEFAULT_RECURSION_LIMIT,
     ) -> None:
-    
         self.scraper = scraper
         self.frontier = frontier
         self.formfiller = formfiller
         self.replaygen = replaygen
         self.validator = validator
+        self.recursion_limit = recursion_limit
+        self.graph = self._build_graph()
 
-    def fill_form(self, job: str, initial_page: PageDescription) -> WalkSlice:
+    def fill_form(self, job: str, initial_page: PageDescription) -> Walk:
         """
-        Fill a form by orchestrating all agents.
+        Walk a form by orchestrating all agents.
 
         Args:
         - job: job ID (for logging/tracking)
         - initial_page: first PageDescription (page to start from)
 
         Returns:
-        - WalkSlice: the successful walk, ready for ReplayGen
+        - Walk: one replayable WalkPath per branch, ready for ReplayGen
         """
-        board: FrontierBoard | None = None
-        current_page = initial_page
+        initial_state: LoopState = {
+            "job": job,
+            "current_page": initial_page,
+            "assignment": None,
+            "last_assignment": None,
+            "fill_report": None,
+            "diff": None,
+            "result": None,
+        }
+        final_state = self.graph.invoke(
+            initial_state, config={"recursion_limit": self.recursion_limit}
+        )
+        return final_state["result"] or Walk()
 
-        # Main loop: fill the form until complete
-        while True:
-            # Step 1: Frontier analyzes the page and decides next action
-            board, assignment = self.frontier.on_page_description(
-                job, current_page, board
+    # ------------------------------------------------------------------
+    # Graph construction
+    # ------------------------------------------------------------------
+
+    def _build_graph(self):
+        graph = StateGraph(LoopState)
+
+        graph.add_node("frontier_decide", self._frontier_decide)
+        graph.add_node("formfiller_execute", self._formfiller_execute)
+        graph.add_node("rescrape", self._rescrape)
+
+        graph.set_entry_point("frontier_decide")
+
+        graph.add_conditional_edges(
+            "frontier_decide",
+            self._after_decide,
+            {"stop": END, "continue": "formfiller_execute"},
+        )
+        graph.add_conditional_edges(
+            "formfiller_execute",
+            lambda s: "continue" if s["fill_report"].ok else "stop",
+            {"stop": END, "continue": "rescrape"},
+        )
+        graph.add_edge("rescrape", "frontier_decide")
+
+        return graph.compile()
+
+    @staticmethod
+    def _after_decide(state: LoopState) -> str:
+        # Frontier returned the finished walk slice: we're done.
+        if state["result"] is not None:
+            return "stop"
+        # Frontier gave up (blocked page, or nothing it can do).
+        if state["assignment"].type == "stop":
+            return "stop"
+        return "continue"
+
+    # ------------------------------------------------------------------
+    # Node implementations (each wraps exactly one agent call)
+    # ------------------------------------------------------------------
+
+    def _frontier_decide(self, state: LoopState) -> LoopState:
+        action = self.frontier.on_page(
+            state["job"],
+            state["current_page"],
+            state["diff"],
+            state["fill_report"],
+        )
+
+        if isinstance(action, Walk):
+            state["result"] = action
+        else:
+            state["assignment"] = action
+
+        # Feedback consumed. Clear it so a re-entry can't absorb the same
+        # FillReport twice and double-count a walked option.
+        state["diff"] = None
+        state["fill_report"] = None
+        return state
+
+    def _formfiller_execute(self, state: LoopState) -> LoopState:
+        fill_report = self.formfiller.execute(
+            state["job"], state["current_page"].stageId, state["assignment"]
+        )
+        state["fill_report"] = fill_report
+        state["last_assignment"] = state["assignment"]
+        if not fill_report.ok:
+            logger.error(
+                "[%s] fill failed (%s), stopping walk",
+                state["job"],
+                fill_report.errorClass,
             )
+        return state
 
-            # Step 2: Check if we're done (submit or stop)
-            if assignment.type in ("submit", "stop"):
-                # Form is complete or blocked
-                break
-
-            # Step 3: FormFiller executes the assignment
-            fill_report = self.formfiller.execute(job, current_page.stageId, assignment)
-
-            # Step 4: Check if FormFiller succeeded
-            if not fill_report.ok:
-                # FormFiller failed, stop here
-                break
-
-            # Step 5: Scraper reads the page again (to see what changed)
-            # TODO (v1): integrate with actual Scraper
-            next_page = self._get_next_page_state(job, current_page, fill_report)
-
-            # Step 6: Loop compares pages to build Diff
-            diff = self._compare_pages(current_page, next_page)
-
-            # Step 7: Frontier reacts to the diff
-            board, action = self.frontier.on_diff(job, diff, assignment, board)
-
-            # Step 8: Check if Frontier returned a WalkSlice (walk complete)
-            if isinstance(action, list):
-                # Walk is complete, return the slice
-                return action
-
-            # Step 9: Update current page for next iteration
-            current_page = next_page
-
-        # Return empty slice if we stopped before completing
-        return []
-
-    def _get_next_page_state(
-        self, job: str, current_page: PageDescription, fill_report: Any
-    ) -> PageDescription:
-        """
-        Get the page state after FormFiller executes.
-
-        TODO (v1): Call actual Scraper to re-read the page.
-        For now, this is a placeholder.
-        """
-        # In a real system: return self.scraper.read_page(job)
-        # For now, assume FormFiller returns it or we use a mock
-        return current_page
-
-    def _compare_pages(
-        self, page_before: PageDescription, page_after: PageDescription
-    ) -> Diff:
-        """
-        Compare two pages to see what changed.
-
-        TODO (v1): Real diff logic (compare controls, detect added/removed/changed).
-        For now, simple heuristic: more controls = +ve, same = -ve.
-        """
-        if len(page_after.controls) > len(page_before.controls):
-            return Diff(polarity="+ve")
-        return Diff(polarity="-ve")
+    def _rescrape(self, state: LoopState) -> LoopState:
+        page, diff = self.scraper.look(
+            state["job"],
+            "post_fill",
+            state["last_assignment"],
+            state["fill_report"],
+        )
+        state["current_page"] = page
+        state["diff"] = diff
+        return state

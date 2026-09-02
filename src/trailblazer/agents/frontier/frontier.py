@@ -1,103 +1,266 @@
 """
-Frontier agent: decision maker for form-filling strategy.
+Frontier agent: decides the single next action in a form walk.
 
-Frontier maintains the "board" (state of gates, what's been walked, what's pending)
-and decides ONE action at a time. It communicates only with Loop.
+Frontier explores EVERY control on a page, one at a time, in page order. It does
+not try to guess in advance which controls branch. A control turns out to be a
+chooser either because Scraper reported its options or because FormFiller
+discovered them while filling it — and either way, every option gets walked
+before Frontier moves to the next control.
 
+Fully deterministic: no LLM. The only judgment call is what value to type into a
+plain field, and that's injected (`value_provider`), so an LLM-backed picker can
+replace it without touching the graph.
 
+State lives HERE. Frontier is the only agent that needs the board, so Loop
+doesn't pass it in or out — Loop just calls on_page() and gets one Assignment
+(or, when the walk is over, the WalkSlice).
 
+Implemented as a LangGraph StateGraph:
 
-Frontier is stateless across invocations (it receives board state from Loop).
-Loop persists the board and orchestrates all agent calls.
+    absorb_feedback -> sync_controls -> select_control --+- "act" -> emit_assignment -> END
+                                                        |
+                                                        +- "done" -> finish_page -> END
 """
 
-from trailblazer.agents.frontier.board import FrontierBoardState
+import logging
+from typing import TypedDict
+
+from langgraph.graph import END, StateGraph
+
+from trailblazer.agents.frontier.board import FrontierBoardState, ValueProvider
 from trailblazer.contracts import (
     Assignment,
+    ControlState,
     Diff,
-    FrontierBoard,
+    FillReport,
     PageDescription,
+    SimpleAssignment,
+    Walk,
     WalkSlice,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class FrontierState(TypedDict):
+    """
+    Per-invocation transport for the graph.
+
+    The durable board is NOT in here — it lives on FrontierAgent.state and the
+    nodes mutate it directly. This dict only carries what this one call is about
+    (the page, and any feedback from the last action) plus the outcome.
+    """
+
+    job: str
+    page: PageDescription
+    diff: Diff | None
+    fill_report: FillReport | None
+    last_assignment: Assignment | None
+    target: ControlState | None
+    outcome: Assignment | Walk | None
 
 
 class FrontierAgent:
     """
-    Frontier: decides what to do next in a form fill.
+    Frontier: decides what to do next in a form walk.
 
-    Frontier is called by Loop at two points:
-    1. When a new page is discovered (on_page_description)
-    2. When the page has been acted upon and changed/settled (on_diff)
-
-    Each call is stateless — the board state comes from Loop, gets updated,
-    and returned to Loop for persistence.
+    Loop calls on_page() every time it has a fresh PageDescription, passing along
+    the Diff and FillReport from the last action (both None on the first call).
+    Frontier returns either one Assignment for FormFiller, or the finished
+    Walk (one replayable path per branch) when the whole form has been walked.
+    
     """
 
-    def __init__(self) -> None:
-        self.state = FrontierBoardState()
+    def __init__(self, value_provider: ValueProvider | None = None) -> None:
+        self.state = FrontierBoardState(value_provider=value_provider)
+        self._last_assignment: Assignment | None = None
+        self.graph = self._build_graph()
 
-    def on_page_description(
-        self, job: str, page: PageDescription, board: FrontierBoard | None = None
-    ) -> tuple[FrontierBoard, Assignment]:
+    # ------------------------------------------------------------------
+    # Public entry point (the only one)
+    # ------------------------------------------------------------------
+
+    def on_page(
+        self,
+        job: str,
+        page: PageDescription,
+        diff: Diff | None = None,
+        fill_report: FillReport | None = None,
+    ) -> Assignment | Walk:
         """
-        Loop calls this when Scraper returns a new page.
-        "Here's what's on the page now. What should we do?"
+        "Here's the page as it is now, and here's what happened last time."
 
         Args:
         - job: job ID (for logging)
-        - page: PageDescription from Scraper
-        - board: existing board state (if any). If None, initialize new board.
+        - page: fresh PageDescription from Scraper
+        - diff: what changed since the last look (None on the first call)
+        - fill_report: what FormFiller did and discovered (None on the first call)
 
         Returns:
-        - (updated_board, assignment): the board state and one action for FormFiller
+        - Assignment: the one thing FormFiller should do next, or
+        - Walk: one replayable WalkPath per branch, when the walk is complete
         """
-        # Initialize or restore board state
-        if board is None:
-            self.state.board = FrontierBoard(currentStageId=page.stageId, status="exploring")
-        else:
-            self.state.board = board
+        initial: FrontierState = {
+            "job": job,
+            "page": page,
+            "diff": diff,
+            "fill_report": fill_report,
+            "last_assignment": self._last_assignment,
+            "target": None,
+            "outcome": None,
+        }
+        final = self.graph.invoke(initial)
+        outcome = final["outcome"]
 
-        # Identify gates on this page
-        gates = self.state.identify_gates(page)
-        if not self.state.board.gates:
-            self.state.board.gates = gates
+        # Remember what we just asked for, so the next call can attribute the
+        # FillReport to the right control without Loop having to echo it back.
+        self._last_assignment = None if isinstance(outcome, Walk) else outcome
+        return outcome
 
-        # Update current stage
+    @property
+    def board(self):
+        """The current board. Read-only view for logging/debugging."""
+        return self.state.board
+
+    @property
+    def walk_log(self) -> WalkSlice:
+        """
+        Every landed step in observed order, branches interleaved.
+
+        For logging and assertions. NOT replayable — a chooser's options are
+        walked in place, so this holds all of them. Use the returned Walk for
+        replayable per-branch paths.
+        """
+        return self.state.walk_log
+
+    # ------------------------------------------------------------------
+    # Graph construction
+    # ------------------------------------------------------------------
+
+    def _build_graph(self):
+        graph = StateGraph(FrontierState)
+
+        graph.add_node("absorb_feedback", self._absorb_feedback)
+        graph.add_node("sync_controls", self._sync_controls)
+        graph.add_node("select_control", self._select_control)
+        graph.add_node("emit_assignment", self._emit_assignment)
+        graph.add_node("finish_page", self._finish_page)
+
+        graph.set_entry_point("absorb_feedback")
+        graph.add_edge("absorb_feedback", "sync_controls")
+        graph.add_edge("sync_controls", "select_control")
+
+        # The one real branch: is there still a control to work on?
+        graph.add_conditional_edges(
+            "select_control",
+            lambda s: "act" if s["target"] is not None or s["page"].blockers else "done",
+            {"act": "emit_assignment", "done": "finish_page"},
+        )
+        graph.add_edge("emit_assignment", END)
+        graph.add_edge("finish_page", END)
+
+        return graph.compile()
+
+    # ------------------------------------------------------------------
+    # Nodes (thin wrappers over board.py logic)
+    # ------------------------------------------------------------------
+
+    def _absorb_feedback(self, state: FrontierState) -> FrontierState:
+        """Fold the last action's results into the board."""
+        report = state["fill_report"]
+        if report is not None:
+            self.state.absorb_fill_report(report, state["last_assignment"])
+
+        diff = state["diff"]
+        if diff is not None:
+            logger.info(
+                "[%s] diff %s (+%d/-%d controls)",
+                state["job"],
+                diff.polarity,
+                len(diff.addedControls),
+                len(diff.removedControls),
+            )
+
+        self.state.board.status = "exploring"
+        return state
+
+    def _sync_controls(self, state: FrontierState) -> FrontierState:
+        """Track new controls (including ones just revealed) and any new options."""
+        page = state["page"]
         self.state.board.currentStageId = page.stageId
+        self.state.sync_controls(page)
+        return state
 
-        # Decide next action
-        assignment = self.state.next_assignment_for_page(page)
+    def _select_control(self, state: FrontierState) -> FrontierState:
+        """Choose the one control to work on, or nothing if the page is done."""
+        page = state["page"]
+        if page.blockers:
+            self.state.board.status = "blocked"
+            state["target"] = None
+            logger.warning("[%s] page blocked: %s", state["job"], page.blockers)
+            return state
 
-        return (self.state.board, assignment)
+        state["target"] = self.state.select_control(page)
+        return state
 
-    def on_diff(
-        self, job: str, diff: Diff, last_assignment: Assignment, board: FrontierBoard
-    ) -> tuple[FrontierBoard, Assignment | WalkSlice]:
+    def _emit_assignment(self, state: FrontierState) -> FrontierState:
+        """One control -> one Assignment."""
+        if self.state.board.status == "blocked":
+            state["outcome"] = SimpleAssignment(type="stop")
+            return state
+
+        target = state["target"]
+        assignment = self.state.assignment_for(target)
+        self.state.board.status = "awaiting_fill"
+        logger.info(
+            "[%s] %s -> %s", state["job"], target.fieldId, assignment.model_dump()
+        )
+        state["outcome"] = assignment
+        return state
+
+    def _finish_page(self, state: FrontierState) -> FrontierState:
         """
-        Loop calls this after FormFiller executes and page is compared.
-        "The page changed (or didn't). Now what?"
+        Every control on this page is explored. Advance, or publish the walk.
 
-        Args:
-        - job: job ID
-        - diff: what changed on the page
-        - last_assignment: what FormFiller just executed
-        - board: current board state
+        Three cases:
+        - There's a Next button we haven't clicked yet -> click it.
+        - We already clicked Next here and we're STILL on this stage -> the click
+          didn't navigate (validation held us, or it wasn't really a Next). The
+          page has settled, which per the contract means the walk is done. Publish
+          rather than clicking Next forever.
+        - No Next button -> that was the last page. Publish.
 
-        Returns:
-        - (updated_board, action): either next Assignment or WalkSlice if complete
+        Publishing means reconstructing one replayable path per branch out of
+        the single in-place action log. See board.build_walk().
         """
-        # Restore board state
-        self.state.board = board
+        page = state["page"]
 
-        # React to diff
-        is_walk_complete = self.state.apply_diff(diff, last_assignment)
+        if page.next and not self.state.already_tried_to_advance(page.stageId):
+            self.state.note_advance_attempt(page.stageId, page.next)
+            self.state.board.status = "advancing"
+            logger.info("[%s] %s fully explored -> next", state["job"], page.stageId)
+            state["outcome"] = SimpleAssignment(type="next")
+            return state
 
-        # If walk is complete, return slice; otherwise return next assignment
-        if is_walk_complete:
-            walk_slice = self.state._build_walk_slice(last_assignment)
-            return (self.state.board, walk_slice)
+        if page.next:
+            # Clicked Next, went nowhere. Take the click back out of the walk log
+            # so the slice only contains actions that actually landed.
+            self.state.discard_unlanded_navigation()
+            self.state.board.status = "slice_stable"
+            logger.warning(
+                "[%s] still on %s after clicking next; walk settled",
+                state["job"],
+                page.stageId,
+            )
         else:
-            # Walk still in progress, need to fetch the new page and decide next action
-            # Loop will call on_page_description() with the updated page
-            # For now, return a placeholder assignment
-            return (self.state.board, last_assignment)
+            self.state.board.status = "complete"
+
+        walk = self.state.build_walk()
+        logger.info(
+            "[%s] walk finished: %d actions -> %d replayable paths",
+            state["job"],
+            len(self.state.action_log),
+            len(walk.paths),
+        )
+        state["outcome"] = walk
+        return state
