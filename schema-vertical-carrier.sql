@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- Verticals (business categories with embeddings)
 CREATE TABLE IF NOT EXISTS verticals (
   id SERIAL PRIMARY KEY,

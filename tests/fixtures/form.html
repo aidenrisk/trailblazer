@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Business Info</title></head>
+<body>
+<h1>Business Info</h1>
+<form id="app-form">
+
+  <!-- plain text input, label associated with `for` -->
+  <label for="legalName">Legal Business Name</label>
+  <input type="text" id="legalName" name="legalName">
+
+  <!-- required by asterisk convention only: no `required` attribute -->
+  <label for="fein">FEIN *</label>
+  <input type="text" id="fein" name="fein">
+
+  <!-- native select whose options are in the DOM; the gate -->
+  <label for="entityType">Entity Type</label>
+  <select id="entityType" name="entityType">
+    <option value="">Select...</option>
+    <option value="sole">Sole Proprietor</option>
+    <option value="llc">Limited Liability Company</option>
+    <option value="corp">Corporation</option>
+  </select>
+
+  <!-- revealed when entityType === llc -->
+  <div id="membersRow" style="display:none">
+    <label for="members">Members</label>
+    <input type="text" id="members" name="members">
+  </div>
+
+  <label for="effectiveDate">Effective Date</label>
+  <input type="date" id="effectiveDate" name="effectiveDate" required>
+
+  <label for="employeeCount">Employee Count</label>
+  <input type="number" id="employeeCount" name="employeeCount">
+
+  <label>
+    <input type="checkbox" id="priorCoverage" name="priorCoverage">
+    Has Prior Coverage
+  </label>
+
+  <!-- custom widget: no id, choices live nowhere until clicked -->
+  <div>
+    <span id="agencyLabel">Agency / Program</span>
+    <div role="combobox" aria-labelledby="agencyLabel" data-testid="agency-program"
+         aria-expanded="false" tabindex="0">Choose an agency</div>
+  </div>
+
+  <button type="button" id="next-btn">Next</button>
+</form>
+
+<script>
+  // The reveal gate: selecting LLC mounts the Members field.
+  document.getElementById('entityType').addEventListener('change', function (e) {
+    document.getElementById('membersRow').style.display =
+      e.target.value === 'llc' ? 'block' : 'none';
+  });
+</script>
+</body>
+</html>
