@@ -151,6 +151,12 @@ class SimpleAssignment(BaseModel):
 
     type: Literal["next", "back", "submit", "stop"]
     reason: Literal["auth", "blocked"] | None = None
+    locator: str | None = None
+    """The control to click for next/back/submit, from the page's own `next`/`back`.
+
+    MASTER.md: an Assignment includes its locator. Frontier copies it from the
+    PageDescription so FormFiller never has to re-derive which button is Next.
+    """
 
 
 class LastPageProbeAssignment(BaseModel):

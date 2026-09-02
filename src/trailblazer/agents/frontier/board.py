@@ -296,6 +296,7 @@ class FrontierBoardState:
             entry = self._entry_at(last_assignment.locator, last_assignment.fieldId)
             if entry is None:
                 return
+            self._log_overlay_clicks(report, entry)
 
             if last_assignment.credentialKey is not None:
                 # A credential is filled once, from the store. Whatever FormFiller
@@ -330,6 +331,7 @@ class FrontierBoardState:
             entry = self._entry_at(last_assignment.controlLocator, last_assignment.fieldId)
             if entry is None:
                 return
+            self._log_overlay_clicks(report, entry)
             self._walk_option(entry, last_assignment.option)
             if is_login_stage(entry.stageId):
                 # One choice, never a walk: the email channel was picked so the
@@ -643,6 +645,25 @@ class FrontierBoardState:
 
         if not entry.pending:
             entry.explored = True
+
+    def _log_overlay_clicks(self, report: FillReport, entry: ControlState) -> None:
+        """
+        Record the clicks FormFiller had to make before it could act: a consent
+        banner dismissed, an interstitial closed. They carry no fieldId. A replay
+        that does not know about the banner fails, because the overlay keeps the
+        submit button disabled or intercepts the click, so they belong in the walk
+        exactly where they happened.
+        """
+        login = is_login_stage(entry.stageId)
+        for step in report.steps:
+            if step.fieldId is None and step.action == "click":
+                self.action_log.append(
+                    LoggedAction(
+                        step=WalkStep(action="click", locator=step.locator),
+                        requires=None if login else self._requires_of(entry),
+                        phase="login" if login else "form",
+                    )
+                )
 
     def _log_fill(
         self, entry: ControlState, value: str | None, credential_key: str | None = None

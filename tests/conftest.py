@@ -1,4 +1,4 @@
-"""Two tiny servers the browser-toolkit tests share.
+"""Two tiny servers the browser-level tests share.
 
 `fixture_server` serves the stand-in pages from tests/pages.py over HTTP, written
 to a temp directory for the session, so pages have a real origin (localStorage
@@ -22,6 +22,10 @@ class _Quiet(SimpleHTTPRequestHandler):
         pass
 
 
+SERVED_DIRS: dict[str, str] = {}
+"""base URL -> the directory it serves, so a test can add a page beside the stand-ins."""
+
+
 @pytest.fixture(scope="session")
 def fixture_server(tmp_path_factory):
     """Base URL of an HTTP server rooted at a temp dir holding the stand-in pages."""
@@ -29,7 +33,9 @@ def fixture_server(tmp_path_factory):
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_Quiet, directory=str(pages)))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    SERVED_DIRS[url] = str(pages)
+    yield url
     server.shutdown()
 
 

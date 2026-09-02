@@ -108,5 +108,18 @@ No API key and no database required: the tests cover extraction, the contract va
 the diff, `finalize()`, the locator restoration that overrules the model, cost parsing from
 constructed provider responses, the endpoint with the crawl patched out, the Frontier walk
 end to end through the Loop against stub agents, credential resolution against an injected
-row, and encryption against a vector produced by Roadrunner's `crypto.js`. The live LLM call
-is the only thing not exercised.
+row, encryption against a vector produced by Roadrunner's `crypto.js`, the MFA toolkit
+against a scripted inbox, and the chain logging into a stand-in portal with the Scraper's
+model replaced by a payload echo and a test-only login executor in the FormFiller's slot
+(that agent is not built yet). The live LLM call is the only thing not exercised. The per-carrier login lock tests run when the project Postgres is up and skip
+otherwise. The repository carries no synthetic web pages: the stand-in portal pages live as
+strings in `tests/pages.py` and are written to a temp directory at run time.
+
+Two opt-in tests hit real systems and skip by default:
+
+```bash
+# the shared backend inbox, read-only (never consumes a code); a 204 is a pass
+TRAILBLAZER_LIVE=1 TRAILBLAZER_LIVE_CARRIER=thimble uv run pytest tests/live/test_inbox_live.py -v
+# log into a real carrier registered in the database; costs one code on some portals
+TRAILBLAZER_LIVE_LOGIN=1 TRAILBLAZER_LIVE_CARRIER=thimble HEADED=true uv run pytest tests/live/test_login_live.py -v -s
+```

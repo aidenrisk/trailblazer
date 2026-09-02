@@ -31,10 +31,51 @@ LOGIN = """<!doctype html>
   </label>
   <button type="submit" name="action" value="default" hidden>Sign in</button>
   <button type="submit" name="action" value="default" id="submit-visible">Sign in</button>
+  <p id="login-error" hidden>We could not sign you in. Check your email and password.</p>
 </form>
+<script>
+  // The portal's side of the sign-in: one good pair of credentials moves on to
+  // the code screen; anything else stays here with an error.
+  document.getElementById('login-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var u = document.getElementById('username').value;
+    var p = document.getElementById('password').value;
+    if (u === 'agent@example.com' && p === 'pw-1') {
+      window.location.href = 'otp.html';
+    } else {
+      document.getElementById('login-error').hidden = false;
+    }
+  });
+</script>
 </body>
 </html>
 """
+
+# The sign-in page under a consent banner that keeps the submit button disabled
+# until it is answered. "Reject all" is the privacy-preserving choice and the one
+# FormFiller must pick; "Accept all" is the one a lazy replay would take.
+LOGIN_CONSENT = LOGIN.replace(
+    '<h1>Welcome to the Agent Portal</h1>',
+    '''<h1>Welcome to the Agent Portal</h1>
+<div id="cookie-banner" role="dialog" aria-modal="true" class="cookie-consent">
+  <p>We use cookies to improve your experience.</p>
+  <button type="button" id="accept-all">Accept all</button>
+  <button type="button" id="reject-all">Reject all</button>
+</div>''',
+).replace(
+    'id="submit-visible">Sign in</button>',
+    'id="submit-visible" disabled>Sign in</button>',
+).replace(
+    "<script>",
+    """<script>
+  for (var id of ['accept-all', 'reject-all']) {
+    document.getElementById(id).addEventListener('click', function () {
+      document.getElementById('cookie-banner').remove();
+      document.getElementById('submit-visible').disabled = false;
+      document.body.dataset.consent = this.id;
+    });
+  }""",
+)
 
 OTP = """<!doctype html>
 <html lang="en">
@@ -122,6 +163,7 @@ SESSION = """<!doctype html>
 
 PAGES = {
     "login.html": LOGIN,
+    "login-consent.html": LOGIN_CONSENT,
     "otp.html": OTP,
     "otp-digits.html": OTP_DIGITS,
     "dashboard.html": DASHBOARD,

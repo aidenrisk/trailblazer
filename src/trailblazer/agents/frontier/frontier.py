@@ -262,7 +262,7 @@ class FrontierAgent:
             self.state.note_advance_attempt(page.stageId, page.next, page)
             self.state.board.status = "advancing"
             logger.info("[%s] %s fully explored -> next", state["job"], page.stageId)
-            state["outcome"] = SimpleAssignment(type="next")
+            state["outcome"] = SimpleAssignment(type="next", locator=page.next)
             return state
 
         if page.next:
