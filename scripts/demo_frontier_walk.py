@@ -16,6 +16,7 @@ Scenarios:
     basic    Name / Gender / Email — three fields, nothing else
     simple   the above plus a Yes/Maybe control, a second page, a revealed field
     pie      (default) the real live Pie Insurance business-info scrape
+    login    sign-in, email-channel choice, one-time code, then a form page
 
 Every run also writes the full trace to logs/<scenario>-<timestamp>.log.
 """
@@ -35,7 +36,11 @@ from trailblazer.agents.scraper.stub import StubScraper
 from trailblazer.contracts import Control, Option, PageDescription
 from trailblazer.loop.orchestrator import Loop
 from tests.agents.frontier.frontier_test_data import (
+    FORM_AFTER_LOGIN,
     GENDER_OPTIONS,
+    LOGIN_CHANNEL_PAGE,
+    LOGIN_OTP_PAGE,
+    LOGIN_PAGE,
     PAGE_1_BUSINESS_INFO,
     PAGE_NAME_GENDER_EMAIL,
     PAGE_SIMPLE,
@@ -241,10 +246,22 @@ def basic_scenario(with_reveal: bool):
     return pages, discoverable, {}, None
 
 
+def login_scenario(with_reveal: bool):
+    """Login is page 1: sign in, pick the email channel, clear the code, then the form."""
+    pages = [
+        PageDescription(**LOGIN_PAGE),
+        PageDescription(**LOGIN_CHANNEL_PAGE),
+        PageDescription(**LOGIN_OTP_PAGE),
+        PageDescription(**FORM_AFTER_LOGIN),
+    ]
+    return pages, {}, {}, None
+
+
 SCENARIOS = {
     "basic": basic_scenario,
     "simple": simple_scenario,
     "pie": pie_scenario,
+    "login": login_scenario,
 }
 
 
@@ -296,6 +313,21 @@ def main() -> None:
     walk = loop.fill_form("job_demo", pages[0])
 
     log_contract("Frontier -> ReplayGen: Walk", walk)
+
+    if walk.login:
+        log.info("")
+        log.info("=" * 78)
+        log.info("  LOGIN PREFIX - %d steps, published per carrier, never a branch", len(walk.login))
+        log.info("=" * 78)
+        for i, step in enumerate(walk.login, 1):
+            log.info(
+                "  %2d. %-7s %-10s %-44s %s",
+                i,
+                step.action,
+                step.fieldId or "-",
+                step.locator,
+                step.credentialKey or step.option or step.value or "",
+            )
 
     # ---- summary -----------------------------------------------------------
     observed = frontier.walk_log

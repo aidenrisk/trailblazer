@@ -342,3 +342,234 @@ PIE_REVEALED_LOCATION_COUNT = {
     "unique": True,
     "revealedBy": {"fieldId": "q_009", "equals": "Yes"},
 }
+
+
+# ---------------------------------------------------------------------------
+# Login pages. Login is page 1 of the same chain (MASTER.md), so the walk starts
+# on a `login_*` stage. The Scraper marks credential controls with `credential`;
+# Frontier fills those from the store by key and leaves everything else on the
+# page alone. FieldIds are unique across pages here, as in the fixtures above.
+# ---------------------------------------------------------------------------
+
+# One-page sign-in: username, password, a "remember me" toggle Frontier must not
+# touch, and a Sign in button as `next`.
+LOGIN_PAGE = {
+    "stageId": "login_sign_in",
+    "url": "https://portal.example.test/login",
+    "controls": [
+        {
+            "fieldId": "q_user",
+            "label": "Email address",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#username",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "username",
+        },
+        {
+            "fieldId": "q_pass",
+            "label": "Password",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#password",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "password",
+        },
+        {
+            "fieldId": "q_remember",
+            "label": "Remember me",
+            "type": "toggle",
+            "required": False,
+            "options": None,
+            "locator": "#remember",
+            "unique": True,
+            "revealedBy": None,
+        },
+    ],
+    "next": 'button:has-text("Sign in")',
+    "back": None,
+    "candidateGates": [],
+    "blockers": [],
+}
+
+# The delivery-choice screen some identity providers show before the code:
+# "how should we send it?" Frontier must pick Email once and never try the
+# text-message option, because the inbox it reads only ever sees email.
+LOGIN_CHANNEL_PAGE = {
+    "stageId": "login_verify_method",
+    "url": "https://portal.example.test/mfa/choose",
+    "controls": [
+        {
+            "fieldId": "q_channel",
+            "label": "How would you like to receive your code?",
+            "type": "select",
+            "required": True,
+            "options": [
+                {"label": "Text message (SMS)", "locator": "#channel-sms"},
+                {"label": "Email", "locator": "#channel-email"},
+            ],
+            "locator": "#channel",
+            "unique": True,
+            "revealedBy": None,
+        },
+    ],
+    "next": 'button:has-text("Send code")',
+    "back": None,
+    "candidateGates": ["q_channel"],
+    "blockers": [],
+}
+
+# The one-time-code page. `credential: otp` is filled with LOGIN_OTP; the
+# "Resend code" chooser is not something to explore.
+LOGIN_OTP_PAGE = {
+    "stageId": "login_verify_code",
+    "url": "https://portal.example.test/mfa/code",
+    "controls": [
+        {
+            "fieldId": "q_code",
+            "label": "Verification code",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#code",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "otp",
+        },
+        {
+            "fieldId": "q_resend",
+            "label": "Didn't get it?",
+            "type": "select",
+            "required": False,
+            "options": [{"label": "Resend code", "locator": "#resend"}],
+            "locator": "#resend-group",
+            "unique": True,
+            "revealedBy": None,
+        },
+    ],
+    "next": 'button:has-text("Verify")',
+    "back": None,
+    "candidateGates": ["q_resend"],
+    "blockers": [],
+}
+
+# Two-step sign-in on ONE stage name: the username page, then a password field
+# appears on the same URL. Not a rejection -- the credential controls changed.
+LOGIN_STEP_USERNAME = {
+    "stageId": "login_sign_in",
+    "url": "https://idp.example.test/u/login",
+    "controls": [
+        {
+            "fieldId": "q_user_a",
+            "label": "Username",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#signInName",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "username",
+        },
+    ],
+    "next": 'button:has-text("Continue")',
+    "back": None,
+    "candidateGates": [],
+    "blockers": [],
+}
+
+LOGIN_STEP_PASSWORD = {
+    "stageId": "login_sign_in",
+    "url": "https://idp.example.test/u/login",
+    "controls": [
+        {
+            "fieldId": "q_pass_a",
+            "label": "Password",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#password",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "password",
+        },
+    ],
+    "next": 'button:has-text("Continue")',
+    "back": None,
+    "candidateGates": [],
+    "blockers": [],
+}
+
+# A second host that asks the agency to sign in again after the first portal
+# hands off to it (Chubb's chubbaccess -> Marketplace, CoverForce).
+LOGIN_SECOND_HOST = {
+    "stageId": "login_marketplace",
+    "url": "https://marketplace.example.test/signin",
+    "controls": [
+        {
+            "fieldId": "q_user_b",
+            "label": "Agent ID",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#agentId",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "username",
+        },
+        {
+            "fieldId": "q_pass_b",
+            "label": "Password",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#pwd",
+            "unique": True,
+            "revealedBy": None,
+            "credential": "password",
+        },
+    ],
+    "next": 'button:has-text("Log in")',
+    "back": None,
+    "candidateGates": [],
+    "blockers": [],
+}
+
+# The first form page after login: one plain field and a two-option chooser, so
+# a test can see that the login prefix is split out and does not multiply paths.
+FORM_AFTER_LOGIN = {
+    "stageId": "form_page_1_business_info",
+    "url": "https://portal.example.test/app/business-info",
+    "controls": [
+        {
+            "fieldId": "q_name",
+            "label": "Legal Business Name",
+            "type": "text",
+            "required": True,
+            "options": None,
+            "locator": "#businessName",
+            "unique": True,
+            "revealedBy": None,
+        },
+        {
+            "fieldId": "q_entity",
+            "label": "Entity Type",
+            "type": "select",
+            "required": True,
+            "options": [
+                {"label": "LLC", "locator": "#entity-llc"},
+                {"label": "Corporation", "locator": "#entity-corp"},
+            ],
+            "locator": "#entityType",
+            "unique": True,
+            "revealedBy": None,
+        },
+    ],
+    "next": None,
+    "back": None,
+    "candidateGates": ["q_entity"],
+    "blockers": [],
+}

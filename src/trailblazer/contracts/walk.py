@@ -142,9 +142,15 @@ class SimpleAssignment(BaseModel):
     - "back": undo the last choice, click Back
     - "submit": submit the form (no Next button, this is the last action)
     - "stop": stop here (form complete, blocked, or error)
+
+    `reason` says why a stop happened, in the same vocabulary as
+    `FillReport.errorClass`: `auth` when the portal rejected the login (the
+    login page came back unchanged after Next), `blocked` when the page carries
+    a blocker. Loop reports it; nothing routes on it.
     """
 
     type: Literal["next", "back", "submit", "stop"]
+    reason: Literal["auth", "blocked"] | None = None
 
 
 class LastPageProbeAssignment(BaseModel):
@@ -284,10 +290,11 @@ class Walk(BaseModel):
     gates": a baseline path taking each chooser's first option, plus one variant
     per remaining option.
 
-    `login` is the prefix captured on `login_*` stages: unconditional steps that
-    every path starts with, split out so they can be published per carrier while
-    the form paths stay per (line, business type). Empty when the walk started
-    from an already-authenticated tab.
+    `login` is the prefix captured on `login_*` stages: the unconditional steps
+    that get the tab authenticated, split out so they can be published per
+    carrier while the form paths stay per (line, business type). The paths do
+    NOT repeat them; a replay runs `login` first, then one path. Empty when the
+    walk started from an already-authenticated tab.
     """
 
     login: WalkSlice = Field(default_factory=list)

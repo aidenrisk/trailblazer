@@ -13,11 +13,15 @@ walked before Frontier moves on.
 """
 
 import logging
-from typing import Callable
+import re
+from typing import Callable, Literal
 
 from pydantic import BaseModel
 
 from trailblazer.contracts import (
+    LOGIN_EMAIL,
+    LOGIN_OTP,
+    LOGIN_PASSWORD,
     Assignment,
     Control,
     ControlState,
@@ -33,10 +37,24 @@ from trailblazer.contracts import (
     WalkSlice,
     WalkStep,
 )
+from trailblazer.contracts.page_description import is_login_stage
 
 logger = logging.getLogger(__name__)
 
 ValueProvider = Callable[[Control | ControlState], str]
+
+# Which credential fills which kind of login control. Frontier only ever names the
+# key; FormFiller resolves it, so no secret passes through the board.
+CREDENTIAL_KEY_FOR = {"username": LOGIN_EMAIL, "password": LOGIN_PASSWORD, "otp": LOGIN_OTP}
+
+# The one option Frontier will pick on a login page: the email delivery channel
+# for a one-time code, because email is the only channel the shared inbox reads.
+_EMAIL_OPTION = re.compile(r"\be-?mail\b", re.IGNORECASE)
+
+
+def email_option(options: list[Option]) -> Option | None:
+    """The option that routes a one-time code to email, if the chooser offers one."""
+    return next((o for o in options if _EMAIL_OPTION.search(o.label)), None)
 
 
 def synthetic_value(control: Control | ControlState) -> str:
@@ -88,11 +106,15 @@ class LoggedAction(BaseModel):
     - choiceFor: fieldId, if this step IS an option choice for that control
     - requires: the gate condition this step depends on. A field revealed by
                 q_gender == "Female" belongs only to the Female path.
+    - phase: "login" for a step taken on a login_* stage. Login steps are
+             unconditional and never branch, so build_walk() lifts them out into
+             Walk.login instead of threading them through every path.
     """
 
     step: WalkStep
     choiceFor: str | None = None
     requires: RevealedBy | None = None
+    phase: Literal["login", "form"] = "form"
 
 
 class FrontierBoardState:
@@ -119,6 +141,11 @@ class FrontierBoardState:
         # already tried to leave, the click didn't navigate — see
         # note_advance_attempt().
         self.advanced_from: set[str] = set()
+        # For a login stage, WHICH credential controls were on the page when Next
+        # was clicked. The same stage coming back with the same credentials means
+        # the portal rejected them; coming back with different ones (a password
+        # field appearing after the username) means the login moved on.
+        self.login_signatures: dict[str, frozenset] = {}
         self.value_provider: ValueProvider = value_provider or synthetic_value
 
     @property
@@ -179,7 +206,10 @@ class FrontierBoardState:
                     # Carried through so an action on this control can be
                     # attributed to the branch that revealed it.
                     revealedBy=control.revealedBy,
+                    credential=control.credential,
                 )
+                if is_login_stage(page.stageId):
+                    self._apply_login_policy(entry)
                 self.board.controls.append(entry)
                 added.append(entry)
                 continue
@@ -188,6 +218,8 @@ class FrontierBoardState:
             entry = self._entry(control.fieldId)
             if entry is not None and entry.options is None and control.options is not None:
                 self._set_options(entry, control.options, chosen=None)
+                if is_login_stage(entry.stageId):
+                    self._apply_login_policy(entry)
                 logger.info(
                     "Scraper reported options for %s: %s",
                     entry.fieldId,
@@ -230,7 +262,14 @@ class FrontierBoardState:
             if entry is None:
                 return
 
-            if report.discoveredOptions is not None:
+            if last_assignment.credentialKey is not None:
+                # A credential is filled once, from the store. Whatever FormFiller
+                # saw while doing it (an autocomplete, a chooser) is not walked:
+                # there is nothing to explore about a password field.
+                entry.options = []
+                entry.explored = True
+                self._log_fill(entry, None, credential_key=last_assignment.credentialKey)
+            elif report.discoveredOptions is not None:
                 # The surprise case: what looked like a plain field is a chooser.
                 self._set_options(
                     entry, report.discoveredOptions, chosen=report.chosenOption
@@ -255,6 +294,12 @@ class FrontierBoardState:
             if entry is None:
                 return
             self._walk_option(entry, last_assignment.option)
+            if is_login_stage(entry.stageId):
+                # One choice, never a walk: the email channel was picked so the
+                # code lands where the inbox can read it. The SMS option is not
+                # a branch of the form; trying it would burn a code we cannot see.
+                entry.pending = []
+                entry.explored = True
             self._log_choice(entry, last_assignment.option)
             logger.info(
                 "Walked %s=%s (%d pending, explored=%s)",
@@ -334,11 +379,20 @@ class FrontierBoardState:
         """
         Turn the selected control into exactly one Assignment.
 
+        - A credential control -> fill_field naming the credential, never a value.
         - Options known and some pending -> set_option for the next one.
         - Otherwise -> fill_field with a synthetic value. If the control turns
           out to be a chooser, FormFiller tells us and we come back here for
           each remaining option.
         """
+        if entry.credential is not None:
+            return FillFieldAssignment(
+                type="fill_field",
+                fieldId=entry.fieldId,
+                locator=entry.locator,
+                credentialKey=CREDENTIAL_KEY_FOR[entry.credential],
+            )
+
         if entry.pending:
             option = entry.pending[0]
             # The option's own locator is what FormFiller must act on: a native
@@ -361,7 +415,9 @@ class FrontierBoardState:
             value=self.value_provider(entry),
         )
 
-    def note_advance_attempt(self, stage_id: str, locator: str) -> None:
+    def note_advance_attempt(
+        self, stage_id: str, locator: str, page: PageDescription | None = None
+    ) -> None:
         """
         Record that we're clicking Next to leave this stage.
 
@@ -369,14 +425,83 @@ class FrontierBoardState:
         navigated until the next look. If it turns out it didn't,
         discard_unlanded_navigation() takes it back out — the walk slice is a
         record of what landed, not of what we attempted.
+
+        On a login stage the page is remembered too, so a return to the same
+        stage can be read: same credential controls means rejected, different
+        ones means the login moved to its next step.
         """
         self.advanced_from.add(stage_id)
+        login = is_login_stage(stage_id)
+        if login and page is not None:
+            self.login_signatures[stage_id] = self._login_signature(page)
         self.action_log.append(
-            LoggedAction(step=WalkStep(action="click", locator=locator))
+            LoggedAction(
+                step=WalkStep(action="click", locator=locator),
+                phase="login" if login else "form",
+            )
         )
 
     def already_tried_to_advance(self, stage_id: str) -> bool:
         return stage_id in self.advanced_from
+
+    # ------------------------------------------------------------------
+    # Login stages
+    # ------------------------------------------------------------------
+
+    def _apply_login_policy(self, entry: ControlState) -> None:
+        """
+        Decide, for one control on a login page, the only thing Frontier may do with it.
+
+        A login page is filled, not explored. Credential controls are filled from
+        the store (assignment_for names the key). A chooser that offers an email
+        channel gets that one option and nothing else. Everything else -- a
+        "remember me" toggle, a marketing field, a chooser with no email option,
+        a select whose options are unknown -- is left exactly as the portal
+        rendered it, because typing into it or walking it changes the login
+        rather than the form.
+        """
+        if entry.credential is not None:
+            entry.pending = []
+            entry.explored = False
+            return
+        email = email_option(entry.options) if entry.options else None
+        if email is not None and not entry.walked:
+            entry.pending = [email]
+            entry.explored = False
+            return
+        entry.pending = []
+        entry.explored = True
+
+    @staticmethod
+    def _login_signature(page: PageDescription) -> frozenset:
+        """Which credential controls a login page carries, by locator and kind."""
+        return frozenset((c.locator, c.credential) for c in page.controls if c.credential)
+
+    def login_rejected(self, page: PageDescription) -> bool:
+        """
+        Did the portal refuse the credentials?
+
+        True when Next was clicked on this login stage and the page has come back
+        with the same credential controls it had then: nothing moved, the login
+        was rejected. Frontier stops rather than clicking Next again -- every
+        retry on some portals costs a one-time code or a lockout counter.
+        """
+        if not is_login_stage(page.stageId) or page.stageId not in self.advanced_from:
+            return False
+        return self.login_signatures.get(page.stageId) == self._login_signature(page)
+
+    def login_can_advance_again(self, page: PageDescription) -> bool:
+        """
+        Is this a login stage that has moved on under the same name?
+
+        A portal that asks for the username, then reveals the password field on
+        the same URL, comes back as the same stage with a different credential
+        signature. That is progress, not a stuck click, so Next may be clicked
+        again once the new control is filled.
+        """
+        if not is_login_stage(page.stageId) or page.stageId not in self.advanced_from:
+            return False
+        return self.login_signatures.get(page.stageId) != self._login_signature(page)
 
     def discard_unlanded_navigation(self) -> None:
         """Drop a trailing navigation click that turned out not to navigate."""
@@ -443,7 +568,10 @@ class FrontierBoardState:
         if not entry.pending:
             entry.explored = True
 
-    def _log_fill(self, entry: ControlState, value: str) -> None:
+    def _log_fill(
+        self, entry: ControlState, value: str | None, credential_key: str | None = None
+    ) -> None:
+        login = is_login_stage(entry.stageId)
         self.action_log.append(
             LoggedAction(
                 step=WalkStep(
@@ -451,8 +579,11 @@ class FrontierBoardState:
                     fieldId=entry.fieldId,
                     locator=entry.locator,
                     value=value,
+                    credentialKey=credential_key,
                 ),
-                requires=entry.revealedBy,
+                # Login steps are unconditional: nothing on a login page is a branch.
+                requires=None if login else entry.revealedBy,
+                phase="login" if login else "form",
             )
         )
 
@@ -460,6 +591,7 @@ class FrontierBoardState:
         if label is None:
             return
         option = next((o for o in entry.walked if o.label == label), None)
+        login = is_login_stage(entry.stageId)
         self.action_log.append(
             LoggedAction(
                 step=WalkStep(
@@ -468,8 +600,11 @@ class FrontierBoardState:
                     locator=option.locator if option else entry.locator,
                     option=label,
                 ),
-                choiceFor=entry.fieldId,
-                requires=entry.revealedBy,
+                # The email-channel pick on a login page is not a chooser being
+                # walked, so it pins no branch and belongs to every path.
+                choiceFor=None if login else entry.fieldId,
+                requires=None if login else entry.revealedBy,
+                phase="login" if login else "form",
             )
         )
 
@@ -489,16 +624,26 @@ class FrontierBoardState:
         Each path keeps the actions that belong to it, in the order they were
         observed. Relative order is preserved, so every path is a subsequence of
         a real execution — never an invented ordering.
+
+        Steps taken on login stages are lifted out first, into Walk.login. They
+        never branch, every path would start with them, and they are published
+        per carrier rather than per form -- so the paths do not repeat them.
         """
+        login_steps = [e.step for e in self.action_log if e.phase == "login"]
+        form_steps = [e.step for e in self.action_log if e.phase == "form"]
+
         choosers = {
             c.fieldId: [o.label for o in c.walked]
             for c in self.board.controls
-            if c.walked
+            if c.walked and not is_login_stage(c.stageId)
         }
 
         if not choosers:
-            # Nothing branched: the log is already a single replayable path.
-            return Walk(paths=[WalkPath(choices={}, steps=self.walk_log)])
+            # Nothing branched: the log is already a single replayable path. A
+            # walk that never left the login has no form path at all.
+            if login_steps and not form_steps:
+                return Walk(login=login_steps, paths=[])
+            return Walk(login=login_steps, paths=[WalkPath(choices={}, steps=form_steps)])
 
         baseline = {field: labels[0] for field, labels in choosers.items()}
         pinned = [baseline]
@@ -538,20 +683,23 @@ class FrontierBoardState:
             )
 
         logger.info(
-            "Built %d paths from %d logged actions (choosers: %s)",
+            "Built %d paths from %d logged actions (%d login, choosers: %s)",
             len(paths),
             len(self.action_log),
+            len(login_steps),
             {f: len(v) for f, v in choosers.items()},
         )
-        return Walk(paths=paths)
+        return Walk(login=login_steps, paths=paths)
 
     def _steps_for(
         self, choices: dict[str, str], choosers: dict[str, list[str]]
     ) -> WalkSlice:
-        """Keep only the actions that belong on the given path."""
+        """Keep only the form actions that belong on the given path."""
         steps: WalkSlice = []
 
         for entry in self.action_log:
+            if entry.phase == "login":
+                continue  # lifted into Walk.login
             # A choice belongs to this path only if it's the option pinned here.
             if entry.choiceFor is not None:
                 if choices.get(entry.choiceFor) != entry.step.option:

@@ -206,7 +206,7 @@ class FrontierAgent:
     def _emit_assignment(self, state: FrontierState) -> FrontierState:
         """One control -> one Assignment."""
         if self.state.board.status == "blocked":
-            state["outcome"] = SimpleAssignment(type="stop")
+            state["outcome"] = SimpleAssignment(type="stop", reason="blocked")
             return state
 
         target = state["target"]
@@ -232,11 +232,34 @@ class FrontierAgent:
 
         Publishing means reconstructing one replayable path per branch out of
         the single in-place action log. See board.build_walk().
+
+        A login stage adds a fourth case: Next was clicked and the SAME login
+        page came back, credential controls and all. That is the portal saying
+        no. Stop with `auth` rather than publish or retry -- a retry on some
+        portals burns a one-time code, and a login prefix that never landed must
+        never be published.
         """
         page = state["page"]
 
-        if page.next and not self.state.already_tried_to_advance(page.stageId):
-            self.state.note_advance_attempt(page.stageId, page.next)
+        if self.state.login_rejected(page):
+            self.state.discard_unlanded_navigation()
+            self.state.board.status = "blocked"
+            logger.error(
+                "[%s] %s came back unchanged after sign-in: credentials rejected",
+                state["job"],
+                page.stageId,
+            )
+            state["outcome"] = SimpleAssignment(type="stop", reason="auth")
+            return state
+
+        # A login that moved on under the same stage name (username, then a
+        # password field on the same URL) may be advanced again once filled.
+        tried = self.state.already_tried_to_advance(
+            page.stageId
+        ) and not self.state.login_can_advance_again(page)
+
+        if page.next and not tried:
+            self.state.note_advance_attempt(page.stageId, page.next, page)
             self.state.board.status = "advancing"
             logger.info("[%s] %s fully explored -> next", state["job"], page.stageId)
             state["outcome"] = SimpleAssignment(type="next")

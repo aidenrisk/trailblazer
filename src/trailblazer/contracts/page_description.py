@@ -31,6 +31,18 @@ _NO_OPTION_TYPES = {"text", "number", "date"}
 # A Playwright accessibility-snapshot ref, e.g. "e12". Never a valid locator.
 _SNAPSHOT_REF = re.compile(r"^e\d+$")
 
+LOGIN_STAGE_PREFIX = "login_"
+
+
+def is_login_stage(stage_id: str) -> bool:
+    """True for a stage the Scraper named as part of the login, by convention.
+
+    The Scraper prefixes a stage `login_` whenever the page carries a credential
+    control. Frontier keys its login policy on this; Loop keys the per-carrier
+    lock on it. One function so the convention has one home.
+    """
+    return stage_id.startswith(LOGIN_STAGE_PREFIX)
+
 
 class Option(BaseModel):
     """One choice of a multiple-choice control, with its own address.
@@ -181,4 +193,4 @@ class PageDescription(BaseModel):
     @property
     def is_login_stage(self) -> bool:
         """True when this page is part of the login, by the stage-name convention."""
-        return self.stageId.startswith("login_")
+        return is_login_stage(self.stageId)

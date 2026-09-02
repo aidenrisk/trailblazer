@@ -155,6 +155,13 @@ class Loop:
             state["result"] = action
         else:
             state["assignment"] = action
+            if action.type == "stop":
+                logger.warning(
+                    "[%s] frontier stopped on %s (%s)",
+                    state["job"],
+                    state["current_page"].stageId,
+                    getattr(action, "reason", None) or "no reason given",
+                )
 
         # Feedback consumed. Clear it so a re-entry can't absorb the same
         # FillReport twice and double-count a walked option.

@@ -79,7 +79,11 @@ class StubFormFiller:
                 chosenOption=chosen.label,
             )
 
-        logger.info("[%s] typed %r into %s", job, assignment.value, field_id)
+        # A credential fill names a key, never a value. The stub records the key
+        # as what it "typed", which is also what the real filler's report must
+        # show: the secret itself never appears in a FillStep.
+        typed = assignment.value if assignment.value is not None else assignment.credentialKey
+        logger.info("[%s] typed %r into %s", job, typed, field_id)
         return FillReport(
             ok=True,
             steps=[
@@ -87,7 +91,7 @@ class StubFormFiller:
                     fieldId=field_id,
                     action="fill",
                     locator=assignment.locator,
-                    value=assignment.value,
+                    value=typed,
                 )
             ],
             landed=[field_id],
