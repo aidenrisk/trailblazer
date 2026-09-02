@@ -122,6 +122,30 @@ class FrontierAgent:
         """The current board. Read-only view for logging/debugging."""
         return self.state.board
 
+    def absorb(self, job: str, fill_report: FillReport | None) -> None:
+        """
+        Fold the last action's FillReport into the board without deciding anything.
+
+        Loop's login capture stops the moment a page is no longer a login stage.
+        When the action that got there was a fill (the one-time code advancing
+        the page), its report has not been absorbed, and the login prefix would
+        be missing that step. This is the same absorb the graph performs first
+        on every on_page call, exposed so the boundary can be closed cleanly.
+        """
+        if fill_report is not None:
+            self.state.absorb_fill_report(fill_report, self._last_assignment)
+            logger.info("[%s] absorbed the last login action", job)
+        self._last_assignment = None
+
+    def login_prefix(self) -> WalkSlice:
+        """
+        The login steps taken so far, in order: what Walk.login will hold.
+
+        Available before the walk finishes, because Loop publishes the login as
+        soon as the tab is past it rather than waiting for the whole form.
+        """
+        return [e.step for e in self.state.action_log if e.phase == "login"]
+
     @property
     def walk_log(self) -> WalkSlice:
         """

@@ -74,3 +74,41 @@ def test_the_chain_logs_into_the_configured_carrier() -> None:
         assert not current.is_login_stage, f"still on a login stage after {MAX_STEPS} steps: {page.url}"
         print(f"\nlogged into {slug}: {page.url} ({current.stageId})")
         print("login prefix:", [(s.action, s.locator, s.credentialKey) for s in frontier.walk_log])
+
+
+def test_a_second_run_reuses_the_session_or_the_stored_prefix() -> None:
+    """Loop's ensure_login against the real carrier, twice, with nothing in the FormFiller's seat.
+
+    The first run must find a stored prefix (record one with the test above or a
+    crawl); this run then either finds the saved session still valid or replays
+    the prefix. Either way no capture happens, so it costs at most one code.
+    """
+    from trailblazer.agents.browser.session_store import SessionStore
+    from trailblazer.loop.login import carrier_tab, ensure_login
+    from trailblazer.shared.login_programs import LoginProgramStore
+
+    settings = get_settings()
+    slug = os.environ["TRAILBLAZER_LIVE_CARRIER"]
+    creds = resolve_carrier_creds(slug, settings)
+    programs = LoginProgramStore(settings)
+    if programs.active(slug) is None:
+        pytest.skip(f"no stored login prefix for {slug}; capture one first")
+    store = SessionStore(settings.sessions_dir)
+
+    with carrier_tab(creds, settings, store=store, headed=settings.headed) as session:
+        outcome, page, _, _ = ensure_login(
+            "live-ensure",
+            session,
+            creds,
+            scraper=Scraper(session.page, settings),
+            frontier=FrontierAgent(),
+            programs=programs,
+            inbox=OtpInbox.from_settings(settings),
+            settings=settings,
+            human_entry_possible=settings.headed,
+            save_session=lambda: store.save(session.context, creds.slug),
+        )
+
+    assert outcome.status in ("session_held", "replayed"), f"{outcome.status}: {outcome.reason}"
+    assert not page.is_login_stage
+    print(f"\n{slug}: {outcome.status} in {outcome.duration_ms} ms, parked on {outcome.final_url}")

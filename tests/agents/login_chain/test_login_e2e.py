@@ -136,3 +136,66 @@ def test_the_captured_prefix_replays_in_a_fresh_browser(fixture_server, fake_inb
         )
     assert out.ok, out.reason
     assert out.final_url.endswith("/dashboard.html")
+
+
+def test_ensure_login_captures_on_the_first_run_and_replays_on_the_second(
+    fixture_server, fake_inbox, monkeypatch, tmp_path
+) -> None:
+    """Loop's whole login path against the stand-in portal: learn once, then reuse.
+
+    The stand-in portal keeps no server-side session, so the saved jar cannot
+    hold and the second run must fall back to the stored prefix, which is the
+    route under test. The lock is the real one when Postgres is up, and fails
+    open when it is not.
+    """
+    from trailblazer.agents.browser.session_store import SessionStore
+    from trailblazer.loop.login import carrier_tab, ensure_login
+    from tests.fakes import FakeProgramStore
+
+    install_echo_model(monkeypatch)
+    creds = _creds(fixture_server)
+    store = SessionStore(tmp_path)
+    programs = FakeProgramStore()
+
+    # Run 1: nothing stored, an executor available -> capture and publish v1.
+    inbox1 = fake_inbox([(200, {"code": "123456"})])
+    settings1 = Settings(_env_file=None, cdp_port=9286, mfa_poll_s=0.2, mfa_timeout_ms=20_000)
+    with carrier_tab(creds, settings1, store=store) as session:
+        client = OtpInbox(inbox1.url, "a", "c", backoff_s=0, retries=1)
+        outcome1, page1, _, _ = ensure_login(
+            "run-1",
+            session,
+            creds,
+            scraper=Scraper(session.page, settings1),
+            frontier=FrontierAgent(),
+            programs=programs,
+            executor=LoginExecutor(
+                session.page, credentials=creds, inbox=client, mfa_timeout_s=20, poll_s=0.2, settle_s=0.5
+            ),
+            inbox=client,
+            settings=settings1,
+        )
+    assert outcome1.status == "captured", outcome1.reason
+    assert outcome1.program_version == 1 and len(outcome1.steps) == 4
+    assert page1.stageId.startswith("form_page")
+    assert store.jar_path("pie").exists()  # the session was saved on the way out
+
+    # Run 2: no executor at all -> the stored prefix must carry the login.
+    inbox2 = fake_inbox([(200, {"code": "123456"})])
+    settings2 = Settings(_env_file=None, cdp_port=9287, mfa_poll_s=0.2, mfa_timeout_ms=20_000)
+    with carrier_tab(creds, settings2, store=store) as session:
+        assert session.reused_session  # the jar from run 1 was restored
+        outcome2, page2, _, _ = ensure_login(
+            "run-2",
+            session,
+            creds,
+            scraper=Scraper(session.page, settings2),
+            frontier=FrontierAgent(),
+            programs=programs,
+            inbox=OtpInbox(inbox2.url, "a", "c", backoff_s=0, retries=1),
+            settings=settings2,
+        )
+    assert outcome2.status == "replayed", outcome2.reason
+    assert outcome2.program_version == 1
+    assert programs.rows[0].status == "locked"  # proven by a replay, promoted
+    assert page2.stageId.startswith("form_page")

@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from trailblazer.contracts.scraper_result import ScraperResult
+from trailblazer.loop.login import LoginOutcome, run_login_ensure, run_login_test
 from trailblazer.loop.orchestrator import run_crawl
 from trailblazer.observability.logging import configure_logging, get_logger
 from trailblazer.shared.carrier_creds import UnknownCarrierError, resolve_carrier_creds
@@ -69,6 +70,7 @@ def crawl(carrier_id: str, request: CrawlRequest) -> ScraperResult:
             insurance_types=request.insuranceTypes,
             business_types=request.businessTypes,
             headed=request.headed,
+            creds=creds,
         )
     except Exception as e:
         # Deliberately broad, and deliberately only here: the boundary turns a
@@ -76,3 +78,53 @@ def crawl(carrier_id: str, request: CrawlRequest) -> ScraperResult:
         # anything, so the cause reaches the log intact.
         log.exception("crawl failed carrier_id=%s url=%s", carrier_id, url)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
+
+
+class LoginRequest(BaseModel):
+    """Options for the two login endpoints."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    headed: bool = False
+    """Show the browser. Also lets a person type a one-time code when no inbox is configured."""
+
+    fresh: bool = False
+    """Ignore the saved session and sign in from nothing (login-ensure only; login-test always does)."""
+
+
+def _login_call(carrier_id: str, fn, **kwargs) -> LoginOutcome:
+    configure_logging(get_settings().log_level)
+    try:
+        return fn(carrier_id, **kwargs)
+    except UnknownCarrierError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except psycopg.OperationalError as e:
+        raise HTTPException(status_code=503, detail=f"database unreachable: {e}") from e
+    except Exception as e:
+        log.exception("%s failed carrier_id=%s", getattr(fn, "__name__", "login"), carrier_id)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
+
+
+@app.post("/v0/carriers/{carrier_id}/login-test", response_model=LoginOutcome)
+def login_test_endpoint(carrier_id: str, request: LoginRequest) -> LoginOutcome:
+    """Do the stored credentials and login prefix still work? Replays in a fresh tab, stops there.
+
+    `status` is `replayed` on success, `needs_authoring` when no prefix is
+    stored, `defect` when a recorded step broke (that version is degraded),
+    `auth` when the portal refused the credentials, `mfa_timeout` when the code
+    never cleared, `browser` on an infrastructure failure. Synchronous, like the
+    crawl endpoint; an MFA carrier can take up to the health-check MFA window.
+    """
+    return _login_call(carrier_id, run_login_test, headed=request.headed)
+
+
+@app.post("/v0/carriers/{carrier_id}/login-ensure", response_model=LoginOutcome)
+def login_ensure_endpoint(carrier_id: str, request: LoginRequest) -> LoginOutcome:
+    """Get a tab logged in by the cheapest route and say which one it took.
+
+    `session_held` (the saved session was still valid), `replayed` (the stored
+    prefix worked), `needs_authoring` (no prefix, and no FormFiller to capture
+    one yet), or a failure kind as for login-test. The session is saved on the
+    way out either way.
+    """
+    return _login_call(carrier_id, run_login_ensure, headed=request.headed, fresh=request.fresh)

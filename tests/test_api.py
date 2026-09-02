@@ -144,3 +144,48 @@ def test_a_crawl_failure_is_a_500_with_the_cause_in_detail(monkeypatch, known_ca
 
     assert response.status_code == 500
     assert "OPENROUTER_API_KEY is not set" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# login-test and login-ensure, with Loop's entry points patched out
+# --------------------------------------------------------------------------- #
+
+from trailblazer.loop.login import LoginOutcome  # noqa: E402
+
+
+def test_login_test_returns_loops_outcome(monkeypatch) -> None:
+    seen = {}
+
+    def fake(carrier_id, **kw):
+        seen.update(carrier_id=carrier_id, **kw)
+        return LoginOutcome(status="replayed", carrier="pie", program_version=3, final_url="https://x/dash")
+
+    monkeypatch.setattr("trailblazer.api.run_login_test", fake)
+    response = client.post("/v0/carriers/pie/login-test", json={"headed": True})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "replayed" and response.json()["program_version"] == 3
+    assert seen == {"carrier_id": "pie", "headed": True}
+
+
+def test_login_ensure_passes_fresh_and_reports_needs_authoring(monkeypatch) -> None:
+    seen = {}
+
+    def fake(carrier_id, **kw):
+        seen.update(kw)
+        return LoginOutcome(status="needs_authoring", carrier="pie", reason="no login prefix stored")
+
+    monkeypatch.setattr("trailblazer.api.run_login_ensure", fake)
+    response = client.post("/v0/carriers/pie/login-ensure", json={"fresh": True})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "needs_authoring"
+    assert seen == {"headed": False, "fresh": True}
+
+
+def test_login_endpoints_map_unknown_carrier_to_400(monkeypatch) -> None:
+    def unknown(carrier_id, **kw):
+        raise UnknownCarrierError(f"no credentials on file for carrier {carrier_id!r}")
+
+    monkeypatch.setattr("trailblazer.api.run_login_test", unknown)
+    assert client.post("/v0/carriers/nobody/login-test", json={}).status_code == 400

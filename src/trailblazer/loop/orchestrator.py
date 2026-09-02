@@ -26,7 +26,9 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from trailblazer.agents.browser.otp_inbox import OtpInbox
 from trailblazer.agents.browser.session import BrowserSession
+from trailblazer.agents.browser.session_store import SessionStore
 from trailblazer.agents.frontier.frontier import FrontierAgent
 from trailblazer.agents.scraper.scraper import Scraper
 from trailblazer.contracts import (
@@ -37,6 +39,7 @@ from trailblazer.contracts import (
     ScraperResult,
     Walk,
 )
+from trailblazer.shared.carrier_creds import CarrierCreds
 from trailblazer.shared.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -77,13 +80,21 @@ class Loop:
         self.recursion_limit = recursion_limit
         self.graph = self._build_graph()
 
-    def fill_form(self, job: str, initial_page: PageDescription) -> Walk:
+    def fill_form(
+        self,
+        job: str,
+        initial_page: PageDescription,
+        diff: Diff | None = None,
+        fill_report: FillReport | None = None,
+    ) -> Walk:
         """
         Walk a form by orchestrating all agents.
 
         Args:
         - job: job ID (for logging/tracking)
         - initial_page: first PageDescription (page to start from)
+        - diff, fill_report: feedback from an action taken before the walk began,
+          when the login capture stopped at the boundary with them unabsorbed.
 
         Returns:
         - Walk: one replayable WalkPath per branch, ready for ReplayGen
@@ -93,8 +104,8 @@ class Loop:
             "current_page": initial_page,
             "assignment": None,
             "last_assignment": None,
-            "fill_report": None,
-            "diff": None,
+            "fill_report": fill_report,
+            "diff": diff,
             "result": None,
         }
         final_state = self.graph.invoke(
@@ -202,12 +213,17 @@ def run_crawl(
     business_types: list[str],
     headed: bool = False,
     settings: Settings | None = None,
+    creds: CarrierCreds | None = None,
 ) -> ScraperResult:
     """Open the carrier's portal and return what the Scraper saw on the first page.
 
-    `insurance_types` and `business_types` are carried for logging and for the
-    objective handed to the model; nothing routes on them until FormFiller can
-    drive the live tab and `Loop.fill_form` takes over from here.
+    With `creds`, the tab is opened as the carrier (saved session restored) and
+    Loop makes sure it is logged in before the first look is returned: session
+    held, stored prefix replayed, or, when neither works, the login page itself
+    with the outcome in the log. `insurance_types` and `business_types` are
+    carried for logging and for the objective handed to the model; nothing
+    routes on them until FormFiller can drive the live tab and `Loop.fill_form`
+    takes over from here.
     """
     settings = settings or get_settings()
     job_id = uuid.uuid4().hex[:12]
@@ -225,11 +241,33 @@ def run_crawl(
         f"insurance for a {', '.join(business_types) or 'general'} business."
     )
 
-    with BrowserSession(cdp_port=settings.cdp_port, headed=headed or settings.headed) as session:
-        page = session.goto(url)
-        scraper = Scraper(page, settings, objective=objective)
-        scraper.look(job_id)
-        result = scraper.last_result
+    if creds is None:
+        with BrowserSession(cdp_port=settings.cdp_port, headed=headed or settings.headed) as session:
+            page = session.goto(url)
+            scraper = Scraper(page, settings, objective=objective)
+            scraper.look(job_id)
+            result = scraper.last_result
+    else:
+        from trailblazer.loop.login import carrier_tab, ensure_login
+        from trailblazer.shared.login_programs import LoginProgramStore
+
+        store = SessionStore(settings.sessions_dir)
+        with carrier_tab(creds, settings, store=store, headed=headed or settings.headed) as session:
+            scraper = Scraper(session.page, settings, objective=objective)
+            outcome, _, _, _ = ensure_login(
+                job_id,
+                session,
+                creds,
+                scraper=scraper,
+                frontier=FrontierAgent(),
+                programs=LoginProgramStore(settings),
+                inbox=OtpInbox.from_settings(settings),
+                settings=settings,
+                human_entry_possible=headed or settings.headed,
+                save_session=lambda: store.save(session.context, creds.slug),
+            )
+            logger.info("crawl login job_id=%s carrier=%s status=%s %s", job_id, creds.slug, outcome.status, outcome.reason)
+            result = scraper.last_result
 
     assert result is not None  # look() always stores the perceive it just did
     logger.info(

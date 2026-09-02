@@ -77,6 +77,24 @@ The client never supplies a URL or credentials: both come from the carrier's row
 400 when `carrier_id` has no credentials on file, 503 when the database is unreachable,
 422 on a malformed body, 500 when the crawl itself fails, with the cause in `detail`.
 
+The crawl opens the tab as the carrier: the saved session is restored, and Loop gets the tab
+logged in by the cheapest route before the first look (session still valid, stored login
+prefix replayed, or the login page itself when neither works, with the outcome in the log).
+
+Two login endpoints answer the question on their own, without a crawl:
+
+```bash
+# do the stored credentials and login prefix still work? fresh tab, stops at the boundary
+curl -X POST http://127.0.0.1:8000/v0/carriers/pie/login-test -H 'content-type: application/json' -d '{"headed":false}'
+# get a tab logged in and say which route it took; saves the session on the way out
+curl -X POST http://127.0.0.1:8000/v0/carriers/pie/login-ensure -H 'content-type: application/json' -d '{"fresh":false}'
+```
+
+Both return a `LoginOutcome`: `status` is `session_held`, `replayed`, `captured`,
+`needs_authoring` (no prefix stored, and no FormFiller yet to capture one), `auth`,
+`mfa_timeout`, `defect` (that prefix version was degraded), or `browser`. `login-test` uses the
+shorter health-check MFA window; both block for the duration, like the crawl.
+
 ### The full chain, offline
 
 The Loop that drives all five agents runs today against stub agents, with no browser and
