@@ -7,6 +7,23 @@ the Walk that ReplayGen compiles.
 
 Agents never call each other. Every model here crosses exactly one edge that
 MASTER.md allows, and Loop is the thing carrying it.
+
+For the owners of ReplayGen and Validator, which this work does not build:
+
+- A `WalkStep` with `credentialKey` compiles to IR `{ "action": "type",
+  "valueFrom": "credential", "credentialKey": "LOGIN_EMAIL" }`, never to a
+  literal value. `Walk.login` is the prefix a Program runs before any path.
+- At run time, `LOGIN_EMAIL` and `LOGIN_PASSWORD` resolve through
+  `trailblazer.agents.browser.login_actions.fill_credential` and `LOGIN_OTP`
+  through `login_actions.clear_otp` (which pulls the code from the inbox, types
+  it, and submits). Hold `trailblazer.agents.browser.login_lock.LoginLock` around
+  the prefix for a carrier whose MFA is on.
+- Verdicts: a recorded selector that no longer resolves is `defect` (portal
+  drift; degrade the artifact). Steps that run but leave the tab on the login
+  surface are `stuck` with reason `auth` (credentials; keep the artifact). A code
+  that never clears is `stuck` with reason `mfa_timeout`.
+  `trailblazer.agents.browser.login_replay` is the reference implementation for
+  the login prefix and maps the same way.
 """
 
 from typing import Annotated, Literal, Union

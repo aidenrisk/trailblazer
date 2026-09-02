@@ -108,3 +108,31 @@ def test_a_consent_banner_is_dismissed_and_the_dismissal_is_in_the_login_prefix(
         ("click", 'button:has-text("Sign in") >> visible=true', None),
         ("type", "#code", LOGIN_OTP),
     ]
+
+
+def test_the_captured_prefix_replays_in_a_fresh_browser(fixture_server, fake_inbox, monkeypatch) -> None:
+    """A recipe is trustworthy only after it has driven a login itself: capture, then replay."""
+    from trailblazer.agents.browser.login_replay import replay_login
+
+    install_echo_model(monkeypatch)
+    capture_inbox = fake_inbox([(200, {"code": "123456"})])
+    walk, _, _ = _run(9284, _creds(fixture_server), capture_inbox.url)
+    assert walk.login
+
+    replay_inbox = fake_inbox([(200, {"code": "123456"})])
+    with BrowserSession(cdp_port=9285) as fresh:
+        out = replay_login(
+            fresh.page,
+            walk.login,
+            credentials=_creds(fixture_server),
+            inbox=OtpInbox(replay_inbox.url, "a", "c", backoff_s=0, retries=1),
+            login_url=_creds(fixture_server).login_url,
+            human_entry_possible=False,
+            mfa_timeout_s=20,
+            poll_s=0.2,
+            otp_settle_s=0.5,
+            step_timeout_ms=3000,
+            verify_settle_s=2,
+        )
+    assert out.ok, out.reason
+    assert out.final_url.endswith("/dashboard.html")
