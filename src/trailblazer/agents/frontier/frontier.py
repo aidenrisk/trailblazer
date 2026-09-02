@@ -31,7 +31,7 @@ from trailblazer.agents.frontier.board import FrontierBoardState, ValueProvider
 from trailblazer.contracts import (
     Assignment,
     ControlState,
-    Diff,
+    ScraperResult,
     FillReport,
     PageDescription,
     SimpleAssignment,
@@ -53,7 +53,7 @@ class FrontierState(TypedDict):
 
     job: str
     page: PageDescription
-    diff: Diff | None
+    scrape: ScraperResult | None
     fill_report: FillReport | None
     last_assignment: Assignment | None
     target: ControlState | None
@@ -65,7 +65,8 @@ class FrontierAgent:
     Frontier: decides what to do next in a form walk.
 
     Loop calls on_page() every time it has a fresh PageDescription, passing along
-    the Diff and FillReport from the last action (both None on the first call).
+    the ScraperResult and FillReport from the last action (both None on the
+    first call).
     Frontier returns either one Assignment for FormFiller, or the finished
     Walk (one replayable path per branch) when the whole form has been walked.
     
@@ -84,7 +85,7 @@ class FrontierAgent:
         self,
         job: str,
         page: PageDescription,
-        diff: Diff | None = None,
+        scrape: ScraperResult | None = None,
         fill_report: FillReport | None = None,
     ) -> Assignment | Walk:
         """
@@ -93,7 +94,8 @@ class FrontierAgent:
         Args:
         - job: job ID (for logging)
         - page: fresh PageDescription from Scraper
-        - diff: what changed since the last look (None on the first call)
+        - scrape: the scraper's result for this look — the page plus what
+                  changed since the prior one (None on the first call)
         - fill_report: what FormFiller did and discovered (None on the first call)
 
         Returns:
@@ -103,7 +105,7 @@ class FrontierAgent:
         initial: FrontierState = {
             "job": job,
             "page": page,
-            "diff": diff,
+            "scrape": scrape,
             "fill_report": fill_report,
             "last_assignment": self._last_assignment,
             "target": None,
@@ -171,14 +173,14 @@ class FrontierAgent:
         if report is not None:
             self.state.absorb_fill_report(report, state["last_assignment"])
 
-        diff = state["diff"]
-        if diff is not None:
+        scrape = state["scrape"]
+        if scrape is not None:
             logger.info(
                 "[%s] diff %s (+%d/-%d controls)",
                 state["job"],
-                diff.polarity,
-                len(diff.addedControls),
-                len(diff.removedControls),
+                scrape.polarity,
+                len(scrape.addedControls),
+                len(scrape.removedControls),
             )
 
         self.state.board.status = "exploring"

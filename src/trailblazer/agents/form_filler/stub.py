@@ -67,9 +67,12 @@ class StubFormFiller:
                 ok=True,
                 steps=[
                     FillStep(
+                        # A discovered choice may have no node of its own (a
+                        # native <select>), so fall back to the control we were
+                        # asked to fill. FillStep.locator is not optional.
                         fieldId=field_id,
                         action="select",
-                        locator=chosen.locator,
+                        locator=chosen.locator or assignment.locator,
                         value=chosen.label,
                     )
                 ],
@@ -96,22 +99,36 @@ class StubFormFiller:
         )
 
     def _set_option(self, job: str, assignment: SetOptionAssignment) -> FillReport:
-        # Acts on assignment.locator — the option's own locator, not the
-        # parent control's. That's the contract.
+        """Apply the option-locator rule the contract states.
+
+        `locator` set  -> the choice is its own node: click it.
+        `locator` None -> no node of its own: select_option(label) on the parent.
+
+        A real FormFiller calls `page.click(locator)` in the first case and
+        `page.select_option(controlLocator, label=option)` in the second.
+        Clicking an `<option>` node does not work, which is why the None is
+        carried all the way here rather than collapsed upstream.
+        """
+        if assignment.locator is not None:
+            action, target = "click", assignment.locator
+        else:
+            action, target = "select", assignment.controlLocator
+
         logger.info(
-            "[%s] selected %s=%s via %s",
+            "[%s] %s %s=%s via %s",
             job,
+            action,
             assignment.fieldId,
             assignment.option,
-            assignment.locator,
+            target,
         )
         return FillReport(
             ok=True,
             steps=[
                 FillStep(
                     fieldId=assignment.fieldId,
-                    action="select",
-                    locator=assignment.locator,
+                    action=action,
+                    locator=target,
                     value=assignment.option,
                 )
             ],

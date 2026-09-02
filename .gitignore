@@ -1,13 +1,17 @@
-inputs/
-outputs/
-.venv/
-
-# Markdown files (docs, guides, etc.) - keep only README.md in git
-*.md
-!README.md
-logs/
-
-# Secrets and caches
-.env
+# Python
 __pycache__/
 *.pyc
+.venv/
+
+# Secrets — never commit
+.env
+
+# Local state
+.sessions/
+logs/
+.vscode/
+
+# Markdown docs are kept out of git (README is the exception)
+*.md
+!README.md
+AGENTS.md

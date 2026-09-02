@@ -151,7 +151,7 @@ class FrontierBoardState:
            FormFiller telling us directly.
 
         We derive "what's new" by comparing against the board rather than
-        reading Diff.addedControls — the board is the source of truth about what
+        reading ScraperResult.addedControls — the board is the source of truth about what
         we've already seen, so this stays correct even if the diff is imprecise.
 
         Returns: the ControlStates that were newly added (for logging).
@@ -341,16 +341,18 @@ class FrontierBoardState:
         """
         if entry.pending:
             option = entry.pending[0]
-            # The option's own locator is what FormFiller must act on: a native
-            # <select> addresses each <option> separately, and a split control
-            # (paired Yes/Maybe buttons) has a distinct locator per button.
-            # Options discovered by FormFiller may carry no distinct locator of
-            # their own, in which case they reuse the control's.
+            # Pass the option's locator through EXACTLY as the scraper measured
+            # it, including None. Set means the choice is its own addressable
+            # node and FormFiller clicks it; None means it has no node of its
+            # own and FormFiller calls select_option(label) on controlLocator.
+            # Collapsing the None to the control's locator here would look
+            # harmless and would silently make native <select> unfillable —
+            # an <option> node is not clickable.
             return SetOptionAssignment(
                 type="set_option",
                 fieldId=entry.fieldId,
                 option=option.label,
-                locator=option.locator or entry.locator,
+                locator=option.locator,
                 controlLocator=entry.locator,
             )
 
@@ -460,12 +462,16 @@ class FrontierBoardState:
         if label is None:
             return
         option = next((o for o in entry.walked if o.label == label), None)
+        # Unlike the assignment, a WalkStep needs *an* address to compile, so a
+        # choice with no node of its own records the parent's locator and relies
+        # on `option` to say which choice. ReplayGen reads it the same way
+        # FormFiller does: option locator -> click, parent -> select_option.
         self.action_log.append(
             LoggedAction(
                 step=WalkStep(
                     action="choose",
                     fieldId=entry.fieldId,
-                    locator=option.locator if option else entry.locator,
+                    locator=(option.locator if option and option.locator else entry.locator),
                     option=label,
                 ),
                 choiceFor=entry.fieldId,
