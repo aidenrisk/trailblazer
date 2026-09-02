@@ -24,7 +24,7 @@ to the stored artifact:
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Callable, Literal
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
@@ -131,6 +131,8 @@ def replay_login(
     markers: list[str] | None = None,
     step_timeout_ms: int = 15000,
     verify_settle_s: float = 15.0,
+    settings: Any = None,
+    on_handoff: Callable[[str], None] | None = None,
 ) -> LoginReplay:
     """Run the prefix step by step, then verify the tab is past the login surface.
 
@@ -170,6 +172,8 @@ def replay_login(
                         poll_s=poll_s,
                         settle_s=otp_settle_s,
                         markers=markers,
+                        settings=settings,
+                        on_handoff=on_handoff,
                     )
                     if not out.cleared:
                         return LoginReplay(

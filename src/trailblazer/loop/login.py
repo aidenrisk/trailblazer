@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from trailblazer.agents.browser.login_lock import LoginLock, LoginLockTimeout
 from trailblazer.agents.browser.login_replay import replay_login
+from trailblazer.agents.browser.net_watch import AuthFailureWatch
 from trailblazer.agents.browser.otp_inbox import OtpInbox
 from trailblazer.agents.browser.session import BrowserSession
 from trailblazer.agents.browser.session_store import SessionStore, reset_state
@@ -106,6 +107,9 @@ def carrier_tab(
         session_storage=saved.session_storage if saved else None,
     )
     session.start()
+    # Watch the portal's own API from the first request: a restored session that
+    # renders the app shell but answers 401 to everything is dead, not held.
+    session.auth_failures = AuthFailureWatch().attach(session.context)  # type: ignore[attr-defined]
     try:
         session.goto(creds.login_url)
         yield session
@@ -174,6 +178,7 @@ def ensure_login(
     settings: Settings | None = None,
     lock_url: str | None = None,
     human_entry_possible: bool = False,
+    on_handoff: Callable[[str], None] | None = None,
     replay: Callable[..., Any] = replay_login,
     lock_factory: Callable[..., Any] = LoginLock,
     save_session: Callable[[], None] | None = None,
@@ -205,8 +210,20 @@ def ensure_login(
 
     page, diff = scraper.look(job)
     if not page.is_login_stage:
-        log.info("[%s] %s: session held, landed on %s", job, creds.slug, page.stageId)
-        return done("session_held", page), page, diff, None
+        watch = getattr(session, "auth_failures", None)
+        if watch is not None and watch.session_looks_dead:
+            # The app shell rendered from a stale jar, but the portal's API is refusing it.
+            log.warning("[%s] %s: restored session is dead (%s); logging in clean", job, creds.slug, watch.describe())
+            try:
+                reset_state(session.context, session.page)
+                session.page.goto(creds.login_url, wait_until="domcontentloaded")
+            except PlaywrightError as e:
+                return done("browser", page, f"could not return to the login page: {e}"), page, diff, None
+            watch.reset()
+            page, diff = scraper.look(job)
+        if not page.is_login_stage:
+            log.info("[%s] %s: session held, landed on %s", job, creds.slug, page.stageId)
+            return done("session_held", page), page, diff, None
 
     lock = lock_factory(
         creds.mfa_carrier_id,
@@ -233,6 +250,8 @@ def ensure_login(
                 human_entry_possible=human_entry_possible,
                 mfa_timeout_s=settings.mfa_timeout_ms / 1000,
                 poll_s=settings.mfa_poll_s,
+                settings=settings,
+                on_handoff=on_handoff,
             )
             if out.ok:
                 if active.status == "candidate":

@@ -41,6 +41,13 @@ development and passwords are stored plaintext, with a warning. Pass `--mfa` (an
 `--mfa-domain <sender domain>`) for a portal that challenges with an emailed code, and
 `--no-password` for one that signs in with a code only.
 
+Where the one-time code comes from is `--mfa-channel`: `email` (default) claims it from the
+shared backend inbox; `totp` computes it from an enrolled authenticator seed, which the script
+prompts for and stores encrypted like the password; `manual` waits for an operator to write it
+to `<SESSIONS_DIR>/<slug>.otp` while the run holds. Whatever the channel, the code is typed
+into the carrier's page by the toolkit; a person types it only in a headed run with no source
+configured, and the `on_handoff` hook says so to whoever is watching.
+
 ## Run
 
 ```bash

@@ -40,16 +40,20 @@ class UnknownCarrierError(LookupError):
 class MfaConfig(BaseModel):
     """How a carrier challenges after the password, from `carrier_creds.mfa`.
 
-    `enabled` is the gate: it turns on the per-carrier login lock and the inbox
-    pull. `channel` is `email` because that is the only channel the shared inbox
-    can clear. `domains` are the sender domains the backend routes by; they are
-    configuration for the inbox side and are carried here so one record
-    describes the whole arrangement.
+    `enabled` is the gate: it turns on the per-carrier login lock and the code
+    pull. `channel` says where the code comes from: `email` through the shared
+    inbox (the normal case), `totp` computed from an enrolled authenticator seed
+    held encrypted in `totp_secret`, or `manual`, an operator dropping the code
+    into a file while the run waits. `domains` are the sender domains the
+    backend routes email by; configuration for the inbox side, carried here so
+    one record describes the whole arrangement.
     """
 
     enabled: bool = False
-    channel: Literal["email"] = "email"
+    channel: Literal["email", "totp", "manual"] = "email"
     domains: list[str] = Field(default_factory=list)
+    totp_secret: str | None = None
+    """The enrolled base32 seed, decrypted. Only for `channel == "totp"`."""
 
 
 class CarrierCreds(BaseModel):
@@ -75,7 +79,7 @@ class CarrierCreds(BaseModel):
 
     def secrets(self) -> list[str]:
         """Values that must never reach a log."""
-        return [s for s in (self.password,) if s]
+        return [s for s in (self.password, self.mfa.totp_secret) if s]
 
 
 def _db_fetcher(settings: Settings) -> RowFetcher:
@@ -111,7 +115,10 @@ def resolve_carrier_creds(
 
     key = parse_key(settings.cred_encryption_key)
     password = decrypt_secret(row.get("password"), key)
-    mfa_raw = row.get("mfa") or {}
+    mfa_raw = dict(row.get("mfa") or {})
+    # The authenticator seed is a secret like the password and is stored the same way.
+    if mfa_raw.get("totp_secret"):
+        mfa_raw["totp_secret"] = decrypt_secret(mfa_raw["totp_secret"], key)
 
     creds = CarrierCreds(
         slug=str(row["slug"]),

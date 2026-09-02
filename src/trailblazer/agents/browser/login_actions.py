@@ -22,6 +22,7 @@ Playwright `Page`; nothing knows about Frontier, Loop, or the FillReport.
 
 import logging
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page
@@ -217,18 +218,27 @@ def clear_otp(
     poll_s: float = 2.0,
     settle_s: float = 12.0,
     markers: list[str] | None = None,
+    code_source: Any = None,
+    settings: Any = None,
+    on_handoff: Callable[[str], None] | None = None,
 ) -> OtpWait:
-    """Resolve LOGIN_OTP: pull the code, type it, submit, wait for the challenge to clear.
+    """Resolve LOGIN_OTP: get the code, type it, submit, wait for the challenge to clear.
 
-    The inbox is keyed by the carrier's slug when its MFA is on. Six
+    The code comes from whatever the carrier's MFA config names: the shared
+    inbox for `email`, an authenticator seed for `totp`, an operator's file drop
+    for `manual` (`code_sources.code_source_for`), unless `code_source` is given
+    outright. Keyed by the carrier's slug when its MFA is on. Six
     single-character boxes are detected here and filled one character each.
     Returns the toolkit's `OtpWait`; the caller maps it to a report.
     """
+    from trailblazer.agents.browser.code_sources import code_source_for
+
     slug = creds.mfa_carrier_id if creds else None
+    source = code_source if code_source is not None else code_source_for(creds, inbox, settings)
     per_digit = page.locator('input[maxlength="1"]').count() >= 4
     return wait_for_otp_clear(
         page,
-        inbox=inbox,
+        inbox=source,
         carrier_slug=slug,
         timeout_s=timeout_s,
         poll_s=poll_s,
@@ -237,6 +247,7 @@ def clear_otp(
         otp_selector=None if per_digit else selector,
         per_digit=per_digit,
         human_entry_possible=human_entry_possible,
+        on_handoff=on_handoff,
     )
 
 

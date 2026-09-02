@@ -31,8 +31,15 @@ def main() -> None:
     parser.add_argument("--username", default="")
     parser.add_argument("--password-stdin", action="store_true", help="read the password from stdin")
     parser.add_argument("--no-password", action="store_true", help="portal has no password (OTP-only or open)")
-    parser.add_argument("--mfa", action="store_true", help="portal challenges with an emailed code")
+    parser.add_argument("--mfa", action="store_true", help="portal challenges with a one-time code")
+    parser.add_argument(
+        "--mfa-channel",
+        choices=["email", "totp", "manual"],
+        default="email",
+        help="where the code comes from: the shared inbox (email), an enrolled authenticator seed (totp), or an operator's file drop (manual)",
+    )
     parser.add_argument("--mfa-domain", action="append", default=[], help="sender domain the inbox routes by; repeatable")
+    parser.add_argument("--totp-seed-stdin", action="store_true", help="read the base32 authenticator seed from stdin (totp only)")
     args = parser.parse_args()
 
     if args.no_password:
@@ -43,8 +50,14 @@ def main() -> None:
         password = getpass.getpass("portal password (empty for none): ")
 
     settings = get_settings()
-    stored = encrypt_secret(password, parse_key(settings.cred_encryption_key)) or ""
-    mfa = {"enabled": args.mfa, "channel": "email", "domains": args.mfa_domain}
+    key = parse_key(settings.cred_encryption_key)
+    stored = encrypt_secret(password, key) or ""
+    mfa = {"enabled": args.mfa, "channel": args.mfa_channel, "domains": args.mfa_domain}
+    if args.mfa_channel == "totp":
+        seed = sys.stdin.readline().strip() if args.totp_seed_stdin else getpass.getpass("authenticator seed (base32): ")
+        if not seed:
+            parser.error("--mfa-channel totp needs the enrolled seed")
+        mfa["totp_secret"] = encrypt_secret(seed, key)  # a secret like the password, stored the same way
 
     with connect(settings) as conn, conn.cursor() as cur:
         cur.execute(

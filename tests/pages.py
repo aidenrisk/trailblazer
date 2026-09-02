@@ -161,9 +161,27 @@ SESSION = """<!doctype html>
 </html>
 """
 
+# The app shell a portal renders from a stale cookie jar: no login controls on the
+# page, but every call to its own API comes back 401. Looks logged in; is not.
+STALE = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Agent Portal</title></head>
+<body>
+<h1>Welcome back</h1>
+<p>Loading your book of business…</p>
+<script>
+  for (const path of ['/api/session', '/api/me', '/api/quotes']) {
+    fetch(path).catch(() => {});
+  }
+</script>
+</body>
+</html>
+"""
+
 PAGES = {
     "login.html": LOGIN,
     "login-consent.html": LOGIN_CONSENT,
+    "stale.html": STALE,
     "otp.html": OTP,
     "otp-digits.html": OTP_DIGITS,
     "dashboard.html": DASHBOARD,

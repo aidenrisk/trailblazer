@@ -25,9 +25,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
-from trailblazer.agents.browser.otp_inbox import OtpInbox
+from typing import Any, Callable, Literal
 
 log = logging.getLogger(__name__)
 
@@ -385,10 +383,13 @@ class OtpWait:
         )
 
 
+HANDOFF_INSTRUCTION = "Type the one-time code into the visible browser window."
+
+
 def wait_for_otp_clear(
     page: Any,
     *,
-    inbox: OtpInbox | None = None,
+    inbox: Any = None,
     carrier_slug: str | None = None,
     timeout_s: float = 600.0,
     poll_s: float = 2.0,
@@ -401,28 +402,40 @@ def wait_for_otp_clear(
     channel_switch: list[str] | None = None,
     human_entry_possible: bool = True,
     prefer_email: bool = True,
+    on_handoff: Callable[[str], None] | None = None,
     clock: Any = time,
 ) -> OtpWait:
-    """Poll until the page leaves the challenge, filling codes from the inbox as they arrive.
+    """Poll until the page leaves the challenge, filling codes from the source as they arrive.
 
-    With an inbox and a slug, codes are claimed and typed (at most
+    `inbox` is any code source with `fetch(slug)`: the shared email inbox, an
+    authenticator seed, or an operator's file drop (see `code_sources.py`).
+    With a source and a slug, codes are claimed and typed (at most
     `max_attempts`, with `settle_s` between, since a good code takes the portal
     a few seconds to redirect). Without them, the wait is for a person typing
-    the code in a visible browser; when no person can (headless), it fails at
-    once. Returns an `OtpWait` and never raises: a timeout is an answer.
+    the code in a visible browser, and `on_handoff` is told once what that
+    person must do; when no person can (headless), it fails at once. Returns an
+    `OtpWait` and never raises: a timeout is an answer.
     """
     out = OtpWait(cleared=False, reason="", final_url=str(page.url))
-    can_auto_pull = bool(inbox is not None and carrier_slug and not inbox.disabled)
+    can_auto_pull = bool(inbox is not None and carrier_slug and not getattr(inbox, "disabled", False))
     if not can_auto_pull and not human_entry_possible:
         out.reason = "no way to obtain a code: no inbox configured and no visible browser for a person"
         log.error("mfa: %s", out.reason)
         return out
-    log.info(
-        "mfa: on a code screen; %s",
-        f"auto-pulling from the inbox for {carrier_slug!r}, a person is the fallback"
-        if can_auto_pull
-        else "no inbox configured, waiting for a person to type the code",
-    )
+    if can_auto_pull:
+        log.info("mfa: on a code screen; pulling codes for %r, a person is the fallback", carrier_slug)
+    else:
+        log.warning("mfa: on a code screen with no code source; a person must type it. %s", HANDOFF_INSTRUCTION)
+        if on_handoff is not None:
+            try:
+                on_handoff(HANDOFF_INSTRUCTION)
+            except Exception as e:  # a UI hook must never take the run down
+                log.warning("mfa: on_handoff hook failed: %s", e)
+    # An authenticator seed always has a code and never a backlog; steering the
+    # channel to email would be wrong for it too.
+    queued_source = bool(getattr(inbox, "queued", True))
+    if can_auto_pull and not queued_source:
+        prefer_email = False
 
     def steer() -> None:
         if not prefer_email or out.steered:
@@ -448,7 +461,7 @@ def wait_for_otp_clear(
 
     # One challenge has one valid code: keep the newest queued one, drop the rest.
     carried: str | None = None
-    if can_auto_pull:
+    if can_auto_pull and queued_source:
         for _ in range(5):
             queued = inbox.fetch(carrier_slug)  # type: ignore[union-attr]
             if not queued:

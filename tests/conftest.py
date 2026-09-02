@@ -21,6 +21,16 @@ class _Quiet(SimpleHTTPRequestHandler):
     def log_message(self, *args):  # noqa: D401 - silence per-request logging
         pass
 
+    def do_GET(self):
+        # The stand-in portal's "own API": everything under /api/ refuses an unauthenticated
+        # caller, which is what a dead reused session looks like from the tab.
+        if self.path.startswith("/api/"):
+            self.send_response(401)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        super().do_GET()
+
 
 SERVED_DIRS: dict[str, str] = {}
 """base URL -> the directory it serves, so a test can add a page beside the stand-ins."""
