@@ -101,7 +101,15 @@ def finalize(page: PageDescription, page_index: int, url: str, title: str) -> Pa
     for i, control in enumerate(page.controls, start=1):
         control.fieldId = f"q_{i:03d}"
 
-    page.stageId = f"form_page_{page_index}_{derive_stage_slug(url, title)}"
+    # A page that asks for a credential is part of the login, whatever its URL
+    # says: Auth0 stays on /u/login through the code challenge, and an OIDC
+    # callback contains "login" while being the success hop. The measured
+    # controls decide, and the `login_` prefix is what Frontier keys its policy on.
+    slug = derive_stage_slug(url, title)
+    if any(c.credential for c in page.controls):
+        page.stageId = f"login_{slug}"
+    else:
+        page.stageId = f"form_page_{page_index}_{slug}"
     page.url = url
     page.candidateGates = [c.fieldId for c in page.controls if c.options]
     return page
@@ -169,7 +177,7 @@ def restore_measured_locators(
                 source["locator"],
                 source["unique"],
             )
-        _set_measured(control, source["locator"], source["unique"])
+        _set_measured(control, source["locator"], source["unique"], source.get("credential"))
 
     for control in described.controls:
         if not control.unique:
@@ -212,17 +220,26 @@ def _positional_is_safe(described: PageDescription, payload_controls: list[dict]
     return True
 
 
-def _set_measured(control: Control, locator: str, unique: bool) -> None:
-    """Assign a validated locator, bypassing nothing the contract checks.
+def _set_measured(
+    control: Control, locator: str, unique: bool, credential: str | None = None
+) -> None:
+    """Assign the measured locator, uniqueness and credential kind, validated.
 
     Built from the live field values rather than `model_dump()`, because `key`
     is excluded from serialization and a dump would drop it -- revalidating the
     result would then fail on a field the object actually has.
+
+    `credential` is measured too: whether an input is a password or a one-time
+    code is read from its markup, so the model's opinion of it is discarded the
+    same way its locator is.
     """
     fields = {name: getattr(control, name) for name in Control.model_fields}
-    Control.model_validate({**fields, "locator": locator, "unique": unique})
+    Control.model_validate(
+        {**fields, "locator": locator, "unique": unique, "credential": credential}
+    )
     control.locator = locator
     control.unique = unique
+    control.credential = credential
 
 
 def perceive(page: Page, request: PerceiveRequest, settings: Settings | None = None) -> ScraperResult:

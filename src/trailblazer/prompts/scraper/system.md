@@ -31,6 +31,14 @@ You never change it.
    given. `key` is how the verified locator is matched back onto your control after you return;
    it is a required field, so a response that omits it is rejected outright rather than guessed at.
 
+6. **`credential` is measured, copy it through.** A payload control may carry
+   `"credential": "username" | "password" | "otp"`, read from the input's type and
+   `autocomplete` attributes, not from its wording. Copy the value you are given and set `null`
+   for every control that has none. Do not decide on your own that a field is a login field: an
+   applicant's contact email on a form page is not a credential, and a wrong `credential` gets the
+   agency's login typed into a customer's record. Whatever you return here is overwritten by the
+   measurement anyway.
+
 ## What you decide
 
 - **`label`** — a clean, human-readable name. The markup often gives a messy one: strip

@@ -113,8 +113,32 @@ class LoggedAction(BaseModel):
 
     step: WalkStep
     choiceFor: str | None = None
-    requires: RevealedBy | None = None
+    """Board key (stage|locator) of the control this step chose an option for."""
+    requires: "Requires | None" = None
     phase: Literal["login", "form"] = "form"
+
+
+class Requires(BaseModel):
+    """The board-keyed form of `RevealedBy`: this step exists only where `key` == `equals`.
+
+    Keyed by (stage, locator) rather than fieldId because the Scraper renumbers
+    fieldIds on every look; a locator names the same control every time.
+    """
+
+    key: str
+    equals: str
+
+
+def board_key(stage_id: str, locator: str) -> str:
+    """The identity Frontier tracks a control by.
+
+    Not `fieldId`: that is a per-perceive counter, so the second page's `q_001`
+    is a different control from the first page's, and a control revealed
+    mid-page renumbers everything after it. `diff.py` aligns on locator for
+    the same reason. The stage is part of the key so `#password` on a second
+    host is a second control.
+    """
+    return f"{stage_id}|{locator}"
 
 
 class FrontierBoardState:
@@ -183,11 +207,13 @@ class FrontierBoardState:
 
         Returns: the ControlStates that were newly added (for logging).
         """
-        known = {c.fieldId for c in self.board.controls}
+        self.board.currentStageId = page.stageId
+        by_key = {self._key_of(c): c for c in self.board.controls}
         added: list[ControlState] = []
 
         for control in page.controls:
-            if control.fieldId not in known:
+            entry = by_key.get(board_key(page.stageId, control.locator))
+            if entry is None:
                 entry = ControlState(
                     fieldId=control.fieldId,
                     label=control.label,
@@ -211,12 +237,21 @@ class FrontierBoardState:
                 if is_login_stage(page.stageId):
                     self._apply_login_policy(entry)
                 self.board.controls.append(entry)
+                by_key[self._key_of(entry)] = entry
                 added.append(entry)
                 continue
 
-            # Already tracked. Did the PD just teach us its options?
-            entry = self._entry(control.fieldId)
-            if entry is not None and entry.options is None and control.options is not None:
+            # Already tracked at this stage and locator. The Scraper renumbers
+            # fieldIds on every look, so keep ours current -- Assignments and
+            # WalkSteps name the control by the id the page has right now.
+            if entry.fieldId != control.fieldId:
+                logger.debug("%s renumbered %s -> %s", entry.locator, entry.fieldId, control.fieldId)
+                entry.fieldId = control.fieldId
+            if control.revealedBy is not None and entry.revealedBy is None:
+                entry.revealedBy = control.revealedBy
+
+            # Did the PD just teach us its options?
+            if entry.options is None and control.options is not None:
                 self._set_options(entry, control.options, chosen=None)
                 if is_login_stage(entry.stageId):
                     self._apply_login_policy(entry)
@@ -258,7 +293,7 @@ class FrontierBoardState:
             return
 
         if isinstance(last_assignment, FillFieldAssignment):
-            entry = self._entry(last_assignment.fieldId)
+            entry = self._entry_at(last_assignment.locator, last_assignment.fieldId)
             if entry is None:
                 return
 
@@ -290,7 +325,9 @@ class FrontierBoardState:
                 self._log_fill(entry, last_assignment.value)
 
         elif isinstance(last_assignment, SetOptionAssignment):
-            entry = self._entry(last_assignment.fieldId)
+            # The option's own locator is what was clicked; the CONTROL is what
+            # the board tracks, so resolve by controlLocator.
+            entry = self._entry_at(last_assignment.controlLocator, last_assignment.fieldId)
             if entry is None:
                 return
             self._walk_option(entry, last_assignment.option)
@@ -370,7 +407,7 @@ class FrontierBoardState:
         """
         if entry.revealedBy is None:
             return False
-        revealer = self._entry(entry.revealedBy.fieldId, warn=False)
+        revealer = self._entry(entry.revealedBy.fieldId, entry.stageId, warn=False)
         if revealer is None or not revealer.walked:
             return False
         return revealer.walked[-1].label == entry.revealedBy.equals
@@ -515,13 +552,52 @@ class FrontierBoardState:
     # Internals
     # ------------------------------------------------------------------
 
-    def _entry(self, field_id: str, warn: bool = True) -> ControlState | None:
+    @staticmethod
+    def _key_of(entry: ControlState) -> str:
+        return board_key(entry.stageId, entry.locator)
+
+    def _entry(
+        self, field_id: str, stage_id: str | None = None, warn: bool = True
+    ) -> ControlState | None:
+        """The control with this fieldId on `stage_id` (default: the current stage).
+
+        fieldIds are only meaningful within one page, so the lookup never crosses
+        stages; a `revealedBy.fieldId` always names a control on the same page.
+        """
+        stage = stage_id if stage_id is not None else self.board.currentStageId
         for entry in self.board.controls:
-            if entry.fieldId == field_id:
+            if entry.stageId == stage and entry.fieldId == field_id:
                 return entry
         if warn:
-            logger.warning("No board entry for fieldId %s", field_id)
+            logger.warning("No board entry for fieldId %s on %s", field_id, stage)
         return None
+
+    def _entry_at(self, locator: str, field_id: str | None = None) -> ControlState | None:
+        """The control at `locator` on the current stage; by fieldId if the locator is unknown.
+
+        Used to attribute a FillReport: the Assignment named a locator, which is
+        stable, and a fieldId, which may have been renumbered since.
+        """
+        key = board_key(self.board.currentStageId, locator)
+        for entry in self.board.controls:
+            if self._key_of(entry) == key:
+                return entry
+        if field_id is not None:
+            return self._entry(field_id)
+        logger.warning("No board entry at %s on %s", locator, self.board.currentStageId)
+        return None
+
+    def _requires_of(self, entry: ControlState) -> Requires | None:
+        """This control's reveal condition, keyed the way the walk log needs it."""
+        if entry.revealedBy is None:
+            return None
+        revealer = self._entry(entry.revealedBy.fieldId, entry.stageId, warn=False)
+        key = (
+            self._key_of(revealer)
+            if revealer is not None
+            else board_key(entry.stageId, entry.revealedBy.fieldId)
+        )
+        return Requires(key=key, equals=entry.revealedBy.equals)
 
     def _set_options(
         self, entry: ControlState, options: list[Option], chosen: str | None
@@ -582,7 +658,7 @@ class FrontierBoardState:
                     credentialKey=credential_key,
                 ),
                 # Login steps are unconditional: nothing on a login page is a branch.
-                requires=None if login else entry.revealedBy,
+                requires=None if login else self._requires_of(entry),
                 phase="login" if login else "form",
             )
         )
@@ -602,8 +678,8 @@ class FrontierBoardState:
                 ),
                 # The email-channel pick on a login page is not a chooser being
                 # walked, so it pins no branch and belongs to every path.
-                choiceFor=None if login else entry.fieldId,
-                requires=None if login else entry.revealedBy,
+                choiceFor=None if login else self._key_of(entry),
+                requires=None if login else self._requires_of(entry),
                 phase="login" if login else "form",
             )
         )
@@ -632,8 +708,9 @@ class FrontierBoardState:
         login_steps = [e.step for e in self.action_log if e.phase == "login"]
         form_steps = [e.step for e in self.action_log if e.phase == "form"]
 
+        # Keyed by (stage, locator), like the log entries that refer to them.
         choosers = {
-            c.fieldId: [o.label for o in c.walked]
+            self._key_of(c): [o.label for o in c.walked]
             for c in self.board.controls
             if c.walked and not is_login_stage(c.stageId)
         }
@@ -708,8 +785,8 @@ class FrontierBoardState:
             # A revealed field belongs only where its condition holds. If the
             # revealing field isn't a chooser we can't pin it, so treat the step
             # as unconditional rather than dropping it from every path.
-            if entry.requires is not None and entry.requires.fieldId in choosers:
-                if choices.get(entry.requires.fieldId) != entry.requires.equals:
+            if entry.requires is not None and entry.requires.key in choosers:
+                if choices.get(entry.requires.key) != entry.requires.equals:
                     continue
 
             steps.append(entry.step)

@@ -22,8 +22,22 @@ log = get_logger(__name__)
 
 _EXTRACT_JS = (Path(__file__).parent / "extract.js").read_text()
 
-# Buttons that move between pages. Read-only: found, never clicked.
-_NEXT_PATTERNS = ["next", "continue", "save and continue", "submit", "get quote"]
+# Buttons that move between pages. Read-only: found, never clicked. Login is
+# page 1 of the same chain, so the words a sign-in or code screen uses to move
+# forward are here too. Order matters: the first pattern with one match wins,
+# and "send code" sits before anything a "Resend code" link could also match.
+_NEXT_PATTERNS = [
+    "next",
+    "continue",
+    "save and continue",
+    "submit",
+    "get quote",
+    "sign in",
+    "log in",
+    "login",
+    "verify",
+    "send code",
+]
 _BACK_PATTERNS = ["back", "previous", "return"]
 
 
@@ -48,25 +62,26 @@ def _first_unique(page: Page, candidates: list[str]) -> tuple[str, bool]:
     return (candidates[0] if candidates else ""), False
 
 
-def _prefer_visible_text(page: Page, loc: Any, fallback: str) -> str:
+def _prefer_visible_text(page: Page, loc: Any, fallback: str, suffix: str = "") -> str:
     """Rebuild the locator around the button's own text, if that stays unique.
 
     The pattern that found the button is a lowercase search term; the contract
     documents the literal text. Swapping one for the other can widen the match
     (the pattern "continue" finds a "Save and Continue" button), so the rebuilt
     locator is re-measured and kept only when it still resolves to one node.
+    `suffix` carries a ` >> visible=true` narrowing through the rebuild.
     """
     try:
         text = (loc.inner_text() or "").strip()
         if not text or '"' in text:
             return fallback
-        rebuilt = f'button:has-text("{text}")'
+        rebuilt = f'button:has-text("{text}"){suffix}'
         return rebuilt if page.locator(rebuilt).count() == 1 else fallback
     except PlaywrightError:
         return fallback
 
 
-def _find_button(page: Page, patterns: list[str]) -> str | None:
+def _find_button(page: Page, patterns: list[str], submit_fallback: bool = False) -> str | None:
     """Locator for the first visible button whose text matches one of `patterns`.
 
     The emitted locator carries the button's *visible* text, not the lowercase
@@ -74,15 +89,37 @@ def _find_button(page: Page, patterns: list[str]) -> str | None:
     `button:has-text("Next")` as `scraper_io.txt` documents. `:has-text()` is
     case-insensitive either way; matching the documented literal is what makes
     the output comparable against the contract.
+
+    Hosted identity providers render hidden look-alike submit buttons (Auth0
+    ships two "Continue" buttons in two forms). A text match that lands on two
+    nodes is narrowed to the one that is visible rather than discarded, so the
+    control a person would click is the one reported.
+
+    With `submit_fallback`, a page whose forward control is an `<input
+    type="submit">` or a lone submit button with unexpected text still gets a
+    `next`; login forms are the common case.
     """
     for word in patterns:
         sel = f'button:has-text("{word}")'
         try:
             loc = page.locator(sel)
-            if loc.count() == 1 and loc.is_visible():
+            n = loc.count()
+            if n == 1 and loc.is_visible():
                 return _prefer_visible_text(page, loc, sel)
+            if n > 1:
+                visible = page.locator(f"{sel} >> visible=true")
+                if visible.count() == 1:
+                    return _prefer_visible_text(page, visible, f"{sel} >> visible=true", " >> visible=true")
         except PlaywrightError:
             continue
+    if submit_fallback:
+        for sel in ('input[type="submit"]', 'button[type="submit"]'):
+            try:
+                visible = page.locator(f"{sel} >> visible=true")
+                if visible.count() == 1:
+                    return f"{sel} >> visible=true"
+            except PlaywrightError:
+                continue
     return None
 
 
@@ -127,7 +164,7 @@ class DomSnapshotPerceiver:
             "title": page.title(),
             "controls": controls,
             "a11y": _aria_snapshot(page),
-            "next": _find_button(page, _NEXT_PATTERNS),
+            "next": _find_button(page, _NEXT_PATTERNS, submit_fallback=True),
             "back": _find_button(page, _BACK_PATTERNS),
         }
 
@@ -151,7 +188,7 @@ class A11yOnlyPerceiver:
             "title": page.title(),
             "controls": [],
             "a11y": _aria_snapshot(page),
-            "next": _find_button(page, _NEXT_PATTERNS),
+            "next": _find_button(page, _NEXT_PATTERNS, submit_fallback=True),
             "back": _find_button(page, _BACK_PATTERNS),
         }
 

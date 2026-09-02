@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Two-step verification</title></head>
+<body>
+<h1>Two-step verification</h1>
+<form id="digits-form" method="post" action="#">
+  <fieldset>
+    <legend>Enter the 6-digit code we texted or emailed you</legend>
+    <!-- six single-character boxes with no ids and no labels: one control, not six -->
+    <div class="digit-boxes">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+    </div>
+  </fieldset>
+  <!-- the forward control is an <input type=submit>, not a <button> -->
+  <input type="submit" value="Continue">
+</form>
+</body>
+</html>

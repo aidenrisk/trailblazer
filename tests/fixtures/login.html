@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+<h1>Welcome to the Agent Portal</h1>
+<form id="login-form" method="post" action="#">
+
+  <!-- credential: username, by autocomplete; type=email alone would only be a weak signal -->
+  <label for="username">Email address</label>
+  <input type="email" id="username" name="username" autocomplete="username" required>
+
+  <!-- credential: password, by input type -->
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="current-password" required>
+
+  <!-- not a credential: left alone by Frontier -->
+  <label>
+    <input type="checkbox" id="remember" name="remember">
+    Remember me on this device
+  </label>
+
+  <!-- Auth0-style hidden look-alike: same text, not visible. The visible one is the control. -->
+  <button type="submit" name="action" value="default" hidden>Sign in</button>
+  <button type="submit" name="action" value="default" id="submit-visible">Sign in</button>
+</form>
+</body>
+</html>
