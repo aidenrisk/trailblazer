@@ -17,23 +17,58 @@ CREATE INDEX idx_verticals_embedding_long ON verticals USING ivfflat (embedding_
 CREATE TABLE IF NOT EXISTS carriers (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
+  -- Canonical slug, e.g. 'chubb', 'thimble', 'next_insurance'. Doubles as the key the
+  -- shared MFA inbox routes one-time codes by, so it must match the backend's
+  -- canonical carrier id exactly. Nullable so legacy rows load; every crawlable
+  -- carrier needs one.
+  slug TEXT UNIQUE,
   status TEXT NOT NULL DEFAULT 'active', -- 'active', 'inactive', 'paused'
   is_admitted BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE carriers ADD COLUMN IF NOT EXISTS slug TEXT UNIQUE;
 
 -- Carrier credentials (login info for web crawling)
 CREATE TABLE IF NOT EXISTS carrier_creds (
   id SERIAL PRIMARY KEY,
   carrier_id INTEGER NOT NULL REFERENCES carriers(id) ON DELETE CASCADE,
   username TEXT NOT NULL,
-  password TEXT NOT NULL,
+  -- Encrypted at rest as 'enc:v1:<iv>:<tag>:<data>' (AES-256-GCM, key from
+  -- CRED_ENCRYPTION_KEY). Plaintext is accepted during migration and passes
+  -- through. Empty for portals that authenticate with a one-time code only.
+  password TEXT NOT NULL DEFAULT '',
   login_url TEXT NOT NULL,
+  -- How the portal challenges after the password:
+  --   { "enabled": bool, "channel": "email", "domains": ["thimble.com"] }
+  -- enabled turns on the per-carrier login lock and the inbox pull.
+  mfa JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE carrier_creds ADD COLUMN IF NOT EXISTS mfa JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE carrier_creds ALTER COLUMN password SET DEFAULT '';
 
 CREATE INDEX idx_carrier_creds_carrier_id ON carrier_creds(carrier_id);
+
+-- Login programs: the captured login prefix of a walk, published per carrier.
+-- One login serves every (insurance type, business type) combination, which is
+-- why this is keyed on the carrier and not on carrier_combo. Versions are
+-- insert-only so a bad one stays revertible; the highest non-degraded version
+-- is the active one.
+CREATE TABLE IF NOT EXISTS carrier_login_programs (
+  id SERIAL PRIMARY KEY,
+  carrier_slug TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'candidate', -- 'candidate' | 'locked' | 'degraded'
+  walk JSONB NOT NULL,     -- the Walk.login slice (WalkStep[]) as captured
+  program JSONB,           -- the ReplayGen Program compiled from it, when compiled
+  degraded_reason TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (carrier_slug, version)
+);
+
+CREATE INDEX idx_carrier_login_programs_active ON carrier_login_programs(carrier_slug, status, version DESC);
 
 -- Carrier product combinations (carrier + insurance type + business type)
 CREATE TABLE IF NOT EXISTS carrier_combo (

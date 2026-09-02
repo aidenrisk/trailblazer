@@ -9,17 +9,28 @@ rule applies more reliably in code than in a prompt.
 import re
 import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from langchain.agents import create_agent
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
+from pydantic import Field
 
 from trailblazer.agents.browser.tools import read_only_tools
 from trailblazer.agents.scraper.diff import diff_pages
 from trailblazer.agents.scraper.perceive import get_perceiver, payload_to_text
-from trailblazer.contracts.page_description import Control, PageDescription
+from trailblazer.contracts.page_description import Control, Option, PageDescription, RevealedBy
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
+from trailblazer.contracts.walk import (
+    Assignment,
+    ChangedControl,
+    Diff,
+    FillFieldAssignment,
+    FillReport,
+    SetOptionAssignment,
+    SimpleAssignment,
+)
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings, get_settings
@@ -30,6 +41,31 @@ log = get_logger(__name__)
 _SYSTEM_PROMPT = (
     Path(__file__).parents[2] / "prompts" / "scraper" / "system.md"
 ).read_text()
+
+
+class _ModelControl(Control):
+    """The shape the model must return. Same contract, stricter schema.
+
+    The shared `Control` gives `key`, `options` and `revealedBy` defaults so a
+    page can be built by hand. The model gets none of those: every field lands
+    in the JSON schema's `required` list, so a response that drops `key` fails
+    structured-output parsing loudly instead of leaving the locator join to
+    guesswork.
+    """
+
+    key: str = Field(exclude=True)
+    options: list[Option] | None
+    revealedBy: RevealedBy | None
+
+
+class _ModelPage(PageDescription):
+    """`PageDescription` with every field required, for the model's response format."""
+
+    controls: list[_ModelControl]
+    next: str | None
+    back: str | None
+    candidateGates: list[str]
+    blockers: list[str]
 
 # URL path segments that identify a routing scheme rather than a page.
 _NOISE_SEGMENTS = {"app", "apps", "form", "forms", "page", "pages", "step", "steps", "v1", "v2"}
@@ -226,7 +262,7 @@ def perceive(page: Page, request: PerceiveRequest, settings: Settings | None = N
         model=get_model(settings),
         tools=read_only_tools(page),
         system_prompt=_SYSTEM_PROMPT,
-        response_format=PageDescription,
+        response_format=_ModelPage,
     )
 
     objective = request.objective or "Describe this form page."
@@ -278,3 +314,94 @@ def _run_perceiver(page: Page, settings: Settings) -> dict:
             f"reading the page failed: {e}. The tab may have been closed or navigated "
             "away mid-perceive, or a Content-Security-Policy may block script evaluation"
         ) from e
+
+
+# --------------------------------------------------------------------------- #
+# The agent behind Loop's `look()` contract.
+# --------------------------------------------------------------------------- #
+
+Objective = Literal["perceive", "post_fill"]
+
+
+def _assignment_map(
+    last_assignment: Assignment | None, fill_report: FillReport | None
+) -> dict[str, str] | None:
+    """fieldId -> value just submitted, for `revealedBy` attribution.
+
+    A credential fill carries no value, only a key; the key stands in so a field
+    revealed by entering the password can still be attributed. A discovered
+    chooser reports what it actually picked, which beats the value asked for.
+    """
+    if isinstance(last_assignment, SetOptionAssignment):
+        return {last_assignment.fieldId: last_assignment.option}
+    if isinstance(last_assignment, FillFieldAssignment):
+        chosen = fill_report.chosenOption if fill_report is not None else None
+        value = chosen or last_assignment.value or last_assignment.credentialKey
+        return {last_assignment.fieldId: value} if value is not None else None
+    return None
+
+
+def _refs(page: PageDescription | None, field_ids: list[str]) -> list[ChangedControl]:
+    """Turn the diff's fieldIds into the label+locator references the Diff contract carries."""
+    if page is None:
+        return []
+    by_id = {c.fieldId: c for c in page.controls}
+    return [
+        ChangedControl(label=c.label, locator=c.locator, fieldId=c.fieldId)
+        for f in field_ids
+        if (c := by_id.get(f)) is not None
+    ]
+
+
+class Scraper:
+    """The Scraper agent Loop calls: one look at the live tab, returned as (page, diff).
+
+    Holds the page and the prior description so consecutive looks can be
+    diffed and `revealedBy` attributed. Holds no applicant data and no
+    credentials -- it looks, it never types. `perceive()` above does the work;
+    this class only supplies the memory Loop is not allowed to keep.
+    """
+
+    def __init__(self, page: Page, settings: Settings | None = None, objective: str | None = None):
+        self.page = page
+        self.settings = settings or get_settings()
+        self.objective = objective
+        self.prior: PageDescription | None = None
+        self.page_index = 1
+        self.last_result: ScraperResult | None = None
+
+    def look(
+        self,
+        job: str,
+        objective: Objective = "perceive",
+        last_assignment: Assignment | None = None,
+        fill_report: FillReport | None = None,
+    ) -> tuple[PageDescription, Diff]:
+        """Read the page as it is now, and say what changed since the last look."""
+        if isinstance(last_assignment, SimpleAssignment):
+            if last_assignment.type in ("next", "submit"):
+                self.page_index += 1
+            elif last_assignment.type == "back":
+                self.page_index = max(1, self.page_index - 1)
+
+        result = perceive(
+            self.page,
+            PerceiveRequest(
+                job_id=job,
+                page_index=self.page_index,
+                objective=self.objective,
+                prior=self.prior,
+                assignment=_assignment_map(last_assignment, fill_report),
+            ),
+            self.settings,
+        )
+        diff = Diff(
+            polarity=result.polarity,
+            addedControls=_refs(result.page, result.addedControls),
+            removedControls=_refs(self.prior, result.removedControls),
+            changedControls=_refs(result.page, result.changedControls),
+        )
+        log.debug("look job_id=%s objective=%s polarity=%s", job, objective, diff.polarity)
+        self.prior = result.page
+        self.last_result = result
+        return result.page, diff

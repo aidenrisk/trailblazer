@@ -6,14 +6,15 @@ enough that a client cannot hold the connection, and that decision needs a real
 carrier page to measure against.
 """
 
+import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from trailblazer.contracts.scraper_result import ScraperResult
 from trailblazer.loop.orchestrator import run_crawl
 from trailblazer.observability.logging import configure_logging, get_logger
+from trailblazer.shared.carrier_creds import UnknownCarrierError, resolve_carrier_creds
 from trailblazer.shared.config import get_settings
-from trailblazer.shared.dev_carrier_creds import resolve_carrier_creds
 
 log = get_logger(__name__)
 
@@ -25,9 +26,7 @@ class CrawlRequest(BaseModel):
 
     No `url`: a crawl starts from the carrier's own portal URL, which is looked
     up from `carrier_id` along with its username and password. The client never
-    supplies any of the three. Today that lookup is the dev stub in
-    `dev_carrier_creds.py`, reading `CARRIER_*` from `.env`; swapping it for the
-    `carrier_creds` table does not change this model.
+    supplies any of the three.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -46,17 +45,21 @@ def crawl(carrier_id: str, request: CrawlRequest) -> ScraperResult:
     this handler does not change shape.
 
     422 comes from FastAPI on a malformed body; 400 when `carrier_id` has no
-    credentials on file; 500 when the crawl itself fails, with the underlying
-    message in `detail`.
+    credentials on file; 503 when the credential store is unreachable; 500 when
+    the crawl itself fails, with the underlying message in `detail`.
     """
     configure_logging(get_settings().log_level)
 
     try:
         creds = resolve_carrier_creds(carrier_id)
-    except RuntimeError as e:
-        # A carrier with no URL is a client-side problem (unknown carrier), not
-        # a crawl failure, so it is a 400 and never reaches run_crawl.
+    except UnknownCarrierError as e:
+        # An unknown carrier is a client-side problem, not a crawl failure, so it
+        # is a 400 and never reaches run_crawl.
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except psycopg.OperationalError as e:
+        raise HTTPException(
+            status_code=503, detail=f"credential store unreachable: {e}"
+        ) from e
 
     url = creds.login_url
     try:

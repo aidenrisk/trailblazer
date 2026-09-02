@@ -3,6 +3,11 @@
 Field names are camelCase because the wire format *is* the contract (see
 `scraper_io.txt`). `populate_by_name` lets Python callers use the same names
 without an alias layer.
+
+This module is the merge of two lines of work: the Scraper's validated shape
+(measured locators, snapshot-ref guard, scalar types carry no options) and the
+Frontier's construction ergonomics (defaults for the fields a hand-built page
+rarely sets). Where the two disagreed, validation won and defaults were added.
 """
 
 import re
@@ -11,6 +16,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ControlType = Literal["text", "select", "toggle", "date", "number", "other"]
+
+CredentialKind = Literal["username", "password", "otp"]
+"""What a login control asks for. Measured by the extractor, never by the model.
+
+`username` covers email and user-id fields alike; `otp` is a one-time code
+input, single or per-digit. A control with a kind is filled from credentials by
+FormFiller and is never given a synthetic value or explored as a chooser.
+"""
 
 # Types whose "choices" are meaningless: they must carry `options: None`, not [].
 _NO_OPTION_TYPES = {"text", "number", "date"}
@@ -37,7 +50,7 @@ class Option(BaseModel):
     label: str
     """The choice as a person reads it. This is what `select_option` takes."""
 
-    locator: str | None
+    locator: str | None = None
     """Playwright address of this choice, when it has one of its own.
 
     Measured by `_first_unique` at perceive time like every other locator, so
@@ -70,27 +83,28 @@ class Control(BaseModel):
     fieldId: str
     """Per-page counter, `q_001`. Reset every perceive; not cross-page identity."""
 
-    key: str = Field(exclude=True)
+    key: str | None = Field(default=None, exclude=True)
     """The extractor payload's per-element key (`el_0`), echoed back by the model.
 
     It exists so the measured `locator` and `unique` can be matched back onto the
-    right control after the model returns. No default, so it lands in the JSON
-    schema's `required` list: a model that drops it fails structured-output
-    parsing loudly instead of leaving the join to guesswork. `exclude=True`
-    keeps it out of the serialized output, which `scraper_io.txt` fixes at
-    exactly eight fields.
+    right control after the model returns. Transport only: `exclude=True` keeps
+    it out of the serialized output, and it is optional here so a page built by
+    hand (fixtures, stubs, Frontier tests) need not invent one. The Scraper's
+    own response schema re-declares it required, so a model that drops it still
+    fails structured-output parsing loudly.
     """
 
     label: str
     type: ControlType
     required: bool
 
-    options: list[Option] | None
+    options: list[Option] | None = None
     """The choice list, never the chosen value. `None` when choices are not in the DOM.
 
-    Each entry carries the choice's label and, where the choice is its own
-    clickable node, its measured locator -- which is what makes a radio group
-    expressible as one control instead of one control per choice.
+    `None` means UNKNOWN, not "no options": many widgets do not render their
+    list until opened, so FormFiller may discover options for a control the
+    Scraper reported as `None` and report them back. An empty list means
+    "confirmed: no options".
     """
 
     locator: str
@@ -99,7 +113,10 @@ class Control(BaseModel):
     unique: bool
     """Verified by `page.locator(locator).count() == 1`."""
 
-    revealedBy: RevealedBy | None
+    revealedBy: RevealedBy | None = None
+
+    credential: CredentialKind | None = None
+    """Set when this control is a login credential. Measured, never inferred by the model."""
 
     @field_validator("locator")
     @classmethod
@@ -123,27 +140,25 @@ class PageDescription(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     stageId: str
-    """`form_page_<index>_<slug>`. Index from Loop, slug derived from the page."""
+    """`form_page_<index>_<slug>`, or `login_<slug>` for a page carrying a credential control."""
 
     url: str
     controls: list[Control]
 
-    next: str | None
+    next: str | None = None
     """Locator for the forward button, if there is one."""
 
-    back: str | None
+    back: str | None = None
 
-    candidateGates: list[str]
+    candidateGates: list[str] = Field(default_factory=list)
     """fieldIds that may branch: every control with a non-empty `options` list.
 
-    Unchanged by `Option` becoming an object: the rule reads the list's length,
-    never its element type. What does change is that a radio group now arrives
-    as one control carrying its choices, so it reaches this rule at all --
-    before, it arrived as one control per choice with `options: None` and no
-    entry qualified.
+    Legitimate Scraper output, but nothing routes on it: Frontier explores every
+    control one by one, so it never needs to be told in advance which ones
+    branch. Do not wire new logic to it.
     """
 
-    blockers: list[str]
+    blockers: list[str] = Field(default_factory=list)
     """Validation text, overlays, decline chrome."""
 
     @field_validator("next", "back")
@@ -162,3 +177,8 @@ class PageDescription(BaseModel):
         if unknown:
             raise ValueError(f"candidateGates reference unknown fieldIds: {unknown}")
         return self
+
+    @property
+    def is_login_stage(self) -> bool:
+        """True when this page is part of the login, by the stage-name convention."""
+        return self.stageId.startswith("login_")

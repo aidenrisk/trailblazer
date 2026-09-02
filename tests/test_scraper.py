@@ -493,11 +493,18 @@ def test_no_correction_warning_when_the_model_got_it_right(caplog) -> None:
 
 
 def test_key_is_required_by_the_schema_the_model_sees() -> None:
-    """Structured output must fail loudly on a dropped `key`, not fall back to guessing."""
-    assert "key" in Control.model_json_schema()["required"]
+    """Structured output must fail loudly on a dropped `key`, not fall back to guessing.
+
+    The shared `Control` leaves `key` optional so fixtures and stubs can build
+    pages by hand; the schema handed to the model is the stricter `_ModelControl`.
+    """
+    from trailblazer.agents.scraper.scraper import _ModelControl
+
+    assert "key" in _ModelControl.model_json_schema()["required"]
+    assert "key" not in Control.model_json_schema()["required"]
 
     with pytest.raises(ValueError, match="key"):
-        Control(
+        _ModelControl(
             fieldId="q_001",
             label="Legal Business Name",
             type="text",
@@ -510,7 +517,7 @@ def test_key_is_required_by_the_schema_the_model_sees() -> None:
 
 
 def test_serialized_control_has_exactly_the_documented_fields() -> None:
-    """`scraper_io.txt` fixes Control at eight fields; `key` is transport, not output."""
+    """`scraper_io.txt` fixes Control at nine fields (eight documented plus `credential`); `key` is transport, not output."""
     assert list(_control(key="el_0").model_dump().keys()) == [
         "fieldId",
         "label",
@@ -520,6 +527,7 @@ def test_serialized_control_has_exactly_the_documented_fields() -> None:
         "locator",
         "unique",
         "revealedBy",
+        "credential",
     ]
 
 
@@ -645,6 +653,7 @@ def test_perceive_output_matches_the_documented_contract(monkeypatch) -> None:
         "locator",
         "unique",
         "revealedBy",
+        "credential",
     ]
     assert body["page"]["next"] == 'button:has-text("Next")'
 
