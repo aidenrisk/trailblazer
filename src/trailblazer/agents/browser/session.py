@@ -208,20 +208,31 @@ class BrowserSession:
         log.info("browser attached cdp_endpoint=%s", self.cdp_endpoint)
         return self
 
-    def goto(self, url: str) -> Page:
-        """Navigate the live tab and wait for the network to go quiet."""
+    def goto(self, url: str, *, settle_ms: int = 5000, timeout_ms: int = 30000) -> Page:
+        """Navigate the live tab: wait for the DOM, then give the network a bounded chance to settle.
+
+        `networkidle` is not the arrival condition. A carrier's landing page keeps
+        analytics and chat connections open and never goes quiet, so waiting for
+        it timed out on the first real portal. The DOM being ready is what the
+        extractor needs; a short best-effort settle catches the client-side
+        render that usually follows, and expires harmlessly when it never comes.
+        """
         if self.page is None:
             raise RuntimeError("session not started; call start() or use the context manager")
         log.info("navigate url=%s", url)
         try:
-            self.page.goto(url, wait_until="networkidle")
+            self.page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except PlaywrightTimeoutError as e:
             raise RuntimeError(
-                f"navigation to {url} timed out waiting for the network to go quiet; "
-                "the page may load forever (polling, websockets) or the URL may be wrong"
+                f"navigation to {url} did not reach DOMContentLoaded within {timeout_ms} ms; "
+                "the URL may be wrong or the site unreachable"
             ) from e
         except PlaywrightError as e:
             raise RuntimeError(f"navigation to {url} failed: {e}") from e
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=settle_ms)
+        except PlaywrightError:
+            log.info("network did not go quiet within %d ms after %s; continuing with the DOM as is", settle_ms, url)
         return self.page
 
     def close(self) -> None:
