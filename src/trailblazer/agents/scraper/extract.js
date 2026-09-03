@@ -116,7 +116,11 @@
     .filter((el) => isVisible(el) && !el.disabled)
     .map((el, i) => {
       const tag = el.tagName.toLowerCase();
-      const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+      // A row or card wrapped in <a> carries its whole contents as innerText.
+      // Such an element is a record, not a control, and 30 of them bury the
+      // handful of real navigation targets.
+      const raw = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+      const text = raw.includes('\n') || raw.length > 80 ? '' : raw;
       const href = el.getAttribute('href') || '';
       const cands = [];
       if (el.id) cands.push(`#${esc(el.id)}`);
@@ -128,7 +132,7 @@
       if (text) cands.push(`${tag}:has-text(${JSON.stringify(text)})`);
       return { key: `ac_${i}`, tag, text, href, candidates: cands };
     })
-    .filter((a) => a.text || a.href);
+    .filter((a) => a.text);
 
   const all = Array.from(document.querySelectorAll(SELECTOR)).filter((el) => el.type !== 'hidden');
 

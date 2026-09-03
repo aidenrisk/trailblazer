@@ -1,0 +1,97 @@
+"""What Frontier hands the form filler, and what the filler hands back.
+
+One assignment is one action on one control. The filler never chooses the next
+one: Frontier holds the board and decides, so a walk is reconstructible from
+the assignment sequence alone.
+
+Field names are camelCase for the same reason as `page_description.py` -- the
+wire format is the contract.
+"""
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
+
+Intent = Literal["fill", "select", "check", "expand", "advance"]
+"""What the filler is being asked to do.
+
+`fill` types into a text-like control. `select` sets a choice, by clicking the
+option's own locator or by `select_option(label)` against the parent. `check`
+toggles a checkbox. `expand` opens a widget so its options can be read without
+committing to one -- the answer to a dropdown whose choices are not in the DOM
+until it is opened. `advance` clicks a link or button that moves the page on:
+login submit, "Get a Quote", "Next".
+"""
+
+
+class Assignment(BaseModel):
+    """One action, decided by Frontier, performed by the filler."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    intent: Intent
+
+    locator: str
+    """Measured by the scraper. The filler does not construct or repair it."""
+
+    fieldId: str | None = None
+    """The control acted on. `None` for `advance`, which targets an action."""
+
+    value: str | None = None
+    """Text for `fill`, option label for `select`. `None` for the rest.
+
+    A credential is passed as the placeholder `$EMAIL` / `$PASSWORD` / `$OTP`;
+    the filler resolves it from the session's credentials so the literal never
+    enters an assignment, a report or a log.
+    """
+
+    optionLocator: str | None = None
+    """The chosen option's own address, when it has one.
+
+    Set for a radio, where each choice is a separate clickable input. Absent for
+    a native `<select>`, whose choices are set by label against the parent.
+    """
+
+    constraintHint: str | None = None
+    """A format requirement learned from a previous rejection of this field."""
+
+
+class FillReport(BaseModel):
+    """What the filler did, and what the page said about it."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    fieldId: str | None
+    intent: Intent
+    locator: str
+
+    ok: bool
+    """False when the action could not be completed. `blocked` says why."""
+
+    valueUsed: str | None = None
+    """What was actually entered, after any correction.
+
+    Becomes `exampleValue` in the questions artifact, which is what lets a flow
+    self-validate after persist. A credential appears here as its placeholder.
+    """
+
+    constraint: dict[str, str] | None = None
+    """A format requirement the page revealed, as `{unit, format, hint}`.
+
+    Discovered only by being rejected: it is in neither the PageDescription nor
+    the assignment. It reaches the questions artifact so that a different answer
+    at replay time is shaped correctly rather than failing the same validation.
+    """
+
+    retried: bool = False
+    """Whether a validation error was cleared within this assignment."""
+
+    optionsRevealed: list[str] | None = None
+    """Choices read from a widget opened by `expand`.
+
+    A `<div role="combobox">` mounts its listbox on click, so its options do not
+    exist in the DOM until then and the scraper reports `options: null`.
+    """
+
+    blocked: dict[str, str] | None = None
+    """`{control, whatYouTried}` when the action failed. Reaches `metadata.blocked`."""

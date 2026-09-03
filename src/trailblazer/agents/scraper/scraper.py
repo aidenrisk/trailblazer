@@ -18,7 +18,7 @@ from playwright.sync_api import Page
 from trailblazer.agents.browser.tools import read_only_tools
 from trailblazer.agents.scraper.diff import diff_pages
 from trailblazer.agents.scraper.perceive import get_perceiver, payload_to_text
-from trailblazer.contracts.page_description import Control, PageDescription
+from trailblazer.contracts.page_description import Action, Control, PageDescription
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.logging import get_logger
@@ -54,13 +54,25 @@ def derive_stage_slug(url: str, title: str) -> str:
     return _slugify(title) or "page"
 
 
-def finalize(page: PageDescription, page_index: int, url: str, title: str) -> PageDescription:
-    """Assign the two fields code owns: `fieldId` and `stageId`."""
+def finalize(
+    page: PageDescription,
+    page_index: int,
+    url: str,
+    title: str,
+    actions: list[dict] | None = None,
+) -> PageDescription:
+    """Assign the fields code owns: `fieldId`, `stageId` and `actions`.
+
+    `actions` are measured, so they are restored from the extractor payload for
+    the same reason locators are: a model-authored click target is unverified.
+    """
     for i, control in enumerate(page.controls, start=1):
         control.fieldId = f"q_{i:03d}"
 
     page.stageId = f"form_page_{page_index}_{derive_stage_slug(url, title)}"
     page.url = url
+    if actions is not None:
+        page.actions = [Action(**a) for a in actions]
     return page
 
 
@@ -248,7 +260,13 @@ def perceive(page: Page, request: PerceiveRequest, settings: Settings | None = N
     restore_measured_locators(described, payload_controls)
     described.next = payload["next"]
     described.back = payload["back"]
-    finalize(described, request.page_index, payload["url"], payload["title"])
+    finalize(
+        described,
+        request.page_index,
+        payload["url"],
+        payload["title"],
+        payload.get("actions"),
+    )
 
     scraper_result = diff_pages(described, request.prior, request.assignment)
     log.info(

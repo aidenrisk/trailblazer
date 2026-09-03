@@ -117,6 +117,26 @@ class Control(BaseModel):
         return self
 
 
+class Action(BaseModel):
+    """A clickable element the page can be advanced by.
+
+    Reported for pages that hold nothing fillable -- a dashboard, a
+    business-type chooser -- where the only move is to click one specific thing.
+    Frontier chooses which; the scraper never clicks.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    label: str
+    """The element's visible text."""
+
+    href: str = ""
+    """The link target, empty for a button. Frontier matches on it."""
+
+    locator: str
+    unique: bool
+
+
 class PageDescription(BaseModel):
     """Everything the downstream pipeline needs to know about one form page."""
 
@@ -132,6 +152,9 @@ class PageDescription(BaseModel):
     """Locator for the forward button, if there is one."""
 
     back: str | None
+
+    actions: list[Action] = []
+    """Clickable elements, for a page whose only move is to advance."""
 
     blockers: list[str]
     """Validation text, overlays, decline chrome."""
