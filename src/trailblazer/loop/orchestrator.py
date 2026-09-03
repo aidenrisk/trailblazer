@@ -17,7 +17,7 @@ from trailblazer.agents.browser import shared_session
 from trailblazer.agents.browser.session import AttachedSession, BrowserSession, devtools_running
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
-from trailblazer.observability.logging import get_logger
+from trailblazer.observability.logging import get_logger, log_contract
 from trailblazer.shared.config import Settings, get_settings
 
 log = get_logger(__name__)
@@ -61,7 +61,9 @@ def perceive_once(
 
     with open_session(settings, headed) as session:
         page = session.goto(url)
-        return perceive(page, PerceiveRequest(job_id=job, page_index=page_index), settings)
+        result = perceive(page, PerceiveRequest(job_id=job, page_index=page_index), settings)
+    log_contract(log, "PageDescription", result.page)
+    return result
 
 
 def run_crawl(
@@ -101,6 +103,8 @@ def run_crawl(
             PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
             settings,
         )
+    log_contract(log, "PageDescription", result.page)
+    log_contract(log, "ScraperResult", result)
 
     log.info(
         "crawl end job_id=%s stage_id=%s polarity=%s",
