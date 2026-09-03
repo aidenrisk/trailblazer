@@ -1,0 +1,201 @@
+"""Stand-in portal pages for the browser-level tests, as strings.
+
+Kept in code rather than as .html files so the repository carries no synthetic
+web pages. Each test writes what it needs to a temp directory at run time
+(`write_pages`) and either opens it as a file URL or serves it over HTTP (see
+tests/agents/browser/conftest.py), which pages that use localStorage need.
+
+What each page stands in for:
+- LOGIN: a sign-in form with a hidden look-alike submit button (Auth0's habit).
+- OTP: a single code input; 123456 lands on DASHBOARD, anything else shows an error.
+- OTP_DIGITS: six single-character boxes with no ids or labels, and an <input type=submit>.
+- DASHBOARD: the authenticated landing page after a good code.
+- SESSION: a page that, with ?seed=1, behaves like a portal that just logged in.
+"""
+
+from pathlib import Path
+
+LOGIN = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+<h1>Welcome to the Agent Portal</h1>
+<form id="login-form" method="post" action="#">
+  <label for="username">Email address</label>
+  <input type="email" id="username" name="username" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="current-password" required>
+  <label>
+    <input type="checkbox" id="remember" name="remember">
+    Remember me on this device
+  </label>
+  <button type="submit" name="action" value="default" hidden>Sign in</button>
+  <button type="submit" name="action" value="default" id="submit-visible">Sign in</button>
+  <p id="login-error" hidden>We could not sign you in. Check your email and password.</p>
+</form>
+<script>
+  // The portal's side of the sign-in: one good pair of credentials moves on to
+  // the code screen; anything else stays here with an error.
+  document.getElementById('login-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var u = document.getElementById('username').value;
+    var p = document.getElementById('password').value;
+    if (u === 'agent@example.com' && p === 'pw-1') {
+      window.location.href = 'otp.html';
+    } else {
+      document.getElementById('login-error').hidden = false;
+    }
+  });
+</script>
+</body>
+</html>
+"""
+
+# The sign-in page under a consent banner that keeps the submit button disabled
+# until it is answered. "Reject all" is the privacy-preserving choice and the one
+# FormFiller must pick; "Accept all" is the one a lazy replay would take.
+LOGIN_CONSENT = LOGIN.replace(
+    '<h1>Welcome to the Agent Portal</h1>',
+    '''<h1>Welcome to the Agent Portal</h1>
+<div id="cookie-banner" role="dialog" aria-modal="true" class="cookie-consent">
+  <p>We use cookies to improve your experience.</p>
+  <button type="button" id="accept-all">Accept all</button>
+  <button type="button" id="reject-all">Reject all</button>
+</div>''',
+).replace(
+    'id="submit-visible">Sign in</button>',
+    'id="submit-visible" disabled>Sign in</button>',
+).replace(
+    "<script>",
+    """<script>
+  for (var id of ['accept-all', 'reject-all']) {
+    document.getElementById(id).addEventListener('click', function () {
+      document.getElementById('cookie-banner').remove();
+      document.getElementById('submit-visible').disabled = false;
+      document.body.dataset.consent = this.id;
+    });
+  }""",
+)
+
+OTP = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Verify your identity</title></head>
+<body>
+<h1>Check your email</h1>
+<p>We sent a 6-digit code to a&bull;&bull;&bull;@aidenrisk.com.</p>
+<form id="otp-form" method="post" action="#">
+  <label for="code">Verification code</label>
+  <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+  <button type="button" id="resend">Resend code</button>
+  <button type="submit" id="verify">Verify</button>
+  <p id="error" hidden>That code is not right. Check the newest email and try again.</p>
+</form>
+<script>
+  document.getElementById('otp-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (document.getElementById('code').value === '123456') {
+      window.location.href = 'dashboard.html';
+    } else {
+      document.getElementById('error').hidden = false;
+      document.getElementById('code').value = '';
+    }
+  });
+</script>
+</body>
+</html>
+"""
+
+OTP_DIGITS = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Two-step verification</title></head>
+<body>
+<h1>Two-step verification</h1>
+<form id="digits-form" method="post" action="#">
+  <fieldset>
+    <legend>Enter the 6-digit code we texted or emailed you</legend>
+    <div class="digit-boxes">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+      <input type="text" maxlength="1" inputmode="numeric">
+    </div>
+  </fieldset>
+  <input type="submit" value="Continue">
+</form>
+</body>
+</html>
+"""
+
+DASHBOARD = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Agent Portal</title></head>
+<body>
+<h1>Welcome back, Agent</h1>
+<nav><a href="#" id="logout">Log out</a></nav>
+<p>Start a quote</p>
+</body>
+</html>
+"""
+
+SESSION = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Session probe</title></head>
+<body>
+<h1>Session probe</h1>
+<pre id="dump"></pre>
+<script>
+  if (new URLSearchParams(location.search).get('seed') === '1') {
+    sessionStorage.setItem('msal.idtoken', 'tok-1');
+    sessionStorage.setItem('draftId', 'd-9');
+    localStorage.setItem('theme', 'dark');
+    localStorage.setItem('inProgressApplication', 'app-42');
+  }
+  document.getElementById('dump').textContent = JSON.stringify({
+    session: Object.fromEntries(Object.keys(sessionStorage).map(k => [k, sessionStorage.getItem(k)])),
+    local: Object.fromEntries(Object.keys(localStorage).map(k => [k, localStorage.getItem(k)])),
+  });
+</script>
+</body>
+</html>
+"""
+
+# The app shell a portal renders from a stale cookie jar: no login controls on the
+# page, but every call to its own API comes back 401. Looks logged in; is not.
+STALE = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Agent Portal</title></head>
+<body>
+<h1>Welcome back</h1>
+<p>Loading your book of business…</p>
+<script>
+  for (const path of ['/api/session', '/api/me', '/api/quotes']) {
+    fetch(path).catch(() => {});
+  }
+</script>
+</body>
+</html>
+"""
+
+PAGES = {
+    "login.html": LOGIN,
+    "login-consent.html": LOGIN_CONSENT,
+    "stale.html": STALE,
+    "otp.html": OTP,
+    "otp-digits.html": OTP_DIGITS,
+    "dashboard.html": DASHBOARD,
+    "session.html": SESSION,
+}
+
+
+def write_pages(directory: Path) -> Path:
+    """Materialise every page into `directory` and return it."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, html in PAGES.items():
+        (directory / name).write_text(html)
+    return directory
+
+
+def page_uri(directory: Path, name: str) -> str:
+    return (directory / name).resolve().as_uri()
