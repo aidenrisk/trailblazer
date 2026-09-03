@@ -1,0 +1,353 @@
+"""Frontier: the agent that decides what to act on next.
+
+It holds the board (`board.py`) and nothing else. It never touches the browser,
+never chooses a value for a field -- that is the filler's judgment -- and makes
+no LLM call: every decision here is a lookup against state it already holds, so
+a model would add cost and nondeterminism to arithmetic.
+
+`observe` folds one PageDescription and the previous FillReport into the board;
+`next_assignment` reads the board and returns one Assignment, or `None` when the
+page is done. Loop routes on that `None`.
+"""
+
+import re
+import time
+
+from trailblazer.agents.frontier.board import CHECKED, Board
+from trailblazer.contracts.assignment import Assignment, FillReport
+from trailblazer.contracts.page_description import Action, Control, PageDescription
+from trailblazer.observability.ledger import RunLedger
+from trailblazer.observability.logging import get_logger, log_contract
+
+log = get_logger(__name__)
+
+# Controls typed as a choice but carrying no options: the listbox is mounted on
+# click, so the set cannot be read until the widget is opened (spec §5).
+_EXPANDABLE_TYPES = {"select", "other"}
+
+
+def _normalise(text: str) -> str:
+    """Lowercase, with `_`, `-` and `/` folded to spaces, for substring matching."""
+    return re.sub(r"[_\-/]+", " ", text.casefold())
+
+
+class Frontier:
+    """The board for the page currently under the walk, and the next move on it.
+
+    One instance spans a whole crawl. The board inside it is per page: a
+    PageDescription carrying a new `stageId` retires the previous board, because
+    `fieldId` is a per-page counter and does not identify a control across pages.
+    """
+
+    def __init__(
+        self,
+        business_types: list[str],
+        insurance_types: list[str],
+        ledger: RunLedger | None = None,
+    ) -> None:
+        self.business_types = business_types
+        self.insurance_types = insurance_types
+        self.ledger = ledger
+        self.board: Board | None = None
+        self.page: PageDescription | None = None
+
+    # ----------------------------------------------------------------- observe
+
+    def observe(
+        self,
+        page: PageDescription,
+        report: FillReport | None = None,
+        added: list[str] | None = None,
+    ) -> None:
+        """Fold a new description and the last report into the board.
+
+        `added` is `ScraperResult.addedControls`: the fieldIds new since the
+        previous perceive. They are attributed to the assignment the report
+        names, which is what makes `revealed` answerable.
+        """
+        started = time.monotonic()
+        if self.board is None or self.board.stage_id != page.stageId:
+            if self.board is not None:
+                log.info(
+                    "board retired stage_id=%s attempted=%d gates_remaining=%d",
+                    self.board.stage_id,
+                    len(self.board.attempted),
+                    len(self.board.half_walked()),
+                )
+            self.board = Board(stage_id=page.stageId)
+            log.info("board opened stage_id=%s url=%s", page.stageId, page.url)
+
+        board = self.board
+        self.page = page
+
+        if report is not None:
+            self._apply(board, report)
+
+        newly_added = set(added or [])
+        revealed_by = report.fieldId if report is not None else None
+        for control in page.controls:
+            board.add(control, revealed_by if control.fieldId in newly_added else None)
+
+        log_contract(log, "FrontierBoard", board.summary())
+        self._record("observe", page.stageId, started)
+
+    def _apply(self, board: Board, report: FillReport) -> None:
+        """Mark what the filler did, including a gate side taken or options revealed."""
+        if report.fieldId is None:
+            # An `advance`: the action was clicked, so it is not re-issued.
+            board.advanced.add(report.locator)
+            board.dismissed_blockers.add(report.locator)
+            return
+
+        board.attempted.add(report.fieldId)
+        gate = board.gates.get(report.fieldId)
+        if gate is not None and report.valueUsed is not None:
+            gate.take(report.valueUsed)
+        elif gate is not None and report.intent == "check":
+            # A check with no value recorded still took the checked side.
+            gate.take(CHECKED)
+
+        if not report.ok:
+            log.warning(
+                "assignment failed stage_id=%s field_id=%s intent=%s blocked=%s",
+                board.stage_id,
+                report.fieldId,
+                report.intent,
+                report.blocked,
+            )
+
+    # --------------------------------------------------------------- decisions
+
+    def next_assignment(self) -> Assignment | None:
+        """The next thing to do, or None when the page is done.
+
+        Priority, highest first: clear a blocker, advance a page with nothing
+        fillable, act on an unattempted field, walk a gate's remaining side.
+        """
+        started = time.monotonic()
+        if self.board is None or self.page is None:
+            raise RuntimeError("next_assignment called before observe")
+
+        assignment = (
+            self._dismiss_blocker()
+            or self._advance_to_target()
+            or self._first_unattempted()
+            or self._walk_remaining_gate()
+        )
+
+        if assignment is None:
+            log.info("page done stage_id=%s", self.board.stage_id)
+            self._record("done", self.board.stage_id, started)
+            return None
+
+        log_contract(log, "Assignment", assignment)
+        log.info(
+            "assign stage_id=%s intent=%s field_id=%s value=%s",
+            self.board.stage_id,
+            assignment.intent,
+            assignment.fieldId or "-",
+            assignment.value or "-",
+        )
+        self._record("assign", assignment.fieldId or assignment.intent, started)
+        return assignment
+
+    def page_done(self) -> bool:
+        """True when every field is attempted and every two-sided gate is walked.
+
+        A pure read: unlike `next_assignment` it records nothing, so Loop can
+        ask before deciding whether to assign.
+        """
+        if self.board is None or self.page is None:
+            return False
+        return not (
+            self._blocking_action()
+            or self._target_action()
+            or self.board.unattempted()
+            or self.board.half_walked()
+        )
+
+    def summary(self) -> dict:
+        """Board state for logging and for the completion assertion."""
+        return self.board.summary() if self.board is not None else {}
+
+    # -------------------------------------------------------------- priorities
+
+    def _dismiss_blocker(self) -> Assignment | None:
+        """A cookie banner or modal is in the way: click the action that clears it."""
+        assert self.board is not None and self.page is not None
+        action = self._blocking_action()
+        if action is None:
+            if self.page.blockers:
+                log.warning(
+                    "blockers with no dismissing action stage_id=%s blockers=%s",
+                    self.board.stage_id,
+                    "; ".join(self.page.blockers),
+                )
+            return None
+
+        self.board.dismissed_blockers.add(action.locator)
+        return Assignment(intent="advance", locator=action.locator)
+
+    def _blocking_action(self) -> Action | None:
+        """The first un-clicked action that would clear a blocker, if the page has one.
+
+        The blocker text carries no locator of its own -- `blockers` is a list of
+        strings -- so the dismissing element is found among the page's actions by
+        its label. An action already clicked is never re-offered, so a blocker
+        that does not clear stops the page rather than looping on it.
+        """
+        assert self.board is not None and self.page is not None
+        if not self.page.blockers:
+            return None
+        words = ("accept", "agree", "dismiss", "close", "got it", "ok", "continue", "allow")
+        for action in self.page.actions:
+            if action.locator in self.board.dismissed_blockers:
+                continue
+            if any(w in action.label.casefold() for w in words):
+                return action
+        return None
+
+    def _advance_to_target(self) -> Assignment | None:
+        """Nothing fillable and actions present: click the one matching the crawl."""
+        action = self._target_action()
+        if action is None:
+            return None
+        return Assignment(intent="advance", locator=action.locator)
+
+    def _target_action(self) -> Action | None:
+        """The un-clicked action to advance on, when the page holds nothing fillable.
+
+        A unique action is preferred over a non-unique one: a portal that repeats
+        "Get a Quote" in a header and again in a card offers two locators for one
+        destination, and only one of them resolves to a single node.
+        """
+        assert self.board is not None and self.page is not None
+        if self.page.controls or not self.page.actions:
+            return None
+
+        candidates = [a for a in self.page.actions if a.locator not in self.board.advanced]
+        if not candidates:
+            return None
+
+        matched = [a for a in candidates if self._matches_target(a)]
+        pool = matched or candidates
+        chosen = next((a for a in pool if a.unique), pool[0])
+        if not matched:
+            log.warning(
+                "no action matches the crawl target stage_id=%s types=%s advancing on %r",
+                self.board.stage_id,
+                ",".join(self.business_types + self.insurance_types),
+                chosen.label,
+            )
+        return chosen
+
+    def _matches_target(self, action: Action) -> bool:
+        """Case-insensitive substring of the job's types against label and href.
+
+        Both sides are normalised because the job names a type as an identifier
+        (`workers_comp`) and the page renders it as prose ("Workers Comp Quote"):
+        matching the raw strings never fires.
+        """
+        haystack = _normalise(f"{action.label} {action.href}")
+        return any(
+            _normalise(t) in haystack for t in self.business_types + self.insurance_types
+        )
+
+    def _first_unattempted(self) -> Assignment | None:
+        """One assignment for the next field with no FillReport.
+
+        A gate is assigned its first side by name rather than left to the
+        filler: the board has to know which side was taken to know which one is
+        still owed, and a value Frontier did not choose cannot be accounted for.
+        """
+        assert self.board is not None
+        for field_id in self.board.unattempted():
+            control = self.board.controls[field_id]
+            gate = self.board.gates.get(field_id)
+            if gate is not None and gate.remaining:
+                value = gate.remaining[0]
+                gate.take(value)
+                return self._assign(control, value)
+            return self._assign(control)
+        return None
+
+    def _walk_remaining_gate(self) -> Assignment | None:
+        """Walk the other side of a gate taken only one way.
+
+        The page still holds the first side: returning it to the pre-choice
+        state needs renavigation and a replay of the action prefix, which is the
+        Generator's output and does not exist yet. The assignment is issued
+        anyway and the gate is recorded in `issued_without_reset`, so the
+        completion assertion can see that the branch was walked from a dirty
+        page rather than a clean one.
+        """
+        assert self.board is not None
+        for field_id in self.board.half_walked():
+            gate = self.board.gates[field_id]
+            control = self.board.controls[field_id]
+            value = gate.remaining[0]
+            self.board.issued_without_reset.append(field_id)
+            log.warning(
+                "walking gate second side with no reset stage_id=%s field_id=%s value=%r "
+                "-- renavigation needs the Generator's action prefix, which is not built",
+                self.board.stage_id,
+                field_id,
+                value,
+            )
+            gate.take(value)
+            return self._assign(control, value)
+        return None
+
+    # ------------------------------------------------------------------ intent
+
+    def _assign(self, control: Control, value: str | None = None) -> Assignment:
+        """Build the assignment for `control`, choosing intent from its shape.
+
+        `value` is supplied only when walking a gate to a named side; otherwise
+        it is left `None`, because picking a value is the filler's job.
+        """
+        if control.options is None:
+            if control.type in _EXPANDABLE_TYPES:
+                # The choices are not in the DOM until the widget is opened.
+                return Assignment(
+                    intent="expand", locator=control.locator, fieldId=control.fieldId
+                )
+            if control.type == "toggle":
+                # `value` is "true"/"false": the two sides of a checkbox have no
+                # option labels, so the assignment names the state to leave it in
+                # rather than saying only "toggle it".
+                return Assignment(
+                    intent="check",
+                    locator=control.locator,
+                    fieldId=control.fieldId,
+                    value=value,
+                )
+            return Assignment(intent="fill", locator=control.locator, fieldId=control.fieldId)
+
+        option_locator = None
+        if value is not None:
+            option_locator = next(
+                (o.locator for o in control.options if o.label == value and o.locator), None
+            )
+        return Assignment(
+            intent="select",
+            locator=control.locator,
+            fieldId=control.fieldId,
+            value=value,
+            optionLocator=option_locator,
+        )
+
+    # ------------------------------------------------------------------ ledger
+
+    def _record(self, action: str, detail: str, started: float) -> None:
+        """One ledger step. `usd` is always zero: Frontier makes no LLM call."""
+        if self.ledger is None:
+            return
+        self.ledger.record(
+            agent="frontier",
+            action=action,
+            detail=detail,
+            usd=0.0,
+            ms=int((time.monotonic() - started) * 1000),
+            ok=True,
+        )
