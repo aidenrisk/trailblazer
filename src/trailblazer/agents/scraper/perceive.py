@@ -128,6 +128,61 @@ def _measure_options(page: Page, options: list[dict] | None) -> list[dict] | Non
     return measured
 
 
+def _check_integrity(page: Page, controls: list[dict]) -> None:
+    """Log the ways a control set can be structurally wrong but still validate.
+
+    Each of these produces a well-formed PageDescription that misdirects every
+    agent downstream, and none is visible once the payload leaves this module.
+    """
+    for c in controls:
+        if not c.get("unique") and c.get("locator"):
+            log.error(
+                "locator is not unique: key=%s name=%r locator=%r",
+                c.get("key"),
+                c.get("name"),
+                c["locator"],
+            )
+
+    seen: dict[str, str] = {}
+    for c in controls:
+        loc = c.get("locator")
+        if not loc:
+            continue
+        if loc in seen:
+            log.error(
+                "duplicate locator %r on key=%s and key=%s; one of them addresses the wrong node",
+                loc,
+                seen[loc],
+                c.get("key"),
+            )
+        seen[loc] = c.get("key", "")
+
+    # A control whose locator resolves to several same-named radios is a radio
+    # group the extractor failed to collapse: the question is lost and every
+    # choice looks like its own field.
+    for c in controls:
+        loc = c.get("locator")
+        if not loc or c.get("options"):
+            continue
+        try:
+            handles = page.locator(loc).element_handles()
+        except PlaywrightError:
+            continue
+        names = {h.get_attribute("name") for h in handles if h.get_attribute("type") == "radio"}
+        if len(handles) > 1 and len(names) == 1 and None not in names:
+            log.error(
+                "ungrouped radio group: key=%s locator=%r matches %d inputs named %r",
+                c.get("key"),
+                loc,
+                len(handles),
+                next(iter(names)),
+            )
+
+    unlabelled = [c.get("key") for c in controls if not c.get("accessibleName")]
+    if unlabelled:
+        log.warning("controls with no accessible name: %s", ", ".join(map(str, unlabelled)))
+
+
 class DomSnapshotPerceiver:
     """DOM extraction for addressability, accessibility snapshot for semantics."""
 
@@ -142,6 +197,8 @@ class DomSnapshotPerceiver:
             cleaned = {k: v for k, v in item.items() if k != "candidates"}
             cleaned["options"] = _measure_options(page, item.get("options"))
             controls.append({**cleaned, "locator": locator, "unique": unique})
+
+        _check_integrity(page, controls)
 
         return {
             "url": page.url,
