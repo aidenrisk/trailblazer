@@ -55,19 +55,12 @@ def derive_stage_slug(url: str, title: str) -> str:
 
 
 def finalize(page: PageDescription, page_index: int, url: str, title: str) -> PageDescription:
-    """Assign the three things code owns: `fieldId`, `stageId`, `candidateGates`.
-
-    `candidateGates` is every control with a non-empty `options` list. It
-    over-reports -- a 50-state dropdown becomes a candidate -- but Frontier
-    settles that by walking, and a false candidate costs one wasted walk while a
-    missed gate costs an unexplored branch. Wrong in the cheap direction.
-    """
+    """Assign the two fields code owns: `fieldId` and `stageId`."""
     for i, control in enumerate(page.controls, start=1):
         control.fieldId = f"q_{i:03d}"
 
     page.stageId = f"form_page_{page_index}_{derive_stage_slug(url, title)}"
     page.url = url
-    page.candidateGates = [c.fieldId for c in page.controls if c.options]
     return page
 
 

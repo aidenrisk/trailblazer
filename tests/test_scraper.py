@@ -147,7 +147,6 @@ def _page(controls: list[Control], **overrides) -> PageDescription:
         controls=controls,
         next='button:has-text("Next")',
         back=None,
-        candidateGates=[],
         blockers=[],
     )
     return PageDescription(**{**base, **overrides})
@@ -163,12 +162,6 @@ def test_scalar_types_must_have_null_options() -> None:
     """`[]` on a text field would read as 'zero choices' downstream."""
     with pytest.raises(ValueError, match="options=None"):
         _control(type="text", options=[])
-
-
-def test_candidate_gates_must_name_known_controls() -> None:
-    """A gate naming an absent fieldId would misroute Frontier."""
-    with pytest.raises(ValueError, match="unknown fieldIds"):
-        _page([_control()], candidateGates=["q_099"])
 
 
 def test_stage_slug_is_stable_across_url_shapes() -> None:
@@ -285,8 +278,8 @@ def test_finalize_builds_stage_id_from_page_index_and_slug() -> None:
     assert page.url == "https://x.com/work-comp/business-info"
 
 
-def test_finalize_sets_candidate_gates_to_controls_with_options() -> None:
-    """The rule is: non-empty `options`, and nothing else. Over-reports on purpose."""
+def test_finalize_numbers_every_control_in_order() -> None:
+    """`fieldId` is a per-page counter; downstream joins depend on the order."""
     page = _page(
         [
             _control(fieldId="", locator="#name", type="text", options=None),
@@ -298,17 +291,7 @@ def test_finalize_sets_candidate_gates_to_controls_with_options() -> None:
 
     finalize(page, page_index=1, url="https://x.com/business-info", title="t")
 
-    # q_002 and q_004 are the two with options.
-    assert page.candidateGates == ["q_002", "q_004"]
-
-
-def test_finalize_leaves_candidate_gates_empty_when_nothing_has_options() -> None:
-    """A page of free-text fields branches nowhere."""
-    page = _page([_control(fieldId="", type="text", options=None)])
-
-    finalize(page, page_index=1, url="https://x.com/business-info", title="t")
-
-    assert page.candidateGates == []
+    assert [c.fieldId for c in page.controls] == ["q_001", "q_002", "q_003", "q_004"]
 
 
 # --------------------------------------------------------------------------- #

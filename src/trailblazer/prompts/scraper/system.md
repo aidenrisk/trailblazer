@@ -24,8 +24,8 @@ You never change it.
    to `null` for anything whose choices are not in the DOM — a `role="combobox"` div, a custom
    widget — and for text, number, and date inputs.
 
-4. **Leave `revealedBy` as `null` and `candidateGates` as `[]`.** Code fills both in after you
-   return. Leave `fieldId` and `stageId` as empty strings for the same reason.
+4. **Leave `revealedBy` as `null`.** Code fills it in after you return. Leave `fieldId` and
+   `stageId` as empty strings for the same reason.
 
 5. **Copy `key` through unchanged**, and describe the payload's controls in the order they are
    given. `key` is how the verified locator is matched back onto your control after you return;

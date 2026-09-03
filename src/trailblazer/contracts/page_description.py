@@ -133,16 +133,6 @@ class PageDescription(BaseModel):
 
     back: str | None
 
-    candidateGates: list[str]
-    """fieldIds that may branch: every control with a non-empty `options` list.
-
-    Unchanged by `Option` becoming an object: the rule reads the list's length,
-    never its element type. What does change is that a radio group now arrives
-    as one control carrying its choices, so it reaches this rule at all --
-    before, it arrived as one control per choice with `options: None` and no
-    entry qualified.
-    """
-
     blockers: list[str]
     """Validation text, overlays, decline chrome."""
 
@@ -154,11 +144,3 @@ class PageDescription(BaseModel):
             raise ValueError(f"locator {v!r} is an accessibility snapshot ref, not a locator")
         return v
 
-    @model_validator(mode="after")
-    def _gates_reference_known_controls(self) -> "PageDescription":
-        """A gate naming a fieldId that is not on the page would misroute Frontier."""
-        known = {c.fieldId for c in self.controls}
-        unknown = [g for g in self.candidateGates if g not in known]
-        if unknown:
-            raise ValueError(f"candidateGates reference unknown fieldIds: {unknown}")
-        return self
