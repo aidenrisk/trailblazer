@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Business Information</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    .hidden { display: none; }
+    .menu { border: 1px solid #ccc; margin-top: .25rem; }
+    .menu [role="option"] { padding: .25rem .5rem; cursor: pointer; }
+    .split button[aria-pressed="true"] { outline: 2px solid #333; }
+  </style>
+</head>
+<body>
+<h1>Business Information</h1>
+
+<!--
+  The shapes that matter, one of each, modelled on the live Pie page:
+
+  #agencyProgram   custom combobox — renders its options ONLY after a click, so a
+                   scraper reports options: null and the filler is what finds them
+  #entityType      native <select> — options are in the DOM from the start
+  Yes / No         split control — two separate buttons, no shared parent element
+  #membersRow      revealed only while #entityType is "llc"
+  #emptyMenu       a widget that opens and genuinely has no options
+  #duplicateName   two elements sharing one locator, to force not_unique
+-->
+
+<form id="app-form">
+
+  <!-- Custom combobox: the list does not exist in the DOM until it is opened. -->
+  <label id="agencyProgramLabel">Agency / Program</label>
+  <div id="agencyProgram" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+       aria-labelledby="agencyProgramLabel" tabindex="0">Select...</div>
+  <div id="agencyProgramMenu" role="listbox" class="menu hidden"></div>
+
+  <label for="effectiveDate">Policy Effective Date</label>
+  <input type="date" id="effectiveDate" name="effectiveDate">
+
+  <label for="businessZipCode">Business Zip Code</label>
+  <input type="text" id="businessZipCode" name="businessZipCode">
+
+  <label for="businessName">Legal Business Name</label>
+  <input type="text" id="businessName" name="businessName">
+
+  <!-- Native select. The blank first entry is a placeholder, not a choice. -->
+  <label for="entityType">Legal Entity Type</label>
+  <select id="entityType" name="entityType">
+    <option value="">Select...</option>
+    <option value="llc">Limited Liability Company</option>
+    <option value="corp">Corporation</option>
+    <option value="sole">Sole Proprietor</option>
+  </select>
+
+  <!-- Exists only while entityType is llc. -->
+  <div id="membersRow" class="hidden">
+    <label for="members">Number of Members</label>
+    <input type="text" id="members" name="members">
+  </div>
+
+  <label for="fein">FEIN</label>
+  <input type="text" id="fein" name="fein">
+
+  <label for="targetPremium">Target or Incumbent Premium</label>
+  <input type="number" id="targetPremium" name="targetPremium">
+
+  <!-- Split control: two buttons, each its own locator. -->
+  <label>Does this business have multiple locations?</label>
+  <div class="split">
+    <button type="button" id="locationsYes" aria-pressed="false">Yes</button>
+    <button type="button" id="locationsNo" aria-pressed="false">No</button>
+  </div>
+
+  <label><input type="checkbox" id="priorCoverage" name="priorCoverage"> Has Prior Coverage</label>
+
+  <!-- Rejects anything that isn't five digits, so a fill can fail to stick. -->
+  <label for="strictZip">Mailing Zip (5 digits only)</label>
+  <input type="text" id="strictZip" name="strictZip">
+
+  <!-- Opens, but has nothing in it. -->
+  <label id="emptyMenuLabel">Prior Carrier</label>
+  <div id="emptyMenu" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+       aria-labelledby="emptyMenuLabel" tabindex="0">Select...</div>
+  <div id="emptyMenuList" role="listbox" class="menu hidden"></div>
+
+  <!-- Two elements, one class: any locator for it matches both. -->
+  <input type="text" class="duplicateName" name="dupe1">
+  <input type="text" class="duplicateName" name="dupe2">
+</form>
+
+<p>
+  <button type="button" id="deadNext">Next (does nothing)</button>
+  <button type="button" id="realNext">Next</button>
+</p>
+
+<script>
+  const AGENCIES = ["Pie Direct", "Pie Partner Program"];
+
+  // The combobox renders its options on open and removes them on close, which is
+  // what makes it invisible to a scraper that only reads the initial DOM.
+  const combo = document.getElementById("agencyProgram");
+  const menu = document.getElementById("agencyProgramMenu");
+  combo.addEventListener("click", () => {
+    const open = combo.getAttribute("aria-expanded") === "true";
+    if (open) { menu.innerHTML = ""; menu.classList.add("hidden"); combo.setAttribute("aria-expanded", "false"); return; }
+    menu.innerHTML = "";
+    for (const label of AGENCIES) {
+      const item = document.createElement("div");
+      item.setAttribute("role", "option");
+      item.id = "agency-" + label.toLowerCase().replace(/\s+/g, "-");
+      item.textContent = label;
+      item.addEventListener("click", () => {
+        combo.textContent = label;
+        combo.dataset.value = label;
+        menu.innerHTML = "";
+        menu.classList.add("hidden");
+        combo.setAttribute("aria-expanded", "false");
+      });
+      menu.appendChild(item);
+    }
+    menu.classList.remove("hidden");
+    combo.setAttribute("aria-expanded", "true");
+  });
+
+  // Opens the same way, and has nothing to show.
+  const empty = document.getElementById("emptyMenu");
+  const emptyList = document.getElementById("emptyMenuList");
+  empty.addEventListener("click", () => {
+    emptyList.classList.toggle("hidden");
+    empty.setAttribute("aria-expanded", emptyList.classList.contains("hidden") ? "false" : "true");
+  });
+
+  // Members exists only while the entity type is llc.
+  const entity = document.getElementById("entityType");
+  entity.addEventListener("change", () => {
+    document.getElementById("membersRow").classList.toggle("hidden", entity.value !== "llc");
+  });
+
+  // The split control is two buttons; pressing one releases the other.
+  for (const id of ["locationsYes", "locationsNo"]) {
+    document.getElementById(id).addEventListener("click", () => {
+      document.getElementById("locationsYes").setAttribute("aria-pressed", String(id === "locationsYes"));
+      document.getElementById("locationsNo").setAttribute("aria-pressed", String(id === "locationsNo"));
+    });
+  }
+
+  // Five digits or nothing: a fill that doesn't stick, without a server.
+  const strict = document.getElementById("strictZip");
+  strict.addEventListener("input", () => {
+    if (!/^\d{0,5}$/.test(strict.value)) strict.value = "";
+  });
+
+  document.getElementById("deadNext").addEventListener("click", () => {});
+  document.getElementById("realNext").addEventListener("click", () => {
+    window.location.href = "form_page_2.html";
+  });
+</script>
+</body>
+</html>

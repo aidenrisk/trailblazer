@@ -7,7 +7,22 @@ authors = [
     { name = "Malaika Noor", email = "malaika@aidenrisk.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "playwright>=1.62.0",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    # The value picker calls a model to decide what to type; `langchain` itself
+    # is only needed by the recovery agent, which runs solely after a locator
+    # has already failed.
+    "langchain>=1.3.18",
+    "langchain-anthropic>=1.7.0",
+    "langchain-openrouter>=0.2.8",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
 
 [project.scripts]
 trailblazer = "trailblazer:main"
@@ -15,3 +30,10 @@ trailblazer = "trailblazer:main"
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# FillReports are logged as raw JSON; pytest's level/logger/line prefix makes
+# them unreadable. Turn them on with:  pytest -s --log-cli-level=INFO
+log_cli_format = "%(message)s"
+log_cli_date_format = "%H:%M:%S"

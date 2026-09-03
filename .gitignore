@@ -1,0 +1,17 @@
+inputs/
+outputs/
+.venv/
+
+# Markdown files (docs, guides, etc.) - keep only README.md in git
+*.md
+!README.md
+# ...and agent prompts, which are source: recovery.py reads system.md on import,
+# so a clone without them cannot start.
+!src/trailblazer/prompts/**/*.md
+logs/
+
+# Secrets and caches
+.env
+__pycache__/
+*.pyc
+frontier_response.json
