@@ -49,16 +49,21 @@ uv run trailblazer serve --port 8000
 ```bash
 curl -X POST http://127.0.0.1:8000/v0/carriers/pie/crawl \
   -H 'content-type: application/json' \
-  -d '{"insuranceTypes":["workers_comp"],"businessTypes":["contractors"],"headed":false,
-       "url":"http://localhost:8765/form.html"}'
+  -d '{"insuranceTypes":["workers_comp"],"businessTypes":["contractors"],"headed":false}'
 ```
 
-`url` is a temporary field. A crawl starts from a carrier's portal URL, which belongs in a
-carriers table that does not exist yet — supply it per-request, or set `CARRIER_URL`. Both
-go away once `carrier_id` can be looked up.
+The client never sends a URL or credentials. They are looked up from `carrier_id` by
+`resolve_carrier_creds()`, which belongs against the `carrier_creds` table.
 
-400 when no URL is available, 422 on a malformed body, 500 when the crawl itself fails,
-with the cause in `detail`.
+**`carrier_id` is currently ignored.** The lookup is the dev stub in
+`src/trailblazer/shared/dev_carrier_creds.py`, which reads `CARRIER_URL` /
+`CARRIER_USERNAME` / `CARRIER_PASSWORD` from `.env` — one set of env vars, so every
+`carrier_id` resolves to the same portal. Set `CARRIER_URL` before calling the endpoint.
+The stub goes away when `resolve_carrier_creds()` is backed by the table; its signature
+does not change.
+
+400 when the carrier has no credentials on file, 422 on a malformed body, 500 when the
+crawl itself fails, with the cause in `detail`.
 
 ### Logging and cost
 
