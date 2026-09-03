@@ -75,6 +75,22 @@
   };
 
   /**
+   * The nearest ancestor holding every member of the group and nothing of any
+   * other group. It is what the group's own locator addresses; without it the
+   * only candidate is the shared `name`, which matches every member.
+   */
+  const groupContainer = (lead, name, count) => {
+    let n = lead.parentElement;
+    for (let i = 0; i < 8 && n && n !== document.body; i++) {
+      if (n.querySelectorAll(`input[name="${name}"]`).length === count) {
+        if (n.id || n.getAttribute('role') === 'radiogroup' || n.tagName === 'FIELDSET') return n;
+      }
+      n = n.parentElement;
+    }
+    return null;
+  };
+
+  /**
    * Locators for one radio in a group, scoped by the group's `name` so that a
    * second question offering the same choice does not collide.
    */
@@ -145,13 +161,18 @@
           // The group's own address must resolve to one node, so a container
           // is preferred; the bare name matches every member and is the last
           // resort, reported non-unique rather than silently wrong.
-          candidates: [
-            ...(groupNode && groupNode.id ? [`#${esc(groupNode.id)}`] : []),
-            ...(fieldset && fieldset.id ? [`#${esc(fieldset.id)}`] : []),
-            ...(groupNode ? [`[role=radiogroup]:has(input[name="${name}"])`] : []),
-            ...(fieldset ? [`fieldset:has(input[name="${name}"])`] : []),
-            `input[name="${name}"]`,
-          ],
+          candidates: (() => {
+            const box = groupNode || fieldset || groupContainer(lead, name, members.length);
+            const out = [];
+            if (box && box.id) out.push(`#${esc(box.id)}`);
+            if (groupNode) out.push(`[role=radiogroup]:has(input[name="${name}"])`);
+            if (fieldset) out.push(`fieldset:has(input[name="${name}"])`);
+            if (box && box.tagName === 'DIV' && !box.id) {
+              out.push(`div:has(> input[name="${name}"])`);
+            }
+            out.push(`input[name="${name}"]`);
+            return out;
+          })(),
         };
       }
 
