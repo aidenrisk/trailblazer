@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Coverage Details</title></head>
+<body>
+<h1>Coverage Details</h1>
+<form id="app-form">
+
+  <label for="legalName">Legal Business Name</label>
+  <input type="text" id="legalName" name="legalName">
+
+  <!-- Validates on input, and the only reliable signal is aria-invalid: no
+       pattern attribute, no maxlength, no aria-describedby. Mirrors Pie. -->
+  <div id="feinRow">
+    <label for="fein">FEIN *</label>
+    <input type="text" id="fein" name="fein">
+    <span id="feinError" role="alert"></span>
+  </div>
+
+  <!-- Rejects everything, so the retry budget is exhausted. -->
+  <label for="impossible">Policy Number</label>
+  <input type="text" id="impossible" name="impossible">
+
+  <label for="entityType">Entity Type</label>
+  <select id="entityType" name="entityType">
+    <option value="">Select...</option>
+    <option value="sole">Sole Proprietor</option>
+    <option value="llc">Limited Liability Company</option>
+    <option value="corp">Corporation</option>
+  </select>
+
+  <!-- Radio group: each choice is a separately clickable input. -->
+  <fieldset id="priorClaimsGroup">
+    <legend>Prior Claims</legend>
+    <label><input type="radio" id="priorClaimsYes" name="priorClaims" value="yes"> Yes</label>
+    <label><input type="radio" id="priorClaimsNo" name="priorClaims" value="no"> No</label>
+  </fieldset>
+
+  <label><input type="checkbox" id="priorCoverage" name="priorCoverage"> Has Prior Coverage</label>
+
+  <!-- Custom dropdown. Its options do not exist in the DOM until it is opened,
+       and they unmount when it closes: the case `expand` exists for. -->
+  <span id="agencyLabel">Agency / Program</span>
+  <div role="combobox" id="agency" aria-labelledby="agencyLabel" aria-controls="agencyList"
+       aria-expanded="false" tabindex="0">Choose an agency</div>
+  <div id="agencyList" role="listbox"></div>
+
+  <button type="button" id="next-btn">Next</button>
+</form>
+
+<!-- A separate form, so the denylist's payment-context and card-relationship
+     signals have somewhere real to fire. -->
+<form id="paymentForm">
+  <label for="ccNumber">Card Number</label>
+  <input type="text" id="ccNumber" name="ccNumber" autocomplete="cc-number">
+  <button type="button" id="pay-btn">Purchase Policy</button>
+  <button type="button" id="innocuous-btn">Review</button>
+</form>
+
+<form id="bind-form">
+  <button type="button" id="bind-btn">Bind Coverage</button>
+  <button type="button" id="quote-btn">Get Quote</button>
+</form>
+
+<script>
+  // FEIN: nine digits, no separators. The message never says so, which is the
+  // point -- the constraint has to come from the shape that was accepted.
+  document.getElementById('fein').addEventListener('input', function (e) {
+    const ok = /^[0-9]{9}$/.test(e.target.value);
+    e.target.setAttribute('aria-invalid', ok ? 'false' : 'true');
+    document.getElementById('feinError').textContent = ok ? '' : 'Please enter the FEIN';
+  });
+
+  // Rejects every value, to exercise the retry budget running out.
+  document.getElementById('impossible').addEventListener('input', function (e) {
+    e.target.setAttribute('aria-invalid', 'true');
+  });
+
+  // The listbox is populated on open and emptied on close, so a read-only
+  // extraction sees nothing and one selection at a time reveals one option.
+  const AGENCIES = ['Direct', 'Broker Network', 'Affinity Partner', 'Wholesale'];
+  const agency = document.getElementById('agency');
+  const list = document.getElementById('agencyList');
+
+  function openAgency() {
+    list.innerHTML = '';
+    for (const name of AGENCIES) {
+      const item = document.createElement('div');
+      item.setAttribute('role', 'option');
+      item.textContent = name;
+      item.addEventListener('click', function () {
+        agency.textContent = name;
+        closeAgency();
+      });
+      list.appendChild(item);
+    }
+    agency.setAttribute('aria-expanded', 'true');
+  }
+
+  function closeAgency() {
+    list.innerHTML = '';
+    agency.setAttribute('aria-expanded', 'false');
+  }
+
+  agency.addEventListener('click', function () {
+    agency.getAttribute('aria-expanded') === 'true' ? closeAgency() : openAgency();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeAgency();
+  });
+</script>
+
+</body>
+</html>
