@@ -447,6 +447,124 @@ class TestSetOption:
         assert report.ok is True
         assert page.inner_text("#agencyProgram") == "Pie Partner Program"
 
+class TestSetOptionByLabelAlone:
+    """
+    An Assignment whose option carries no locator of its own.
+
+    Legitimate input: for a plain dropdown Scraper can read the labels without
+    being able to address each choice, so it reports
+    `[{label: "Corporation", locator: ""}, ...]` and Frontier passes that
+    straight through.
+
+    `Assignment.action_locator` falls back to the control's locator in that
+    case, which is right for a native <select> (the parent IS what you set) but
+    catastrophic on a custom widget, where the control's locator is the thing
+    that OPENS the menu. Acting on it selects nothing — and doing it once per
+    option just toggles the menu open and shut while reporting a success every
+    time.
+    """
+
+    def choose_by_label(self, label):
+        return choose("q_014", label, "", "#stateOfOperation")
+
+    def test_the_option_is_found_and_actually_selected(self, filler, page):
+        report = filler.execute(JOB, STAGE, self.choose_by_label("New York"))
+
+        assert report.ok is True, report.errorClass
+        assert report.chosenOption == "New York"
+        # The page agrees — this is the assertion the old code could not make.
+        assert page.input_value("#stateOfOperation") == "New York"
+
+    def test_it_does_not_act_on_the_controls_own_locator(self, filler, page):
+        """The step records where the click really went, not the parent."""
+        report = filler.execute(JOB, STAGE, self.choose_by_label("Texas"))
+
+        assert report.steps[0].locator != "#stateOfOperation"
+        assert page.input_value("#stateOfOperation") == "Texas"
+
+    def test_every_option_can_be_walked_in_turn(self, filler, page):
+        """
+        The failure this comes from: five set_options in a row that each
+        reported success and left the control empty.
+        """
+        for label in ("Texas", "California", "New York"):
+            report = filler.execute(JOB, STAGE, self.choose_by_label(label))
+
+            assert report.ok is True, f"{label}: {report.errorClass}"
+            assert page.input_value("#stateOfOperation") == label
+
+    def test_what_the_control_really_offers_is_reported_back(self, filler):
+        """
+        The measured locators are worth passing on: they are real, and the ""
+        on the Assignment was not.
+        """
+        report = filler.execute(JOB, STAGE, self.choose_by_label("California"))
+
+        assert [o.label for o in report.discoveredOptions] == [
+            "California",
+            "New York",
+            "Texas",
+        ]
+        assert all(o.locator for o in report.discoveredOptions)
+
+    def test_a_label_the_control_does_not_offer_fails(self, filler, page):
+        """
+        A stale PageDescription. Reporting this as selected would compile a
+        branch that never existed.
+        """
+        report = filler.execute(JOB, STAGE, self.choose_by_label("Wisconsin"))
+
+        assert report.ok is False
+        assert report.errorClass == "widget"
+        # ...and it says what IS on offer, so Frontier learns the truth.
+        assert [o.label for o in report.discoveredOptions] == [
+            "California",
+            "New York",
+            "Texas",
+        ]
+        assert page.input_value("#stateOfOperation") == ""
+
+    def test_an_already_open_menu_does_not_read_as_empty(self, filler, page):
+        """
+        Clicking a chooser toggles it. With one click, a menu left open by
+        whatever ran last is shut by the attempt to open it, reads as having no
+        options, and is reported as a confirmed [] — marking the control
+        explored and losing every branch.
+        """
+        page.click("#stateOfOperation")
+        assert page.locator("[role=option]").count() == 3
+
+        report = filler.execute(JOB, STAGE, self.choose_by_label("New York"))
+
+        assert report.ok is True, report.errorClass
+        assert page.input_value("#stateOfOperation") == "New York"
+
+    def test_a_native_select_still_goes_through_its_parent(self, filler, page):
+        """
+        The fallback is not wrong everywhere — for a <select> the parent is
+        exactly what you set. That path must be untouched.
+        """
+        report = filler.execute(
+            JOB, STAGE, choose("q_006", "Corporation", "", "#entityType")
+        )
+
+        assert report.ok is True
+        assert report.steps[0].locator == "#entityType"
+        assert page.input_value("#entityType") == "corp"
+
+
+class TestSetOptionFailures:
+    def test_disabled_control_is_not_clicked(self, filler, page):
+        report = filler.execute(
+            JOB, STAGE, choose("q_016", "Pie Direct", "", "#lockedProgram")
+        )
+
+        assert report.ok is True
+        assert report.steps == []
+        assert page.input_value("#lockedProgram") == "Pie Direct"
+
+
+class TestRevealedFields:
     def test_choosing_llc_reveals_the_members_field(self, filler, page):
         """
         The filler reports the choice and nothing about the reveal. Noticing new

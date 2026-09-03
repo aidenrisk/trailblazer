@@ -315,15 +315,8 @@ def read_open_options(page: Page) -> list[Option]:
     return []
 
 
-def open_widget(page: Page, target: Locator) -> list[Option]:
-    """
-    Click a custom widget open and read what appears.
-
-    The wait is for the options to RENDER, not for the click to return: the
-    whole point of a widget Scraper reported as `options: null` is that its list
-    does not exist in the DOM until it is opened.
-    """
-    target.click()
+def _wait_for_options(page: Page) -> list[Option]:
+    """Wait for a menu to render, then read it. [] if nothing showed up."""
     for selector in OPTION_SELECTORS:
         try:
             page.wait_for_selector(selector, timeout=MENU_TIMEOUT_MS, state="visible")
@@ -331,3 +324,58 @@ def open_widget(page: Page, target: Locator) -> list[Option]:
         except PlaywrightError:
             continue
     return read_open_options(page)
+
+
+def open_widget(page: Page, target: Locator) -> list[Option]:
+    """
+    Click a custom widget open and read what appears.
+
+    The wait is for the options to RENDER, not for the click to return: the
+    whole point of a widget Scraper reported as `options: null` is that its list
+    does not exist in the DOM until it is opened.
+
+    Clicking a chooser TOGGLES it, so one click is not reliably "open" — if the
+    menu was already showing, that click shut it. A second click reopens it.
+    Without this, a widget left open by whatever ran last reads as having no
+    options at all, which is a confirmed `[]` and marks the control explored.
+    """
+    target.click()
+    options = _wait_for_options(page)
+    if not options:
+        target.click()
+        options = _wait_for_options(page)
+    return options
+
+
+def find_option(options: list[Option], label: str) -> Option | None:
+    """
+    The rendered option matching `label`, or None.
+
+    Exact first, then case- and space-insensitive, because the label came from
+    a PageDescription written at some earlier point and the page is what it is
+    now. Never a substring match: "Corporation" must not select
+    "S Corporation".
+    """
+    for option in options:
+        if option.label == label:
+            return option
+    wanted = " ".join(label.split()).lower()
+    for option in options:
+        if " ".join(option.label.split()).lower() == wanted:
+            return option
+    return None
+
+
+def displayed_value(target: Locator, info: "ElementInfo") -> str | None:
+    """
+    What the control shows right now. None when nothing is readable.
+
+    A readonly <input> dropdown keeps its choice in `value`; a div-based
+    combobox renders it as text. Used to check that a selection actually took.
+    """
+    try:
+        if info.tag in ("input", "textarea"):
+            return target.input_value()
+        return (target.inner_text() or "").strip()
+    except PlaywrightError:
+        return None

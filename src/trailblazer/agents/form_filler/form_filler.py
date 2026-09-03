@@ -385,6 +385,8 @@ class FormFiller:
             return self._recover(job, assignment, error)
 
         info = dom.describe(target)
+        if info.disabled:
+            return self._unavailable(job, assignment)
 
         if info.kind == dom.ElementInfo.NATIVE_SELECT:
             # A native <option> cannot be clicked — the list is drawn by the OS.
@@ -392,8 +394,8 @@ class FormFiller:
             # control's locator is the right thing to act on.
             target.select_option(label=option.label)
             acted_on = assignment.locator
-        else:
-            acted_on = assignment.action_locator
+        elif option.locator:
+            acted_on = option.locator
             option_target, error = dom.resolve(self.page, acted_on)
             if option_target is None or not option_target.is_visible():
                 # Not on the page yet: the widget has to be opened first. A
@@ -405,10 +407,85 @@ class FormFiller:
                 if option_target is None:
                     return self._recover(job, assignment, error or "not_found")
             option_target.click()
+        else:
+            return self._set_option_by_label(job, assignment, target, info)
 
         logger.info(
             "[%s] selected %s=%s via %s", job, assignment.fieldId, option.label, acted_on
         )
+        return self._selected(assignment, info, option.label, acted_on)
+
+    def _set_option_by_label(self, job, assignment, target, info) -> FillReport:
+        """
+        A chooser named only by label: open it, find that option, click it.
+
+        This is the case an `option.locator` of None or "" leaves behind, and
+        it must NOT fall back to the control's own locator. That fallback is
+        right for a native <select>, where the parent is what you set, and for
+        a split control, where the option always has its own address — but on a
+        custom widget the control's locator is the thing that OPENS the menu.
+        Clicking it selects nothing, and clicking it once per option just
+        toggles the menu open and shut while reporting five successes.
+
+        So the option's address is measured here instead of assumed: the widget
+        is opened, the rendered options are read, and the one matching the label
+        is clicked. What was found is reported either way, so a stale label
+        teaches Frontier what the control really offers.
+        """
+        options = dom.open_widget(self.page, target)
+        if not options:
+            return self._empty_chooser(job, assignment, "opened, no options rendered")
+
+        match = dom.find_option(options, assignment.option.label)
+        if match is None:
+            logger.warning(
+                "[%s] %s has no option %r; it offers %s",
+                job, assignment.fieldId, assignment.option.label,
+                [o.label for o in options],
+            )
+            return FillReport(
+                ok=False,
+                fieldId=assignment.fieldId,
+                errorClass="widget",
+                discoveredOptions=options,
+            )
+
+        option_target, error = dom.resolve(self.page, match.locator)
+        if option_target is None:
+            return self._recover(job, assignment, error or "not_found")
+        option_target.click()
+
+        # Read the control back. Clicking a real option is much stronger
+        # evidence than clicking the parent was, but "the click landed on
+        # something" is still not "the control now holds this", and a false
+        # success here compiles into a branch that never worked.
+        shown = dom.displayed_value(target, info)
+        if shown is not None and not _shows(shown, match.label):
+            logger.warning(
+                "[%s] %s still shows %r after choosing %r",
+                job, assignment.fieldId, shown, match.label,
+            )
+            return FillReport(
+                ok=False,
+                fieldId=assignment.fieldId,
+                errorClass="widget",
+                discoveredOptions=options,
+            )
+
+        logger.info(
+            "[%s] selected %s=%s via %s (found by label)",
+            job, assignment.fieldId, match.label, match.locator,
+        )
+        report = self._selected(assignment, info, match.label, match.locator)
+        # The locator this resolved to is worth passing on: it is real, and the
+        # one on the Assignment was not.
+        report.discoveredOptions = options
+        return report
+
+    @staticmethod
+    def _selected(
+        assignment: Assignment, info, label: str, acted_on: str
+    ) -> FillReport:
         return FillReport(
             ok=True,
             steps=[
@@ -416,13 +493,13 @@ class FormFiller:
                     fieldId=assignment.fieldId,
                     action="select",
                     locator=acted_on,
-                    value=option.label,
+                    value=label,
                     required=info.required,
                 )
             ],
             landed=[assignment.fieldId],
             fieldId=assignment.fieldId,
-            chosenOption=option.label,
+            chosenOption=label,
         )
 
     # ------------------------------------------------------------------
@@ -537,6 +614,17 @@ class FormFiller:
 
         logger.info("[%s] %s on %s; attempting recovery", job, error, assignment.fieldId)
         return self.recovery.attempt(job, assignment, failed, self)
+
+
+def _shows(shown: str, label: str) -> bool:
+    """
+    Is `label` what the control is displaying?
+
+    Containment rather than equality, because a widget often renders its choice
+    inside other chrome — a clear button, a chevron, a "selected:" prefix — and
+    the label is still plainly there.
+    """
+    return " ".join(label.split()).lower() in " ".join(shown.split()).lower()
 
 
 def _kept(typed: str, shown: str) -> bool:
