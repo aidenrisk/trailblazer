@@ -553,6 +553,95 @@ class TestSetOptionByLabelAlone:
         assert page.input_value("#entityType") == "corp"
 
 
+class TestTheOptionLocatorComesFirst:
+    """
+    A radio group has no unique control locator, and that is not a defect.
+
+    "The control" is two inputs. `input[name="ownBuilding"]` matches both, and
+    no selector addresses exactly one of them — that is simply what a radio
+    group is. Resolving the control before looking at the option therefore
+    rejected every such group with not_unique while a perfectly usable
+    per-option locator sat unread.
+
+    The control is still needed for three things — describing the control,
+    setting a native <select>, and opening a closed menu — so its failure is
+    carried and only raised where it actually matters.
+    """
+
+    GROUP = 'input[name="ownBuilding"]'
+
+    def test_the_group_really_has_no_unique_control_locator(self, page):
+        """The premise, asserted rather than assumed."""
+        assert page.locator(self.GROUP).count() == 2
+
+    def test_the_option_is_clicked_despite_an_ambiguous_control(self, filler, page):
+        report = filler.execute(
+            JOB, STAGE, choose("q_017", "No", "#ownNo", self.GROUP)
+        )
+
+        assert report.ok is True, report.errorClass
+        assert report.chosenOption == "No"
+        assert report.steps[0].locator == "#ownNo"
+        assert page.is_checked("#ownNo") is True
+        assert page.is_checked("#ownYes") is False
+
+    def test_each_option_of_the_group_can_be_walked(self, filler, page):
+        for label, own in (("Yes", "#ownYes"), ("No", "#ownNo")):
+            report = filler.execute(JOB, STAGE, choose("q_017", label, own, self.GROUP))
+
+            assert report.ok is True, f"{label}: {report.errorClass}"
+            assert page.is_checked(own) is True
+
+    def test_an_ambiguous_option_locator_still_fails(self, filler, page):
+        """
+        The rule is "prefer the option's address", not "trust it". When the
+        option's own locator is the ambiguous one, there is nothing left to
+        fall back to — acting on `.first` would pick a branch at random.
+        """
+        assert page.locator(".duplicateName").count() == 2
+
+        report = filler.execute(
+            JOB, STAGE, choose("q_017", "No", ".duplicateName", self.GROUP)
+        )
+
+        assert report.ok is False
+        assert report.errorClass == "not_unique"
+        assert page.is_checked("#ownNo") is False
+
+    def test_no_option_locator_and_no_usable_control_fails(self, filler):
+        """
+        Matching by label means opening the control and reading what it
+        renders. With neither an option address nor a resolvable control there
+        is no way in, and the control's failure is the one to report.
+        """
+        report = filler.execute(JOB, STAGE, choose("q_017", "No", "", self.GROUP))
+
+        assert report.ok is False
+        assert report.errorClass == "not_unique"
+
+    def test_a_closed_widget_still_needs_the_control_to_open_it(self, filler, page):
+        """
+        The control is not optional everywhere. When the option is not rendered
+        yet, only the control can open the menu — so an unresolvable control is
+        fatal here, and reported as the control's failure.
+        """
+        assert page.locator("[role=option]").count() == 0
+
+        report = filler.execute(
+            JOB,
+            STAGE,
+            choose(
+                "q_001",
+                "Pie Partner Program",
+                'role=option[name="Pie Partner Program"]',
+                ".duplicateName",  # ambiguous control, nothing can open the menu
+            ),
+        )
+
+        assert report.ok is False
+        assert report.errorClass == "not_unique"
+
+
 class TestSetOptionFailures:
     def test_disabled_control_is_not_clicked(self, filler, page):
         report = filler.execute(

@@ -375,45 +375,89 @@ class FormFiller:
         )
 
     # ------------------------------------------------------------------
-    # set_option — act on the OPTION's locator, not the control's
+    # set_option — the OPTION's locator first, the control's only if needed
     # ------------------------------------------------------------------
 
     def _set_option(self, job: str, assignment: Assignment) -> FillReport:
         option = assignment.option
-        target, error = dom.resolve(self.page, assignment.locator)
-        if target is None:
-            return self._recover(job, assignment, error)
 
-        info = dom.describe(target)
-        if info.disabled:
+        # The control is useful, but it is not always necessary. It describes
+        # the control, it is what a native <select> gets set on, and it is the
+        # only thing that can open a closed widget — so it is resolved first,
+        # but a failure to resolve it is NOT fatal on its own.
+        #
+        # It must not be, because a radio group and a split control have no
+        # single parent element: "the control" is two or more inputs, and no
+        # locator addresses exactly one of them. Demanding a unique control
+        # locator before looking at the option's rejected every such group with
+        # not_unique while an entirely usable per-option locator sat unread.
+        # So the control's failure is carried and only raised where the control
+        # is genuinely needed.
+        control, control_error = dom.resolve(self.page, assignment.locator)
+        info = dom.describe(control) if control is not None else None
+
+        if info is not None and info.disabled:
             return self._unavailable(job, assignment)
 
-        if info.kind == dom.ElementInfo.NATIVE_SELECT:
-            # A native <option> cannot be clicked — the list is drawn by the OS.
-            # It is set by label on the parent, which is the one case where the
-            # control's locator is the right thing to act on.
-            target.select_option(label=option.label)
-            acted_on = assignment.locator
-        elif option.locator:
-            acted_on = option.locator
-            option_target, error = dom.resolve(self.page, acted_on)
-            if option_target is None or not option_target.is_visible():
-                # Not on the page yet: the widget has to be opened first. A
-                # split control (two buttons, no shared parent) skips this,
-                # because its options are visible from the start — which
-                # matters, since opening it means clicking one of them.
-                target.click()
-                option_target, error = dom.resolve(self.page, acted_on)
-                if option_target is None:
-                    return self._recover(job, assignment, error or "not_found")
-            option_target.click()
-        else:
-            return self._set_option_by_label(job, assignment, target, info)
+        if info is not None and info.kind == dom.ElementInfo.NATIVE_SELECT:
+            # A native <option> cannot be clicked — the list is drawn by the OS
+            # — so the parent is what to act on whatever locator the option
+            # carries. The one case where the control wins outright.
+            control.select_option(label=option.label)
+            logger.info(
+                "[%s] selected %s=%s via %s (native select)",
+                job, assignment.fieldId, option.label, assignment.locator,
+            )
+            return self._selected(assignment, info, option.label, assignment.locator)
 
+        if not option.locator:
+            # Named by label alone. The only way in is to open the control and
+            # match what it renders, so here the control really is required.
+            if control is None:
+                return self._recover(job, assignment, control_error)
+            return self._set_option_by_label(job, assignment, control, info)
+
+        # The option's own address, preferred over the parent's.
+        option_target, option_error = dom.resolve(self.page, option.locator)
+
+        if option_error == "not_unique":
+            # Preferring the option locator cannot rescue this one: it is the
+            # option's OWN address that matches several elements, not merely the
+            # parent's. Acting on `.first` would pick a branch at random.
+            logger.warning(
+                "[%s] %s option %r is itself ambiguous (%s)",
+                job, assignment.fieldId, option.label, option.locator,
+            )
+            return self._recover(job, assignment, "not_unique", option.locator)
+
+        if option_target is None or not option_target.is_visible():
+            # Not rendered yet: the menu has to be opened, and only the control
+            # can open it. A split control skips this — its options are visible
+            # from the start, which matters, since "opening" it would mean
+            # clicking one of them.
+            if control is None:
+                return self._recover(job, assignment, control_error or option_error)
+            control.click()
+            option_target, option_error = dom.resolve(self.page, option.locator)
+            if option_target is None:
+                return self._recover(
+                    job, assignment, option_error or "not_found", option.locator
+                )
+
+        if not option_target.is_enabled():
+            return self._unavailable(job, assignment)
+
+        option_target.click()
+
+        # `required` off whichever element we actually hold: the parent when it
+        # resolved, else the option itself — for a radio group the flag lives on
+        # the inputs anyway.
+        step_info = info if info is not None else dom.describe(option_target)
         logger.info(
-            "[%s] selected %s=%s via %s", job, assignment.fieldId, option.label, acted_on
+            "[%s] selected %s=%s via %s",
+            job, assignment.fieldId, option.label, option.locator,
         )
-        return self._selected(assignment, info, option.label, acted_on)
+        return self._selected(assignment, step_info, option.label, option.locator)
 
     def _set_option_by_label(self, job, assignment, target, info) -> FillReport:
         """
@@ -597,18 +641,29 @@ class FormFiller:
                 return None
         return None
 
-    def _recover(self, job: str, assignment: Assignment, error: str | None) -> FillReport:
+    def _recover(
+        self,
+        job: str,
+        assignment: Assignment,
+        error: str | None,
+        locator: str | None = None,
+    ) -> FillReport:
         """
         The locator missed. Hand it to `recovery`, if one was given.
 
         Only for locator failures — never for a rejected value, which is the
         page talking and not something a model can fix by looking harder.
+
+        `locator` is which one actually failed, and defaults to the control's.
+        Worth passing explicitly on the option paths: naming the parent for a
+        failure that belongs to the option's own address sends whoever reads
+        the log off debugging the wrong string.
         """
         failed = FillReport(ok=False, fieldId=assignment.fieldId, errorClass=error)
         if self.recovery is None:
             logger.warning(
                 "[%s] %s on %s (%s); no recovery configured",
-                job, error, assignment.fieldId, assignment.locator,
+                job, error, assignment.fieldId, locator or assignment.locator,
             )
             return failed
 

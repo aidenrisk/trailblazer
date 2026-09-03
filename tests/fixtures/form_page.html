@@ -101,6 +101,20 @@
 
   <label><input type="checkbox" id="priorCoverage" name="priorCoverage"> Has Prior Coverage</label>
 
+  <!--
+    Radio group, as the live Pie page builds its Yes/No questions. "The
+    control" is two inputs, so NO locator addresses exactly one of them —
+    `input[name="ownBuilding"]` matches both, and that is not a scraper bug, it
+    is what a radio group is. Each radio is individually addressable though,
+    which is the whole point: the option locator is usable when the control's
+    is not.
+  -->
+  <label>Do you own the building?</label>
+  <div class="split">
+    <label><input type="radio" name="ownBuilding" id="ownYes"> Yes</label>
+    <label><input type="radio" name="ownBuilding" id="ownNo"> No</label>
+  </div>
+
   <!-- Rejects anything that isn't five digits, so a fill can fail to stick. -->
   <label for="strictZip">Mailing Zip (5 digits only)</label>
   <input type="text" id="strictZip" name="strictZip">
