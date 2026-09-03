@@ -73,11 +73,12 @@ def launch(
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from e
 
+    port = int(endpoint.rsplit(":", 1)[1])
     if url:
-        with AttachedSession(cdp_port=settings.cdp_port) as session:
+        with AttachedSession(cdp_port=port) as session:
             session.goto(url)
 
-    record = shared_session.write_record(settings.session_file, settings.cdp_port, str(profile))
+    record = shared_session.write_record(settings.session_file, port, str(profile))
     typer.echo(f"browser serving {endpoint}, profile {profile}")
     typer.echo(f"endpoint recorded at {record}; agents attach to it automatically")
     typer.echo("log in in that window -- it stays open, and the login persists.")

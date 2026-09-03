@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from trailblazer.agents.browser.session import devtools_running, port_in_use
+from trailblazer.agents.browser.session import devtools_running, free_port, port_in_use
 from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -55,12 +55,12 @@ def _chromium_path() -> str:
 
 
 def launch_persistent(cdp_port: int = 9222, profile_dir: Path = PROFILE_DIR) -> str:
-    """Start a headed Chromium serving CDP on `cdp_port` and return its endpoint.
+    """Start a headed Chromium serving CDP and return its endpoint.
 
     Returns as soon as DevTools answers, leaving the browser running with no
-    parent to wait on it. Raises if the port is taken -- unless a DevTools
-    server is already answering there, in which case that browser is reused and
-    an existing login is not disturbed.
+    parent to wait on it. A DevTools server already answering on `cdp_port` is
+    reused, so an existing login is not disturbed; a port held by anything else
+    is stepped over rather than taken.
     """
     endpoint = f"http://127.0.0.1:{cdp_port}"
 
@@ -68,10 +68,10 @@ def launch_persistent(cdp_port: int = 9222, profile_dir: Path = PROFILE_DIR) -> 
         log.info("reusing browser already serving cdp_endpoint=%s", endpoint)
         return endpoint
     if port_in_use(cdp_port):
-        raise RuntimeError(
-            f"port {cdp_port} is held by a process that is not serving DevTools "
-            "(a normal Chrome, commonly). Set CDP_PORT to a free port."
-        )
+        taken = cdp_port
+        cdp_port = free_port(taken + 1)
+        endpoint = f"http://127.0.0.1:{cdp_port}"
+        log.info("port %d held by another process; using %d instead", taken, cdp_port)
 
     profile_dir.mkdir(parents=True, exist_ok=True)
     args = [

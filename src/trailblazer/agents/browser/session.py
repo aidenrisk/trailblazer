@@ -54,6 +54,19 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def free_port(preferred: int, host: str = "127.0.0.1", tries: int = 20) -> int:
+    """`preferred` if it is free, else the next free port above it.
+
+    A port is never taken from whatever holds it: 9222 is commonly a Chrome the
+    user is working in, and killing it to launch our own would close their
+    windows.
+    """
+    for port in range(preferred, preferred + tries):
+        if not port_in_use(port, host):
+            return port
+    raise RuntimeError(f"no free port in {preferred}-{preferred + tries - 1}")
+
+
 def _goto(page: Page | None, url: str) -> Page:
     """Navigate `page` to `url` and wait for the network to go quiet."""
     if page is None:
@@ -107,10 +120,10 @@ class BrowserSession:
         # Chromium given a busy port exits or falls back silently, and the
         # resulting connect_over_cdp error points at the wrong thing entirely.
         if port_in_use(self.cdp_port):
-            raise RuntimeError(
-                f"port {self.cdp_port} is already in use (often a running Chrome). "
-                "Set CDP_PORT to a free port, or close the other browser."
-            )
+            taken = self.cdp_port
+            self.cdp_port = free_port(taken + 1)
+            self.cdp_endpoint = f"http://127.0.0.1:{self.cdp_port}"
+            log.info("port %d in use; using %d instead", taken, self.cdp_port)
         try:
             return self._start()
         except BaseException:
