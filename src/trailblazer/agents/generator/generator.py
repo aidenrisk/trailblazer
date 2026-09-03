@@ -146,8 +146,6 @@ class Generator:
         self._next_question = 1
         self._by_field: dict[tuple[str, str], str] = {}
         """`(stageId, fieldId)` -> questionId. fieldId alone repeats across pages."""
-        self._by_canonical: dict[str, str] = {}
-        """canonical -> questionId, for reconciling a fact captured twice."""
         self._stage_index: dict[str, int] = {}
 
     # -- identity ---------------------------------------------------------
@@ -411,7 +409,6 @@ class Generator:
             return
 
         self.questions_doc.questions.append(question)
-        self._by_canonical.setdefault(question.canonical, qid)
         stage.fields.append(field)
         self.script_blocks.append(block)
 

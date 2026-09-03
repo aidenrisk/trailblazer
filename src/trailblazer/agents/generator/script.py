@@ -200,21 +200,6 @@ def stage_block(stage_name: str, url: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def credential_block(selector: str, placeholder: str) -> str:
-    """Fill one login field from the creds file.
-
-    `placeholder` is the `$EMAIL` / `$PASSWORD` / `$OTP` token the metadata
-    stores. The literal never enters this file: the script maps the token to the
-    config key and the value arrives at run time.
-    """
-    key = {"$EMAIL": "LOGIN_EMAIL", "$PASSWORD": "LOGIN_PASSWORD", "$OTP": "MFA_CARRIER_ID"}[
-        placeholder
-    ]
-    return (
-        f"    if (config.{key}) await page.fill({json.dumps(selector)}, config.{key});\n"
-    )
-
-
 def fill_block(
     question_id: str, canonical: str, selector: str, required: bool, intent: str
 ) -> str:
