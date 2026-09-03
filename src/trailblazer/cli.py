@@ -1,14 +1,16 @@
 """Command line entry point. One perceive against one URL, printed as JSON."""
 
 import json
+import os
 import uuid
 from pathlib import Path
 
 import typer
 
-from trailblazer.agents.browser.session import BrowserSession
-from trailblazer.agents.scraper.scraper import perceive
-from trailblazer.contracts.scraper_result import PerceiveRequest
+from trailblazer.agents.browser import shared_session
+from trailblazer.agents.browser.launch import launch_persistent
+from trailblazer.agents.browser.session import AttachedSession
+from trailblazer.loop.orchestrator import perceive_once
 from trailblazer.observability.logging import configure_logging
 from trailblazer.shared.config import get_settings
 
@@ -32,9 +34,9 @@ def scrape(
     configure_logging(settings.log_level)
     job = job_id or uuid.uuid4().hex[:12]
 
-    with BrowserSession(cdp_port=settings.cdp_port, headed=headed or settings.headed) as session:
-        page = session.goto(url)
-        result = perceive(page, PerceiveRequest(job_id=job, page_index=page_index), settings)
+    result = perceive_once(
+        url=url, page_index=page_index, job_id=job, headed=headed, settings=settings
+    )
 
     payload = result.model_dump(mode="json")
     typer.echo(json.dumps(payload, indent=2))
@@ -46,6 +48,39 @@ def scrape(
             json.dumps(result.page.model_dump(mode="json"), indent=2)
         )
         typer.echo(f"wrote {target / 'page_description.json'}", err=True)
+
+
+@app.command()
+def launch(
+    url: str | None = typer.Option(None, "--url", help="Page to open after launch."),
+) -> None:
+    """Start the shared headed browser, log in by hand, leave it running.
+
+    The browser is detached, so it outlives this command. Its profile persists,
+    and its endpoint is recorded in `SESSION_FILE`, so every later run --
+    scraper, form filler, any agent -- attaches to it and inherits the login.
+    """
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    profile = Path(os.path.expanduser(settings.browser_profile_dir))
+
+    try:
+        endpoint = launch_persistent(cdp_port=settings.cdp_port, profile_dir=profile)
+    except RuntimeError as e:
+        # The port being held by a foreign process is the one failure a human
+        # must act on, so it is reported here rather than as a traceback.
+        shared_session.clear_record(settings.session_file)
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+
+    if url:
+        with AttachedSession(cdp_port=settings.cdp_port) as session:
+            session.goto(url)
+
+    record = shared_session.write_record(settings.session_file, settings.cdp_port, str(profile))
+    typer.echo(f"browser serving {endpoint}, profile {profile}")
+    typer.echo(f"endpoint recorded at {record}; agents attach to it automatically")
+    typer.echo("log in in that window -- it stays open, and the login persists.")
 
 
 @app.command()

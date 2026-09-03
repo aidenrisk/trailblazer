@@ -22,8 +22,17 @@ class Settings(BaseSettings):
     """Which `Perceiver` implementation builds the payload handed to the model."""
 
     headed: bool = False
-    cdp_port: int = 9222
-    """Chrome itself commonly holds 9222; override when the launch reports it busy."""
+    cdp_port: int = 9333
+    """The shared browser every agent attaches to. Not 9222: a desktop Chrome holds that."""
+
+    browser_profile_dir: str = "~/.trailblazer/chrome-profile"
+    """Persistent Chromium profile. Holds the login between runs."""
+
+    session_file: str = "~/.trailblazer/session.json"
+    """Where `launch` records the live endpoint, so agents need not guess the port."""
+
+    attach_if_running: bool = True
+    """Attach to a browser already serving CDP on `cdp_port` instead of launching."""
 
     log_level: str = "INFO"
     """Level for the `trailblazer` logger. DEBUG adds payload sizes and locator misses."""

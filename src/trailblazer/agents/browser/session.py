@@ -8,6 +8,7 @@ the CLI and the tests straightforward.
 """
 
 import json
+import pathlib
 import shutil
 import socket
 import subprocess
@@ -41,11 +42,33 @@ def _devtools_version(port: int, host: str = "127.0.0.1") -> dict | None:
         return None
 
 
-def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+def devtools_running(port: int, host: str = "127.0.0.1") -> bool:
+    """True when a DevTools server is serving on `port`, so a session can attach."""
+    return _devtools_version(port, host) is not None
+
+
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     """True when anything at all is listening on `port`."""
     with socket.socket() as sock:
         sock.settimeout(0.2)
         return sock.connect_ex((host, port)) == 0
+
+
+def _goto(page: Page | None, url: str) -> Page:
+    """Navigate `page` to `url` and wait for the network to go quiet."""
+    if page is None:
+        raise RuntimeError("session not started; call start() or use the context manager")
+    log.info("navigate url=%s", url)
+    try:
+        page.goto(url, wait_until="networkidle")
+    except PlaywrightTimeoutError as e:
+        raise RuntimeError(
+            f"navigation to {url} timed out waiting for the network to go quiet; "
+            "the page may load forever (polling, websockets) or the URL may be wrong"
+        ) from e
+    except PlaywrightError as e:
+        raise RuntimeError(f"navigation to {url} failed: {e}") from e
+    return page
 
 
 class BrowserSession:
@@ -54,9 +77,17 @@ class BrowserSession:
     Use as a context manager; `page` is the live tab.
     """
 
-    def __init__(self, cdp_port: int = 9222, headed: bool = False) -> None:
+    def __init__(
+        self,
+        cdp_port: int = 9222,
+        headed: bool = False,
+        profile_dir: str | None = None,
+    ) -> None:
         self.cdp_port = cdp_port
         self.headed = headed
+        # A caller-supplied profile holds cookies across runs, so a login done
+        # once is reused; the default temp profile is deleted on close.
+        self.profile_dir = profile_dir
         self.cdp_endpoint = f"http://127.0.0.1:{cdp_port}"
         self._proc: subprocess.Popen | None = None
         self._playwright = None
@@ -75,7 +106,7 @@ class BrowserSession:
         """
         # Chromium given a busy port exits or falls back silently, and the
         # resulting connect_over_cdp error points at the wrong thing entirely.
-        if _port_in_use(self.cdp_port):
+        if port_in_use(self.cdp_port):
             raise RuntimeError(
                 f"port {self.cdp_port} is already in use (often a running Chrome). "
                 "Set CDP_PORT to a free port, or close the other browser."
@@ -90,7 +121,11 @@ class BrowserSession:
         """Do the launching. Called only by `start()`, which owns the cleanup."""
         log.info("browser launch cdp_port=%s headed=%s", self.cdp_port, self.headed)
         self._playwright = sync_playwright().start()
-        self._profile_dir = tempfile.mkdtemp(prefix="trailblazer-profile-")
+        if self.profile_dir is not None:
+            pathlib.Path(self.profile_dir).mkdir(parents=True, exist_ok=True)
+            self._profile_dir = self.profile_dir
+        else:
+            self._profile_dir = tempfile.mkdtemp(prefix="trailblazer-profile-")
         args = [
             self._playwright.chromium.executable_path,
             f"--remote-debugging-port={self.cdp_port}",
@@ -126,19 +161,7 @@ class BrowserSession:
 
     def goto(self, url: str) -> Page:
         """Navigate the live tab and wait for the network to go quiet."""
-        if self.page is None:
-            raise RuntimeError("session not started; call start() or use the context manager")
-        log.info("navigate url=%s", url)
-        try:
-            self.page.goto(url, wait_until="networkidle")
-        except PlaywrightTimeoutError as e:
-            raise RuntimeError(
-                f"navigation to {url} timed out waiting for the network to go quiet; "
-                "the page may load forever (polling, websockets) or the URL may be wrong"
-            ) from e
-        except PlaywrightError as e:
-            raise RuntimeError(f"navigation to {url} failed: {e}") from e
-        return self.page
+        return _goto(self.page, url)
 
     def close(self) -> None:
         """Detach, kill the browser, drop the temp profile.
@@ -167,11 +190,99 @@ class BrowserSession:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+        # Only a temp profile is removed; a caller-supplied one is theirs to keep.
         if self._profile_dir is not None:
-            shutil.rmtree(self._profile_dir, ignore_errors=True)
+            if self.profile_dir is None:
+                shutil.rmtree(self._profile_dir, ignore_errors=True)
             self._profile_dir = None
 
     def __enter__(self) -> "BrowserSession":
+        return self.start()
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class AttachedSession:
+    """A CDP connection to a browser this process did not launch and must not kill.
+
+    `BrowserSession` owns its Chromium: it launches on a temp profile and
+    `close()` terminates the process and deletes that profile. That is wrong for
+    a session a human logged into by hand -- teardown would throw the login
+    away, and every scrape would need the login repeated.
+
+    This attaches to an already-serving DevTools endpoint and, on close, drops
+    only the Playwright connection. The browser, its profile, its cookies and
+    the logged-in tab all survive, so any number of scrapes can run against one
+    hand-authenticated session.
+    """
+
+    def __init__(self, cdp_port: int = 9222, host: str = "127.0.0.1") -> None:
+        self.cdp_port = cdp_port
+        self.cdp_endpoint = f"http://{host}:{cdp_port}"
+        self._host = host
+        self._playwright = None
+        self.browser: Browser | None = None
+        self.page: Page | None = None
+
+    def start(self) -> "AttachedSession":
+        """Connect to the running browser and adopt its frontmost tab.
+
+        The DevTools endpoint is probed first: `connect_over_cdp` against a port
+        held by a non-DevTools process fails with an error that names neither
+        the port nor the cause.
+        """
+        if _devtools_version(self.cdp_port, self._host) is None:
+            raise RuntimeError(
+                f"no DevTools server answering on {self.cdp_endpoint}. "
+                "Start one with `trailblazer launch --keep-open`, and check CDP_PORT matches."
+            )
+        try:
+            self._playwright = sync_playwright().start()
+            self.browser = self._playwright.chromium.connect_over_cdp(self.cdp_endpoint)
+            contexts = self.browser.contexts
+            if not contexts:
+                raise RuntimeError(f"browser at {self.cdp_endpoint} has no context to attach to")
+            pages = [p for p in contexts[0].pages if not p.is_closed()]
+            if not pages:
+                raise RuntimeError(
+                    f"browser at {self.cdp_endpoint} has no open tab; open the page to scrape first"
+                )
+            # Last page, not first: a human opening the page to scrape opens a
+            # new tab, and the first is whatever they logged in through.
+            self.page = pages[-1]
+            log.info(
+                "attached cdp_endpoint=%s tabs=%d url=%s",
+                self.cdp_endpoint,
+                len(pages),
+                self.page.url,
+            )
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def goto(self, url: str) -> Page:
+        """Navigate the adopted tab and wait for the network to go quiet."""
+        return _goto(self.page, url)
+
+    def close(self) -> None:
+        """Drop the connection only. The browser and its login are left running."""
+        self.page = None
+        if self.browser is not None:
+            try:
+                self.browser.close()  # detaches the CDP client; does not quit Chromium
+            except Exception:
+                pass
+            self.browser = None
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+    def __enter__(self) -> "AttachedSession":
         return self.start()
 
     def __exit__(self, *exc: object) -> None:
