@@ -222,3 +222,18 @@ def test_the_measured_credential_overrules_the_model() -> None:
     restore_measured_locators(described, payload)
 
     assert [c.credential for c in described.controls] == ["password", None]
+
+
+def test_a_landing_page_whose_only_way_forward_is_log_in_is_a_login_stage() -> None:
+    """Thimble opens on a gate with no inputs and a Log In button that hands off to Auth0."""
+    gate = PageDescription(stageId="", url="", controls=[], next='button:has-text("Log In")')
+    finalize(gate, page_index=1, url="https://broker.thimble.com/", title="Thimble for Brokers")
+    assert gate.is_login_stage
+
+    dashboard = PageDescription(stageId="", url="", controls=[], next=None)
+    finalize(dashboard, page_index=1, url="https://broker.thimble.com/dashboard/policies", title="Policies")
+    assert not dashboard.is_login_stage
+
+    form = PageDescription(stageId="", url="", controls=[_control()], next='button:has-text("Log In")')
+    finalize(form, page_index=1, url="https://x/app", title="t")
+    assert not form.is_login_stage  # inputs on the page: the button's wording alone does not decide

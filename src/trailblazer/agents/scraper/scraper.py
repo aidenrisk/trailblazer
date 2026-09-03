@@ -90,6 +90,20 @@ def derive_stage_slug(url: str, title: str) -> str:
     return _slugify(title) or "page"
 
 
+_LOGIN_GATE_WORDS = re.compile(r"log ?in|sign ?in|continue to log|get started", re.IGNORECASE)
+
+
+def _is_login_gate(page: PageDescription) -> bool:
+    """A landing page whose only way forward is a Log In button is part of the login.
+
+    Thimble's broker portal opens on such a page: no inputs at all, a "Log In"
+    button that hands off to Auth0. It carries no credential, so measurement
+    alone would call it a form page and Loop would read "not a login stage" as
+    "already logged in". The forward control's own text decides.
+    """
+    return not page.controls and bool(page.next) and bool(_LOGIN_GATE_WORDS.search(page.next))
+
+
 def finalize(page: PageDescription, page_index: int, url: str, title: str) -> PageDescription:
     """Assign the three things code owns: `fieldId`, `stageId`, `candidateGates`.
 
@@ -106,7 +120,7 @@ def finalize(page: PageDescription, page_index: int, url: str, title: str) -> Pa
     # callback contains "login" while being the success hop. The measured
     # controls decide, and the `login_` prefix is what Frontier keys its policy on.
     slug = derive_stage_slug(url, title)
-    if any(c.credential for c in page.controls):
+    if any(c.credential for c in page.controls) or _is_login_gate(page):
         page.stageId = f"login_{slug}"
     else:
         page.stageId = f"form_page_{page_index}_{slug}"
