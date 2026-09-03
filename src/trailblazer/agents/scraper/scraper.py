@@ -14,11 +14,12 @@ from urllib.parse import urlparse
 from langchain.agents import create_agent
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
+from pydantic import Field
 
 from trailblazer.agents.browser.tools import read_only_tools
 from trailblazer.agents.scraper.diff import diff_pages
 from trailblazer.agents.scraper.perceive import get_perceiver, payload_to_text
-from trailblazer.contracts.page_description import Control, PageDescription
+from trailblazer.contracts.page_description import Control, Option, PageDescription, RevealedBy
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.logging import get_logger
@@ -30,6 +31,31 @@ log = get_logger(__name__)
 _SYSTEM_PROMPT = (
     Path(__file__).parents[2] / "prompts" / "scraper" / "system.md"
 ).read_text()
+
+
+class _ModelControl(Control):
+    """The shape the model must return. Same contract, stricter schema.
+
+    The shared `Control` gives `key`, `options` and `revealedBy` defaults so a
+    page can be built by hand. The model gets none of those: every field lands
+    in the JSON schema's `required` list, so a response that drops `key` fails
+    structured-output parsing loudly instead of leaving the locator join to
+    guesswork.
+    """
+
+    key: str = Field(exclude=True)
+    options: list[Option] | None
+    revealedBy: RevealedBy | None
+
+
+class _ModelPage(PageDescription):
+    """`PageDescription` with every field required, for the model's response format."""
+
+    controls: list[_ModelControl]
+    next: str | None
+    back: str | None
+    candidateGates: list[str]
+    blockers: list[str]
 
 # URL path segments that identify a routing scheme rather than a page.
 _NOISE_SEGMENTS = {"app", "apps", "form", "forms", "page", "pages", "step", "steps", "v1", "v2"}
@@ -226,7 +252,7 @@ def perceive(page: Page, request: PerceiveRequest, settings: Settings | None = N
         model=get_model(settings),
         tools=read_only_tools(page),
         system_prompt=_SYSTEM_PROMPT,
-        response_format=PageDescription,
+        response_format=_ModelPage,
     )
 
     objective = request.objective or "Describe this form page."

@@ -2,7 +2,15 @@ inputs/
 outputs/
 .venv/
 .sessions/
+logs/
+
+# Markdown files (docs, guides, etc.) - keep only README.md in git
+*.md
+!README.md
+
+# Secrets and caches
 .env
 __pycache__/
+*.pyc
 .vscode/
 AGENTS.md
