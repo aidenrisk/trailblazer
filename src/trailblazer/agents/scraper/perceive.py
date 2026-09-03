@@ -108,6 +108,26 @@ class Perceiver(Protocol):
         ...
 
 
+def _measure_options(page: Page, options: list[dict] | None) -> list[dict] | None:
+    """Resolve each option's own locator, where the option is a clickable node.
+
+    A native `<option>` is set by label against its select and carries
+    `locator: null`; a radio is clicked directly, so its candidates are measured
+    the same way a control's are.
+    """
+    if not options:
+        return options
+    measured = []
+    for opt in options:
+        candidates = opt.get("candidates")
+        if candidates:
+            locator, _ = _first_unique(page, candidates)
+            measured.append({"label": opt.get("label", ""), "locator": locator})
+        else:
+            measured.append({"label": opt.get("label", ""), "locator": opt.get("locator")})
+    return measured
+
+
 class DomSnapshotPerceiver:
     """DOM extraction for addressability, accessibility snapshot for semantics."""
 
@@ -119,8 +139,9 @@ class DomSnapshotPerceiver:
         controls = []
         for item in raw:
             locator, unique = _first_unique(page, item.get("candidates", []))
-            controls.append({**{k: v for k, v in item.items() if k != "candidates"},
-                             "locator": locator, "unique": unique})
+            cleaned = {k: v for k, v in item.items() if k != "candidates"}
+            cleaned["options"] = _measure_options(page, item.get("options"))
+            controls.append({**cleaned, "locator": locator, "unique": unique})
 
         return {
             "url": page.url,

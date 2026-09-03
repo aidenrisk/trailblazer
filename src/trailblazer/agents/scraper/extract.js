@@ -5,6 +5,11 @@
  * type, identity attributes, associated label text, required/disabled state,
  * visibility, and `<option>` children for native selects.
  *
+ * Radios sharing a `name` are one control, not one per choice: they answer one
+ * question, and reporting them separately both loses the question and makes
+ * their locators collide -- two questions with Yes/No produce four nodes whose
+ * only distinguishing text is "Yes" or "No".
+ *
  * It also proposes candidate locators in priority order but does NOT decide
  * which one is unique -- Playwright selector engines (`:has-text()`,
  * `internal:label`) do not exist in the page, so uniqueness is measured from
@@ -69,10 +74,88 @@
     return out;
   };
 
-  const nodes = Array.from(document.querySelectorAll(SELECTOR));
-  return nodes
-    .filter((el) => el.type !== 'hidden')
-    .map((el, i) => {
+  /**
+   * Locators for one radio in a group, scoped by the group's `name` so that a
+   * second question offering the same choice does not collide.
+   */
+  const radioOptionCandidates = (el, groupName, label) => {
+    const out = [];
+    if (el.id) out.push(`#${esc(el.id)}`);
+    const v = el.getAttribute('value');
+    if (v) out.push(`input[name="${groupName}"][value="${esc(v)}"]`);
+    if (label) out.push(`label:has(input[name="${groupName}"]):has-text(${JSON.stringify(label)})`);
+    return out;
+  };
+
+  const all = Array.from(document.querySelectorAll(SELECTOR)).filter((el) => el.type !== 'hidden');
+
+  // One entry per radio group, keyed by name; every other control stands alone.
+  const groups = new Map();
+  const entries = [];
+  for (const el of all) {
+    const name = el.getAttribute('name') || '';
+    if (el.type === 'radio' && name) {
+      if (!groups.has(name)) {
+        groups.set(name, { lead: el, members: [] });
+        entries.push({ radioGroup: name });
+      }
+      groups.get(name).members.push(el);
+    } else {
+      entries.push({ el });
+    }
+  }
+
+  return entries
+    .map((entry, i) => {
+      if (entry.radioGroup) {
+        const { lead, members } = groups.get(entry.radioGroup);
+        const name = entry.radioGroup;
+        // The group's question is the text above the choices, not any choice's
+        // own label, so the fieldset legend and aria-labelledby come first.
+        const fieldset = lead.closest('fieldset');
+        const legend = fieldset ? fieldset.querySelector('legend') : null;
+        const groupNode = lead.closest('[role=radiogroup]');
+        const accName =
+          labelledByText(groupNode || lead) ||
+          (legend ? legend.innerText.trim() : '') ||
+          (groupNode ? groupNode.getAttribute('aria-label') || '' : '') ||
+          name;
+        return {
+          key: `el_${i}`,
+          tag: 'input',
+          inputType: 'radio',
+          role: 'radiogroup',
+          id: '',
+          name,
+          testid: '',
+          ariaLabel: '',
+          ariaLabelledbyText: labelledByText(groupNode || lead),
+          labelText: legend ? legend.innerText.trim() : '',
+          placeholder: '',
+          accessibleName: accName,
+          required:
+            members.some((m) => m.hasAttribute('required')) ||
+            (groupNode ? groupNode.getAttribute('aria-required') === 'true' : false),
+          disabled: members.every((m) => m.disabled === true),
+          visible: members.some((m) => isVisible(m)),
+          options: members.map((m) => {
+            const label = labelText(m) || m.getAttribute('aria-label') || m.value || '';
+            return { label, candidates: radioOptionCandidates(m, name, label) };
+          }),
+          // The group's own address must resolve to one node, so a container
+          // is preferred; the bare name matches every member and is the last
+          // resort, reported non-unique rather than silently wrong.
+          candidates: [
+            ...(groupNode && groupNode.id ? [`#${esc(groupNode.id)}`] : []),
+            ...(fieldset && fieldset.id ? [`#${esc(fieldset.id)}`] : []),
+            ...(groupNode ? [`[role=radiogroup]:has(input[name="${name}"])`] : []),
+            ...(fieldset ? [`fieldset:has(input[name="${name}"])`] : []),
+            `input[name="${name}"]`,
+          ],
+        };
+      }
+
+      const el = entry.el;
       const tag = el.tagName.toLowerCase();
       const name = el.getAttribute('name') || '';
       const testid = el.getAttribute('data-testid') || '';
