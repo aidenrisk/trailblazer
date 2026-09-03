@@ -128,6 +128,20 @@ def _measure_options(page: Page, options: list[dict] | None) -> list[dict] | Non
     return measured
 
 
+def _measure_actions(page: Page, actions: list[dict]) -> list[dict]:
+    """Verify each clickable element's locator, dropping those with none."""
+    out = []
+    for a in actions:
+        locator, unique = _first_unique(page, a.get("candidates", []))
+        if not locator:
+            continue
+        out.append(
+            {"label": a.get("text", ""), "href": a.get("href", ""),
+             "locator": locator, "unique": unique}
+        )
+    return out
+
+
 def _check_integrity(page: Page, controls: list[dict]) -> None:
     """Log the ways a control set can be structurally wrong but still validate.
 
@@ -188,8 +202,11 @@ class DomSnapshotPerceiver:
 
     def perceive(self, page: Page) -> dict[str, Any]:
         """Extract controls, verify each locator, and attach the a11y tree."""
-        raw: list[dict[str, Any]] = page.evaluate(_EXTRACT_JS)
-        log.debug("extractor returned %d raw elements", len(raw))
+        payload: dict[str, Any] = page.evaluate(_EXTRACT_JS)
+        raw = payload["controls"]
+        log.debug(
+            "extractor returned %d controls, %d actions", len(raw), len(payload["actions"])
+        )
 
         controls = []
         for item in raw:
@@ -204,6 +221,7 @@ class DomSnapshotPerceiver:
             "url": page.url,
             "title": page.title(),
             "controls": controls,
+            "actions": _measure_actions(page, payload["actions"]),
             "a11y": _aria_snapshot(page),
             "next": _find_button(page, _NEXT_PATTERNS),
             "back": _find_button(page, _BACK_PATTERNS),
@@ -228,6 +246,7 @@ class A11yOnlyPerceiver:
             "url": page.url,
             "title": page.title(),
             "controls": [],
+            "actions": [],
             "a11y": _aria_snapshot(page),
             "next": _find_button(page, _NEXT_PATTERNS),
             "back": _find_button(page, _BACK_PATTERNS),

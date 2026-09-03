@@ -15,7 +15,13 @@
  * `internal:label`) do not exist in the page, so uniqueness is measured from
  * Python with `page.locator(sel).count()`.
  *
- * Returns: RawControl[]
+ * Also reports the page's clickable elements -- links, buttons, cards -- as
+ * `actions`. A page that only advances (a dashboard, a business-type chooser)
+ * has no fillable control, so without these its description is empty and there
+ * is nothing for Frontier to choose between. The scraper reports them; it never
+ * clicks one.
+ *
+ * Returns: { controls: RawControl[], actions: RawAction[] }
  */
 () => {
   const SELECTOR =
@@ -103,6 +109,27 @@
     return out;
   };
 
+  const ACTION_SELECTOR = 'a[href], button, [role=button], [role=link], input[type=submit]';
+
+  /** Clickable elements a page can be advanced by, with their own locators. */
+  const actions = Array.from(document.querySelectorAll(ACTION_SELECTOR))
+    .filter((el) => isVisible(el) && !el.disabled)
+    .map((el, i) => {
+      const tag = el.tagName.toLowerCase();
+      const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+      const href = el.getAttribute('href') || '';
+      const cands = [];
+      if (el.id) cands.push(`#${esc(el.id)}`);
+      const testid = el.getAttribute('data-testid') || '';
+      if (testid) cands.push(`[data-testid="${testid}"]`);
+      // An attribute *value* takes quote escaping, not CSS.escape, which is
+      // for identifiers and turns "/search" into "\\/search" -- matching nothing.
+      if (tag === 'a' && href) cands.push(`a[href=${JSON.stringify(href)}]`);
+      if (text) cands.push(`${tag}:has-text(${JSON.stringify(text)})`);
+      return { key: `ac_${i}`, tag, text, href, candidates: cands };
+    })
+    .filter((a) => a.text || a.href);
+
   const all = Array.from(document.querySelectorAll(SELECTOR)).filter((el) => el.type !== 'hidden');
 
   // One entry per radio group, keyed by name; every other control stands alone.
@@ -121,7 +148,7 @@
     }
   }
 
-  return entries
+  const controls = entries
     .map((entry, i) => {
       if (entry.radioGroup) {
         const { lead, members } = groups.get(entry.radioGroup);
@@ -220,4 +247,6 @@
         candidates: candidates(el, name, testid, role, accName),
       };
     });
+
+  return { controls, actions };
 }
