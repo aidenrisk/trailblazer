@@ -1,0 +1,15 @@
+{
+  "_comment": "Seed vocabulary for `canonical`, the chat's identity for a fact across every carrier. Stands in for `question_catalog.canonical_key`, which has no table in this repo. Each entry maps a canonical key to the label substrings that identify it. Matching is substring-on-normalized-label, longest match first.",
+  "business.legal_name": ["legal business name", "legal name", "business legal name", "company legal name", "registered name"],
+  "dba": ["dba", "doing business as", "trade name", "fictitious name"],
+  "ein": ["ein", "employer identification number", "federal tax id", "tax id number", "fein"],
+  "zip_code": ["zip code", "zip", "postal code", "post code", "postcode"],
+  "entity_type": ["entity type", "legal entity type", "business structure", "form of business", "organization type"],
+  "policyEffectiveDate": ["policy effective date", "effective date", "coverage start date", "policy start date"],
+  "target_premium": ["target premium", "desired premium", "premium target"],
+  "has_multiple_locations": ["multiple locations", "more than one location", "additional locations"],
+  "class_code": ["class code", "classification code", "governing class code", "class of business"],
+  "full_time_employees": ["full time employees", "full-time employees", "number of full time employees", "ft employees"],
+  "part_time_employees": ["part time employees", "part-time employees", "number of part time employees", "pt employees"],
+  "payroll": ["payroll", "annual payroll", "total payroll", "estimated payroll", "gross payroll"]
+}
