@@ -1,0 +1,12 @@
+{
+  "client": {
+    "legalName": "Acme Landscaping LLC",
+    "state": "TX"
+  },
+  "answers": {
+    "legalName": "Acme Landscaping LLC",
+    "annualPayroll": 450000,
+    "hasPriorClaims": "No",
+    "hasSubcontractors": "Yes"
+  }
+}
