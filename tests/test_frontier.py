@@ -1,0 +1,408 @@
+"""Tests for the board and the assignment order Frontier derives from it.
+
+Fixtures, not a browser: Frontier never touches a page, so every input here is a
+PageDescription built in code. What is under test is the walk order and the
+gate accounting -- the two things a wrong answer from which silently produces an
+incomplete crawl rather than a visible failure.
+"""
+
+import pytest
+
+from trailblazer.agents.frontier import Frontier, gate_sides
+from trailblazer.contracts.assignment import FillReport
+from trailblazer.contracts.page_description import Action, Control, Option, PageDescription
+from trailblazer.observability.ledger import RunLedger
+
+STAGE = "form_page_1_business_info"
+
+
+def control(
+    field_id: str,
+    label: str = "Field",
+    type: str = "text",
+    options: list[str] | None = None,
+    locator: str | None = None,
+    option_locators: bool = False,
+) -> Control:
+    """One control. `options` is given as bare labels; locators are optional."""
+    opts = None
+    if options is not None:
+        opts = [
+            Option(label=o, locator=f"#{field_id}_{i}" if option_locators else None)
+            for i, o in enumerate(options)
+        ]
+    return Control(
+        fieldId=field_id,
+        key=f"el_{field_id}",
+        label=label,
+        type=type,
+        required=False,
+        options=opts,
+        locator=locator or f"#{field_id}",
+        unique=True,
+        revealedBy=None,
+    )
+
+
+def page(
+    controls: list[Control],
+    actions: list[Action] | None = None,
+    blockers: list[str] | None = None,
+    stage_id: str = STAGE,
+) -> PageDescription:
+    """One page description."""
+    return PageDescription(
+        stageId=stage_id,
+        url="https://partner.example.com/start",
+        controls=controls,
+        next=None,
+        back=None,
+        actions=actions or [],
+        blockers=blockers or [],
+    )
+
+
+def report(assignment, value: str | None = None) -> FillReport:
+    """The FillReport the filler would return for `assignment`, having succeeded."""
+    return FillReport(
+        fieldId=assignment.fieldId,
+        intent=assignment.intent,
+        locator=assignment.locator,
+        ok=True,
+        valueUsed=value if value is not None else assignment.value,
+    )
+
+
+def walk(frontier: Frontier, description: PageDescription, limit: int = 20) -> list:
+    """Drive the page to completion, echoing each assignment straight back.
+
+    Stands in for Loop plus the filler: perceive, assign, report, repeat. The
+    page never changes, which is the case for a form whose fields reveal nothing.
+    """
+    assignments = []
+    frontier.observe(description)
+    for _ in range(limit):
+        assignment = frontier.next_assignment()
+        if assignment is None:
+            return assignments
+        assignments.append(assignment)
+        frontier.observe(description, report(assignment))
+    raise AssertionError(f"page did not finish in {limit} assignments")
+
+
+@pytest.fixture
+def frontier() -> Frontier:
+    return Frontier(business_types=["contractors"], insurance_types=["workers_comp"])
+
+
+# --------------------------------------------------------------------------- #
+# Every field walked at least once
+# --------------------------------------------------------------------------- #
+
+
+def test_three_text_fields_yield_three_assignments_then_done(frontier: Frontier) -> None:
+    """A field never touched is a branch never tested (spec §4)."""
+    controls = [control(f"q_00{i}", type="text") for i in (1, 2, 3)]
+
+    assignments = walk(frontier, page(controls))
+
+    assert [a.fieldId for a in assignments] == ["q_001", "q_002", "q_003"]
+    assert all(a.intent == "fill" for a in assignments)
+    assert frontier.page_done()
+
+
+def test_intent_follows_the_control_shape(frontier: Frontier) -> None:
+    """`fill` for scalars, `select` where choices exist, `check` for a bare toggle."""
+    controls = [
+        control("q_001", type="number"),
+        control("q_002", type="date"),
+        control("q_003", type="select", options=["A", "B", "C"]),
+        control("q_004", type="toggle"),
+    ]
+
+    assignments = walk(frontier, page(controls))
+
+    assert [a.intent for a in assignments[:4]] == ["fill", "fill", "select", "check"]
+
+
+def test_a_choice_control_with_no_options_is_expanded_not_filled(frontier: Frontier) -> None:
+    """A combobox mounts its listbox on click, so the set is unreadable until then."""
+    frontier.observe(page([control("q_001", type="select", options=None)]))
+
+    assignment = frontier.next_assignment()
+
+    assert assignment.intent == "expand"
+    assert assignment.value is None
+
+
+def test_frontier_never_chooses_a_value_for_a_plain_field(frontier: Frontier) -> None:
+    """Picking the value is the filler's judgment (spec §4)."""
+    frontier.observe(page([control("q_001", type="text"), control("q_002", type="select",
+                                                                  options=["A", "B", "C"])]))
+
+    first = frontier.next_assignment()
+
+    assert first.value is None
+
+
+# --------------------------------------------------------------------------- #
+# Gates
+# --------------------------------------------------------------------------- #
+
+
+def test_a_two_option_toggle_is_walked_both_ways_before_done(frontier: Frontier) -> None:
+    """Both-ways coverage is blocking, not advisory (spec §4)."""
+    gate = control("q_001", type="toggle", options=["Yes", "No"])
+
+    assignments = walk(frontier, page([gate]))
+
+    assert [a.value for a in assignments] == ["Yes", "No"]
+    assert frontier.page_done()
+    assert frontier.summary()["gates"]["q_001"] == {"walked": ["Yes", "No"], "remaining": []}
+
+
+def test_a_five_option_select_is_walked_once(frontier: Frontier) -> None:
+    """The walk covers branches, not combinations: three or more options is not a gate."""
+    wide = control("q_001", type="select", options=["A", "B", "C", "D", "E"])
+
+    assignments = walk(frontier, page([wide]))
+
+    assert len(assignments) == 1
+    assert "q_001" not in frontier.summary()["gates"]
+
+
+def test_two_independent_gates_yield_four_assignments_not_a_product(frontier: Frontier) -> None:
+    """Four walks, not 2x2 paths through the rest of the form."""
+    gates = [
+        control("q_001", type="toggle", options=["Yes", "No"]),
+        control("q_002", type="toggle", options=["Owner", "Renter"]),
+    ]
+
+    assignments = walk(frontier, page(gates))
+
+    assert len(assignments) == 4
+    assert [(a.fieldId, a.value) for a in assignments] == [
+        ("q_001", "Yes"),
+        ("q_002", "Owner"),
+        ("q_001", "No"),
+        ("q_002", "Renter"),
+    ]
+
+
+def test_a_bare_toggle_is_walked_checked_then_unchecked(frontier: Frontier) -> None:
+    """A checkbox with no options is a gate; its two sides have no option labels."""
+    assignments = walk(frontier, page([control("q_001", type="toggle")]))
+
+    assert [(a.intent, a.value) for a in assignments] == [("check", "true"), ("check", "false")]
+    assert frontier.summary()["gates"]["q_001"]["walked"] == ["true", "false"]
+
+
+def test_a_radio_gate_carries_the_chosen_options_own_locator(frontier: Frontier) -> None:
+    """Each radio choice is a separate input, so the option's address is passed through."""
+    gate = control("q_001", type="select", options=["Yes", "No"], option_locators=True)
+    frontier.observe(page([gate]))
+    frontier.next_assignment()
+    frontier.observe(page([gate]), FillReport(
+        fieldId="q_001", intent="select", locator="#q_001", ok=True, valueUsed="Yes"
+    ))
+
+    second = frontier.next_assignment()
+
+    assert second.value == "No"
+    assert second.optionLocator == "#q_001_1"
+
+
+def test_a_native_select_gate_carries_no_option_locator(frontier: Frontier) -> None:
+    """A `<select>`'s choices are set by label against the parent, not clicked."""
+    gate = control("q_001", type="select", options=["Yes", "No"])
+    frontier.observe(page([gate]))
+
+    assert frontier.next_assignment().optionLocator is None
+
+
+def test_the_second_side_is_recorded_as_issued_without_a_reset(frontier: Frontier) -> None:
+    """Renavigation needs the Generator's action prefix, which is not built."""
+    walk(frontier, page([control("q_001", type="toggle", options=["Yes", "No"])]))
+
+    assert frontier.summary()["issuedWithoutReset"] == ["q_001"]
+
+
+@pytest.mark.parametrize(
+    "type,options,expected",
+    [
+        ("toggle", None, ["true", "false"]),
+        ("toggle", ["On", "Off"], ["On", "Off"]),
+        ("select", ["Yes", "No"], ["Yes", "No"]),
+        ("select", ["A", "B", "C"], None),
+        ("select", None, None),
+        ("text", None, None),
+        ("number", None, None),
+        ("other", None, None),
+    ],
+)
+def test_gate_shape_not_type_name(type: str, options: list[str] | None, expected) -> None:
+    """The gate rule reads shape: a `toggle` always, else exactly two choices."""
+    assert gate_sides(control("q_001", type=type, options=options)) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Pages with nothing fillable
+# --------------------------------------------------------------------------- #
+
+
+def test_no_controls_and_a_matching_action_yields_an_advance(frontier: Frontier) -> None:
+    """A dashboard's only move is to click one specific thing."""
+    actions = [
+        Action(label="Manage Policies", href="/policies", locator="#policies", unique=True),
+        Action(label="Start Workers Comp Quote", href="/wc/new", locator="#wc", unique=True),
+    ]
+    frontier.observe(page([], actions=actions))
+
+    assignment = frontier.next_assignment()
+
+    assert assignment.intent == "advance"
+    assert assignment.locator == "#wc"
+    assert assignment.fieldId is None
+
+
+def test_the_action_is_matched_on_href_as_well_as_label(frontier: Frontier) -> None:
+    """Match is a case-insensitive substring over both fields."""
+    actions = [
+        Action(label="Start", href="/quote/contractors", locator="#a", unique=True),
+        Action(label="Other", href="/quote/restaurants", locator="#b", unique=True),
+    ]
+    frontier.observe(page([], actions=actions))
+
+    assert frontier.next_assignment().locator == "#a"
+
+
+def test_a_unique_action_is_preferred_over_a_repeated_one(frontier: Frontier) -> None:
+    """Pie's dashboard carries "Get a Quote" twice; only one locator resolves alone."""
+    actions = [
+        Action(label="Workers Comp Quote", href="", locator="a.cta", unique=False),
+        Action(label="Workers Comp Quote", href="", locator="#hero .cta", unique=True),
+    ]
+    frontier.observe(page([], actions=actions))
+
+    assert frontier.next_assignment().locator == "#hero .cta"
+
+
+def test_an_action_already_clicked_is_not_re_issued(frontier: Frontier) -> None:
+    """A page whose only action has been taken is done, not looping."""
+    actions = [Action(label="Workers Comp", href="", locator="#wc", unique=True)]
+    description = page([], actions=actions)
+    frontier.observe(description)
+    first = frontier.next_assignment()
+    frontier.observe(description, report(first))
+
+    assert frontier.next_assignment() is None
+    assert frontier.page_done()
+
+
+def test_actions_are_ignored_while_the_page_still_holds_controls(frontier: Frontier) -> None:
+    """`advance` is for a page with nothing fillable; fields come first."""
+    actions = [Action(label="Workers Comp", href="", locator="#wc", unique=True)]
+    frontier.observe(page([control("q_001")], actions=actions))
+
+    assert frontier.next_assignment().fieldId == "q_001"
+
+
+# --------------------------------------------------------------------------- #
+# Blockers
+# --------------------------------------------------------------------------- #
+
+
+def test_a_page_with_blockers_yields_the_dismiss_action_first(frontier: Frontier) -> None:
+    """An overlay is cleared before anything under it is touched."""
+    actions = [Action(label="Accept All Cookies", href="", locator="#accept", unique=True)]
+    frontier.observe(page([control("q_001")], actions=actions, blockers=["cookie banner shown"]))
+
+    assignment = frontier.next_assignment()
+
+    assert assignment.intent == "advance"
+    assert assignment.locator == "#accept"
+
+
+def test_a_blocker_with_no_dismissing_action_does_not_stall_the_page(frontier: Frontier) -> None:
+    """Nothing on the page clears it, so the walk proceeds and the blocker is logged."""
+    frontier.observe(page([control("q_001")], blockers=["This field is required"]))
+
+    assert frontier.next_assignment().fieldId == "q_001"
+
+
+def test_a_dismiss_action_is_not_issued_twice(frontier: Frontier) -> None:
+    """A blocker that survives its dismissal stops the page rather than looping."""
+    actions = [Action(label="Accept", href="", locator="#accept", unique=True)]
+    description = page([], actions=actions, blockers=["cookie banner shown"])
+    frontier.observe(description)
+    first = frontier.next_assignment()
+    frontier.observe(description, report(first))
+
+    assert frontier.next_assignment() is None
+
+
+# --------------------------------------------------------------------------- #
+# Reveals and page boundaries
+# --------------------------------------------------------------------------- #
+
+
+def test_a_revealed_field_is_added_to_the_board_and_walked(frontier: Frontier) -> None:
+    """Reveal-on-change: the new field is attributed to the assignment that made it."""
+    parent = control("q_001", type="select", options=["LLC", "Sole Proprietor"])
+    child = control("q_002", type="text")
+
+    frontier.observe(page([parent]))
+    first = frontier.next_assignment()
+    frontier.observe(page([parent, child]), report(first), added=["q_002"])
+
+    assert frontier.summary()["revealed"] == {"q_002": "q_001"}
+    assert not frontier.page_done()
+    assert frontier.next_assignment().fieldId == "q_002"
+
+
+def test_a_new_stage_id_retires_the_previous_board(frontier: Frontier) -> None:
+    """`fieldId` is a per-page counter and carries no cross-page identity."""
+    walk(frontier, page([control("q_001", type="text")]))
+
+    frontier.observe(page([control("q_001", type="text")], stage_id="form_page_2_locations"))
+
+    assert frontier.summary()["stageId"] == "form_page_2_locations"
+    assert frontier.summary()["attempted"] == []
+    assert frontier.next_assignment().fieldId == "q_001"
+
+
+def test_a_failed_report_still_counts_the_field_as_attempted(frontier: Frontier) -> None:
+    """A blocked field is a stop condition, not a retry (spec §5)."""
+    description = page([control("q_001")])
+    frontier.observe(description)
+    first = frontier.next_assignment()
+    frontier.observe(description, FillReport(
+        fieldId="q_001", intent="fill", locator="#q_001", ok=False,
+        blocked={"control": "q_001", "whatYouTried": "typed 5"},
+    ))
+
+    assert frontier.next_assignment() is None
+
+
+def test_next_assignment_before_observe_raises(frontier: Frontier) -> None:
+    """Failures are loud: there is no board to read yet."""
+    with pytest.raises(RuntimeError, match="before observe"):
+        frontier.next_assignment()
+
+
+# --------------------------------------------------------------------------- #
+# Ledger
+# --------------------------------------------------------------------------- #
+
+
+def test_every_step_is_recorded_against_the_ledger_at_zero_cost() -> None:
+    """Frontier is deterministic bookkeeping, so every step costs nothing."""
+    ledger = RunLedger(job_id="j1")
+    frontier = Frontier(["contractors"], ["workers_comp"], ledger=ledger)
+
+    walk(frontier, page([control("q_001"), control("q_002")]))
+
+    agent = ledger.by_agent()["frontier"]
+    assert agent["usd"] == 0.0
+    assert agent["unpriced"] == 0
+    assert {s.action for s in ledger.steps} == {"observe", "assign", "done"}
