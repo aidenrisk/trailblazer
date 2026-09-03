@@ -56,6 +56,11 @@ NATIVE_FORMATS = {
     "datetime-local": "YYYY-MM-DDTHH:MM",
 }
 
+# Characters a form adds or removes purely to display a value: the separators in
+# a currency field, the dashes in a FEIN, the brackets and spaces in a phone
+# number. Ignored when checking whether a fill landed.
+_FORMATTING = re.compile(r"[\s,()\-–—$]")
+
 _DATE_ORDERS = (
     "%Y-%m-%d",  # already ISO
     "%m/%d/%Y",  # US, what a person writes and what the prompt asks for
@@ -139,6 +144,9 @@ class FormFiller:
             "[%s] %s is %s (%r)", job, assignment.fieldId, kind, info.label
         )
 
+        if info.disabled:
+            return self._unavailable(job, assignment)
+
         if kind == dom.ElementInfo.NATIVE_SELECT:
             return self._fill_native_select(job, assignment, target, info)
         if kind == dom.ElementInfo.WIDGET:
@@ -172,17 +180,26 @@ class FormFiller:
             logger.warning("[%s] %s refused %r: %s", job, assignment.fieldId, value, e)
             return self._rejected(assignment, info, value)
 
-        # Read it back. A field that silently rejects what was typed (a masked
-        # input, a 5-digit ZIP given 6) leaves the form incomplete, and a report
-        # claiming it landed would send Frontier on to the next control with a
-        # blank behind it.
+        # Read it back. A field that silently drops what was typed (a 5-digit
+        # ZIP given 6, an input that clears itself) leaves the form incomplete,
+        # and a report claiming it landed would send Frontier on to the next
+        # control with a blank behind it.
         landed = self._read_back(target, info)
-        if landed is not None and landed != value:
+        if landed is not None and not _kept(value, landed):
             logger.warning(
                 "[%s] %s did not keep %r (page shows %r)",
                 job, assignment.fieldId, value, landed,
             )
             return self._rejected(assignment, info, value)
+
+        if landed is not None and landed != value:
+            # Accepted, then reformatted. Worth saying out loud, because the
+            # step below records what was TYPED and not what is displayed —
+            # that is the string a replay has to reproduce.
+            logger.info(
+                "[%s] %s shows %r for the %r it was given; the value landed",
+                job, assignment.fieldId, landed, value,
+            )
 
         logger.info("[%s] typed %r into %s", job, value, assignment.fieldId)
         return FillReport(
@@ -292,6 +309,33 @@ class FormFiller:
             job, assignment.fieldId, [o.label for o in options], chosen.label,
         )
         return self._chooser_report(assignment, chosen, options, info)
+
+    def _unavailable(self, job: str, assignment: Assignment) -> FillReport:
+        """
+        The control is disabled: it cannot be typed into or clicked at all.
+
+        Worth checking before acting rather than finding out by acting, because
+        Playwright does not fail fast on this — fill() and click() both wait for
+        the element to become editable/enabled and only give up at the action
+        timeout, thirty seconds later. The live Pie page ships one of these
+        (`#agencyProgram`, fixed by the account), so the cost is real.
+
+        Reported the way an empty chooser is, and for the same reason: a
+        disabled field is a legitimate page state, not an error, so ending the
+        walk on it would be wrong — but leaving it unexplored would block every
+        control after it. Nothing is claimed to have been done: no step, so
+        there is nothing for a replay to reproduce.
+        """
+        logger.info(
+            "[%s] %s (%s) is disabled; nothing to do",
+            job, assignment.fieldId, assignment.locator,
+        )
+        return FillReport(
+            ok=True,
+            landed=[assignment.fieldId],
+            fieldId=assignment.fieldId,
+            discoveredOptions=[],
+        )
 
     def _empty_chooser(self, job: str, assignment: Assignment, why: str) -> FillReport:
         """
@@ -493,6 +537,25 @@ class FormFiller:
 
         logger.info("[%s] %s on %s; attempting recovery", job, error, assignment.fieldId)
         return self.recovery.attempt(job, assignment, failed, self)
+
+
+def _kept(typed: str, shown: str) -> bool:
+    """
+    Did the field keep what was typed?
+
+    Not a string comparison, because a masked field reformats as you type. The
+    live Pie page stores a FEIN of "12-3456789" as "123456789" and shows a
+    premium of "1200" as "1,200"; comparing literally reads both as refusals
+    and loses two real fields on the first page alone.
+
+    What still has to be caught is a field that DROPS content — a five-digit
+    ZIP given six digits, an input that clears itself — so only formatting
+    characters are forgiven and everything else must survive intact.
+    """
+    if shown == typed:
+        return True
+    significant = _FORMATTING.sub("", typed)
+    return bool(significant) and _FORMATTING.sub("", shown) == significant
 
 
 def _to_native(value: str, input_type: str) -> str | None:

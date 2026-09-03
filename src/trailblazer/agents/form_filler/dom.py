@@ -32,6 +32,11 @@ OPTION_SELECTORS = (
     "[role=menu] [role=menuitem]",
 )
 
+# Roles a control announces when its job is to choose from a list. `listbox` is
+# here because that is what the live Pie page puts on its dropdowns — on the
+# <input> itself, which is not what the ARIA spec has in mind but is what ships.
+CHOOSER_ROLES = frozenset({"combobox", "listbox", "menu"})
+
 # One round trip that answers everything needed to classify a control. Done in
 # the page rather than as a dozen get_attribute() calls: each of those is a
 # separate CDP message, and a control that changes between them would be
@@ -79,6 +84,10 @@ el => {
     placeholder: attr("placeholder"),
     pattern: attr("pattern"),
     maxLength: el.maxLength > 0 ? el.maxLength : null,
+    readOnly: el.readOnly === true
+      || el.hasAttribute("readonly")
+      || attr("aria-readonly") === "true",
+    disabled: el.disabled === true || attr("aria-disabled") === "true",
     options,
     heading: ((document.querySelector("h1, h2") || {}).textContent || "").trim(),
     title: document.title || "",
@@ -105,6 +114,8 @@ class ElementInfo:
         self.placeholder: str = raw["placeholder"]
         self.pattern: str = raw["pattern"]
         self.max_length: int | None = raw["maxLength"]
+        self.read_only: bool = raw["readOnly"]
+        self.disabled: bool = raw["disabled"]
         self.page_heading: str = raw["heading"] or raw["title"]
         self.select_options: list[dict] | None = raw["options"]
 
@@ -117,14 +128,23 @@ class ElementInfo:
         widget is only knowable by opening it; and a plain input must never be
         opened, because clicking a text box and then hunting for a menu is how
         it gets mistaken for a chooser.
+
+        A readonly input counts as a widget, and that is not a guess. Nothing
+        can type into one, so reading it as TEXT costs a full fill() timeout —
+        Playwright waits for the element to become editable and it never does —
+        and then reports the field as having refused a value, which sends
+        Frontier past a chooser whose options were never even seen. Clicking it
+        instead either finds options or reports [], and both are answers.
         """
         if self.tag == "select":
             return self.NATIVE_SELECT
         if self.tag == "input" and self.input_type in ("checkbox", "radio"):
             return self.TOGGLE
-        if self.role == "combobox" or self.raw["hasPopup"]:
+        if self.role in CHOOSER_ROLES or self.raw["hasPopup"]:
             return self.WIDGET
-        if self.tag in ("input", "textarea") or self.raw["contentEditable"]:
+        if self.tag in ("input", "textarea"):
+            return self.WIDGET if self.read_only else self.TEXT
+        if self.raw["contentEditable"]:
             return self.TEXT
         return self.WIDGET
 

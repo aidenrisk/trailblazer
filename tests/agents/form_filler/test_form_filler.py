@@ -87,6 +87,59 @@ class TestPlainFields:
         assert page.input_value("#strictZip") == ""
 
 
+class TestMaskedFields:
+    """
+    A field that reformats as you type accepted the value; it just displays it
+    its own way. Read as a refusal, the live Pie page loses its FEIN and its
+    premium on page one alone.
+    """
+
+    def test_a_field_that_drops_the_dashes_still_landed(self, page):
+        filler = FormFiller(page, value_picker=fixed("12-3456789"))
+        report = filler.execute(JOB, STAGE, fill("q_007", "#fein"))
+
+        assert report.ok is True, report.errorClass
+        assert report.landed == ["q_007"]
+        assert page.input_value("#fein") == "123456789"
+        # The step records what was TYPED, because that is the string a replay
+        # has to reproduce — typing the display form back may not round-trip.
+        assert report.steps[0].value == "12-3456789"
+
+    def test_a_field_that_adds_separators_still_landed(self, page):
+        filler = FormFiller(page, value_picker=fixed("1200"))
+        report = filler.execute(JOB, STAGE, fill("q_015", "#maskedPremium"))
+
+        assert report.ok is True, report.errorClass
+        assert page.input_value("#maskedPremium") == "1,200"
+        assert report.steps[0].value == "1200"
+
+    def test_a_field_that_truncates_is_still_a_failure(self, page):
+        """
+        The check forgives formatting, not lost content. Six digits into a
+        five-digit ZIP is a dropped character, not a mask.
+        """
+        filler = FormFiller(page, value_picker=fixed("123456"))
+        report = filler.execute(JOB, STAGE, fill("q_007", "#fein"))
+        assert report.ok is True  # 9-digit cap not reached
+
+        filler = FormFiller(page, value_picker=fixed("1234567890123"))
+        report = filler.execute(JOB, STAGE, fill("q_007", "#fein"))
+
+        assert report.ok is False
+        assert report.errorClass == "validation"
+        assert page.input_value("#fein") == "123456789"
+
+    def test_a_field_that_clears_itself_is_still_a_failure(self, page):
+        filler = FormFiller(page, value_picker=fixed("$-, ()"))
+        report = filler.execute(JOB, STAGE, fill("q_015", "#maskedPremium"))
+
+        # Nothing significant was typed, so nothing can be claimed to have
+        # landed — an all-formatting value must not pass by having an empty
+        # normal form on both sides.
+        assert report.ok is False
+        assert report.errorClass == "validation"
+
+
 class TestTheValuePicker:
     def test_picker_is_asked_about_the_real_control(self, page):
         """
@@ -262,6 +315,74 @@ class TestDiscovery:
         page.click("#agencyProgram")
         for option in report.discoveredOptions:
             assert page.locator(option.locator).count() == 1, option.locator
+
+    def test_readonly_input_is_a_chooser_not_a_text_field(self, filler, page):
+        """
+        The live Pie shape: <input type="text" role="listbox" readonly>.
+
+        Nothing about the tag says chooser, and fill() on it does not fail fast
+        — it waits 30s for the element to become editable, then reports the
+        field as having refused a value. Read as TEXT this control costs a
+        timeout AND loses every option it had.
+        """
+        assert page.locator("[role=option]").count() == 0
+
+        report = filler.execute(JOB, STAGE, fill("q_014", "#stateOfOperation"))
+
+        assert report.ok is True
+        assert report.steps[0].action == "select"
+        assert [o.label for o in report.discoveredOptions] == [
+            "California",
+            "New York",
+            "Texas",
+        ]
+        assert report.chosenOption == "California"
+        assert page.input_value("#stateOfOperation") == "California"
+
+    def test_a_readonly_field_is_never_typed_into(self, page):
+        """The value picker is not even consulted: there is nothing to type."""
+        asked = []
+
+        def spy(control, context="", constraints=None):
+            asked.append(control.label)
+            return "x"
+
+        FormFiller(page, value_picker=spy).execute(
+            JOB, STAGE, fill("q_014", "#stateOfOperation")
+        )
+
+        assert asked == []
+
+    def test_disabled_control_is_reported_without_being_touched(self, filler, page):
+        """
+        The live #agencyProgram is disabled — fixed by the account. Playwright
+        does not fail fast on it: fill() and click() both wait for the element
+        to become editable/enabled and only give up at the action timeout.
+
+        Reported as an empty chooser: ok, so the walk does not end on a
+        legitimate page state, and explored, so it does not block the controls
+        after it. No step, because nothing was done.
+        """
+        report = filler.execute(JOB, STAGE, fill("q_016", "#lockedProgram"))
+
+        assert report.ok is True
+        assert report.discoveredOptions == []
+        assert report.landed == ["q_016"]
+        assert report.steps == []
+        # Untouched: the value it shipped with is still there.
+        assert page.input_value("#lockedProgram") == "Pie Direct"
+
+    def test_a_disabled_control_fails_fast(self, filler):
+        """
+        The whole point. Acting on it first would cost 30s of action timeout,
+        and there are three such controls on the live page's first form.
+        """
+        import time
+
+        start = time.monotonic()
+        filler.execute(JOB, STAGE, fill("q_016", "#lockedProgram"))
+
+        assert time.monotonic() - start < 5
 
     def test_widget_with_no_options_reports_empty_not_none(self, filler):
         """

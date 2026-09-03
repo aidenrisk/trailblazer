@@ -21,10 +21,14 @@
   #agencyProgram   custom combobox — renders its options ONLY after a click, so a
                    scraper reports options: null and the filler is what finds them
   #entityType      native <select> — options are in the DOM from the start
+  #stateOfOperation  readonly <input role="listbox"> — the live Pie shape. Looks
+                   like a text box to anything reading tag names, is a dropdown.
   Yes / No         split control — two separate buttons, no shared parent element
   #membersRow      revealed only while #entityType is "llc"
   #emptyMenu       a widget that opens and genuinely has no options
   #duplicateName   two elements sharing one locator, to force not_unique
+  #fein            reformats as you type (drops the dashes)
+  #maskedPremium   reformats as you type (inserts thousands separators)
 -->
 
 <form id="app-form">
@@ -59,11 +63,34 @@
     <input type="text" id="members" name="members">
   </div>
 
+  <!--
+    Readonly input carrying role="listbox": exactly how the live Pie page builds
+    #agencyProgram and #entityType. Nothing about the tag says "chooser", and
+    fill() on it does not fail fast — it waits for the element to become
+    editable until the action times out.
+  -->
+  <label for="stateOfOperation">State of Operation</label>
+  <input type="text" id="stateOfOperation" role="listbox" readonly value="">
+  <div id="stateOfOperationMenu" class="menu hidden"></div>
+
+  <!-- Strips the dashes as you type: what lands is not what was typed. -->
   <label for="fein">FEIN</label>
   <input type="text" id="fein" name="fein">
 
   <label for="targetPremium">Target or Incumbent Premium</label>
   <input type="number" id="targetPremium" name="targetPremium">
+
+  <!-- Inserts thousands separators as you type. -->
+  <label for="maskedPremium">Expiring Premium</label>
+  <input type="text" id="maskedPremium" name="maskedPremium">
+
+  <!--
+    Disabled, the way the live #agencyProgram is: fixed by the account, so the
+    page shows it and will not let anything touch it. Neither fill() nor click()
+    fails fast on this — both wait out the action timeout.
+  -->
+  <label for="lockedProgram">Agency / Program (fixed)</label>
+  <input type="text" id="lockedProgram" role="listbox" readonly disabled value="Pie Direct">
 
   <!-- Split control: two buttons, each its own locator. -->
   <label>Does this business have multiple locations?</label>
@@ -144,6 +171,44 @@
       document.getElementById("locationsNo").setAttribute("aria-pressed", String(id === "locationsNo"));
     });
   }
+
+  // The readonly-input dropdown, built the way Pie builds one: the input is
+  // only a display surface, and the options appear in a floating menu on click.
+  const STATES = ["California", "New York", "Texas"];
+  const stateInput = document.getElementById("stateOfOperation");
+  const stateMenu = document.getElementById("stateOfOperationMenu");
+  stateInput.addEventListener("click", () => {
+    if (!stateMenu.classList.contains("hidden")) {
+      stateMenu.innerHTML = ""; stateMenu.classList.add("hidden"); return;
+    }
+    stateMenu.innerHTML = "";
+    for (const label of STATES) {
+      const item = document.createElement("div");
+      item.setAttribute("role", "option");
+      item.textContent = label;
+      item.addEventListener("click", () => {
+        stateInput.value = label;
+        stateMenu.innerHTML = "";
+        stateMenu.classList.add("hidden");
+      });
+      stateMenu.appendChild(item);
+    }
+    stateMenu.classList.remove("hidden");
+  });
+
+  // Masks: the field accepts the value and then shows it its own way. A filler
+  // comparing what it typed against what is shown, character for character,
+  // reads both of these as a refusal.
+  const fein = document.getElementById("fein");
+  fein.addEventListener("input", () => {
+    fein.value = fein.value.replace(/\D/g, "").slice(0, 9);
+  });
+
+  const masked = document.getElementById("maskedPremium");
+  masked.addEventListener("input", () => {
+    const digits = masked.value.replace(/\D/g, "");
+    masked.value = digits ? Number(digits).toLocaleString("en-US") : "";
+  });
 
   // Five digits or nothing: a fill that doesn't stick, without a server.
   const strict = document.getElementById("strictZip");
