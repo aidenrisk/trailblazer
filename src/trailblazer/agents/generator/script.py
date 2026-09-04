@@ -200,8 +200,35 @@ def stage_block(stage_name: str, url: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _guard(conditional: tuple[str, str] | None) -> tuple[str, str, str]:
+    """Open, indent and close for a block that runs only on one branch.
+
+    `conditional` is the parent gate's questionId and the value that reveals
+    this control. Without the guard the script sets a control that is not
+    mounted on any other branch, and reads an answer the client was never asked
+    for: every path but the one the crawl published fails.
+
+    The parent's variable is in scope because blocks are emitted in the order
+    the controls were appended, and a control is revealed only after the gate
+    that revealed it was filled.
+    """
+    if conditional is None:
+        return "", "", ""
+    parent, value = conditional
+    return (
+        f"    if (String(v_{parent}) === {json.dumps(value)}) {{" + "\n",
+        "    ",
+        "    }" + "\n",
+    )
+
+
 def fill_block(
-    question_id: str, canonical: str, selector: str, required: bool, intent: str
+    question_id: str,
+    canonical: str,
+    selector: str,
+    required: bool,
+    intent: str,
+    conditional: tuple[str, str] | None = None,
 ) -> str:
     """Set one control from the client's answer for `canonical`.
 
@@ -227,10 +254,17 @@ def fill_block(
         body = f"await page.fill({json.dumps(selector)}, String({var}));"
 
     lines.append(f"{guard}{'' if guard else '    '}{body}")
-    return "\n".join(lines) + "\n"
+    open_, pad, close = _guard(conditional)
+    return open_ + "".join(f"{pad}{line}\n" for line in lines) + close
 
 
-def option_block(question_id: str, canonical: str, options: list[tuple[str, str]], required: bool) -> str:
+def option_block(
+    question_id: str,
+    canonical: str,
+    options: list[tuple[str, str]],
+    required: bool,
+    conditional: tuple[str, str] | None = None,
+) -> str:
     """Set a control whose choices are separately clickable, e.g. a radio group.
 
     The chosen branch comes from the client's answer. Every option the crawl
@@ -254,7 +288,8 @@ def option_block(question_id: str, canonical: str, options: list[tuple[str, str]
             f"`no walked option for ${{{var}}} on {question_id}`);"
         )
         lines.append(tail)
-    return "\n".join(lines) + "\n"
+    open_, pad, close = _guard(conditional)
+    return open_ + "".join(f"{pad}{line}\n" for line in lines) + close
 
 
 def advance_block(selector: str) -> str:

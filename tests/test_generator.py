@@ -454,6 +454,79 @@ def test_the_script_has_no_hardcoded_gate_answer_and_no_fallback(gen: Generator)
     assert all("||" not in ln for ln in answer_lines)
 
 
+def test_a_conditional_field_is_emitted_inside_its_parents_branch(gen: Generator) -> None:
+    """Every path must run, not only the one whose answers were published.
+
+    An unguarded child reads an answer the client was never asked for and sets a
+    control that is not mounted, so a client taking the other branch fails.
+    """
+    gate = control(
+        "q_001",
+        "Legal Entity Type",
+        type_="select",
+        options=[Option(label="LLC", locator="#llc"),
+                 Option(label="Sole Proprietor", locator="#sp")],
+        locator="#entity",
+    )
+    child = control(
+        "q_002",
+        "Number of Members",
+        type_="number",
+        locator="#members",
+        revealed_by=RevealedBy(fieldId="q_001", equals="LLC"),
+    )
+    p = page("form_page_1_business", [gate, child])
+    gen.append(request(p, fill("q_001", "#entity", "LLC", intent="select")))
+    gen.append(request(p, fill("q_002", "#members", "3")))
+
+    script = gen.script_path.read_text()
+    guard = 'if (String(v_q_001) === "LLC") {'
+    assert guard in script
+    body = script.split(guard, 1)[1]
+    assert 'requiredAnswer(answers, "number_of_members", "q_002")' in body.split("}", 1)[0]
+
+
+def test_a_two_option_gate_branches_on_its_real_labels(gen: Generator) -> None:
+    """Positional yes/no made "LLC" match no branch, so the script threw.
+
+    Only a gate whose labels really are yes/no gets `selectorYes`/`selectorNo`.
+    """
+    gate = control(
+        "q_001",
+        "Legal Entity Type",
+        type_="select",
+        options=[Option(label="LLC", locator="#llc"),
+                 Option(label="Sole Proprietor", locator="#sp")],
+        locator="#entity",
+    )
+    p = page("form_page_1_business", [gate])
+    gen.append(request(p, fill("q_001", "#entity", "LLC", intent="select")))
+
+    script = gen.script_path.read_text()
+    assert '=== "LLC"' in script and '=== "Sole Proprietor"' in script
+    assert '=== "Yes"' not in script
+
+    field = json.loads(gen.metadata_path.read_text())["stages"][0]["fields"][0]
+    assert field.get("selectorYes") is None
+    assert [o["label"] for o in field["options"]] == ["LLC", "Sole Proprietor"]
+
+
+def test_a_boolean_gate_keeps_the_yes_no_selector_shape(gen: Generator) -> None:
+    """The shape is right for a gate that really is yes/no."""
+    gate = control(
+        "q_001",
+        "Do you have prior claims?",
+        type_="toggle",
+        options=[Option(label="Yes", locator="#yes"), Option(label="No", locator="#no")],
+        locator="#claims",
+    )
+    p = page("form_page_1_business", [gate])
+    gen.append(request(p, fill("q_001", "#claims", "Yes", intent="select")))
+
+    field = json.loads(gen.metadata_path.read_text())["stages"][0]["fields"][0]
+    assert field["selectorYes"] == "#yes" and field["selectorNo"] == "#no"
+
+
 def test_the_script_carries_the_bind_denylist(gen: Generator) -> None:
     """On the script's first run there is no agent watching."""
     p = page("form_page_1_business", [control("q_001", "Legal Business Name")])

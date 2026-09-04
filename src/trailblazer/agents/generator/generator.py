@@ -77,6 +77,30 @@ def _unit_and_format(constraint: dict[str, str] | None) -> tuple[str | None, str
     return constraint.get("unit"), constraint.get("format"), constraint.get("hint")
 
 
+def _yes_no(options: list[Option]) -> tuple[Option, Option] | None:
+    """The yes-side and no-side of a boolean gate, or `None` if it is not one.
+
+    Only a gate whose two labels really are yes/no gets the
+    `selectorYes`/`selectorNo` shape. Positional assignment was the earlier
+    rule, and it made "LLC vs Sole Proprietor" a boolean whose sides the script
+    then compared against the literals "Yes" and "No" -- so a client answering
+    "LLC" matched no branch and the script threw. A gate with any other pair of
+    labels keeps the `options[]` shape, which carries the labels themselves.
+    """
+    if len(options) != 2:
+        return None
+    sides = {}
+    for option in options:
+        label = option.label.strip().lower()
+        if label in ("yes", "true"):
+            sides["yes"] = option
+        elif label in ("no", "false"):
+            sides["no"] = option
+    if len(sides) != 2:
+        return None
+    return sides["yes"], sides["no"]
+
+
 def _infer_unit(label: str, control: Control | None) -> str | None:
     """Guess the value's unit from the label, when no rejection revealed one.
 
@@ -288,13 +312,9 @@ class Generator:
         the questions artifact and the pair joins on `questionId`.
         """
         if options and any(o.locator for o in options):
-            if is_gate and len(options) == 2:
-                yes, no = options[0], options[1]
-                for o in options:
-                    if o.label.strip().lower() in ("yes", "true"):
-                        yes = o
-                    elif o.label.strip().lower() in ("no", "false"):
-                        no = o
+            boolean = _yes_no(options)
+            if is_gate and boolean is not None:
+                yes, no = boolean
                 return MetadataField(
                     questionId=qid, selectorYes=yes.locator, selectorNo=no.locator
                 )
@@ -446,17 +466,36 @@ class Generator:
         Reads the client's answer by canonical. A hardcoded answer here would
         discard what the client said, which is the defect the arch doc names
         explicitly as `pickYesNo('No')`.
+
+        A control the crawl saw only on one branch is emitted inside a guard on
+        its parent gate, so the script covers every path rather than only the
+        one whose answers were published.
         """
+        conditional = (
+            (question.conditional.questionId, question.conditional.value)
+            if question.conditional
+            else None
+        )
         if field.options:
             walked = [(o.label, o.selector) for o in field.options if o.selector]
             return script_emitter.option_block(
-                question.questionId, question.canonical, walked, question.required
+                question.questionId,
+                question.canonical,
+                walked,
+                question.required,
+                conditional=conditional,
             )
         if field.selectorYes or field.selectorNo:
+            # Only a genuinely boolean gate carries this shape, so the literals
+            # are the labels the crawl walked rather than a positional guess.
             walked = [(lbl, sel) for lbl, sel in
                       (("Yes", field.selectorYes), ("No", field.selectorNo)) if sel]
             return script_emitter.option_block(
-                question.questionId, question.canonical, walked, question.required
+                question.questionId,
+                question.canonical,
+                walked,
+                question.required,
+                conditional=conditional,
             )
         return script_emitter.fill_block(
             question.questionId,
@@ -464,6 +503,7 @@ class Generator:
             field.selector or "",
             question.required,
             intent,
+            conditional=conditional,
         )
 
     def _conditional_for(self, control: Control | None) -> Conditional | None:
