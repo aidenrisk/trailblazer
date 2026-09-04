@@ -44,6 +44,25 @@
        aria-expanded="false" tabindex="0">Choose an agency</div>
   <div id="agencyList" role="listbox"></div>
 
+  <!-- Opening this one blurs whatever was focused and reformats the phone it
+       finds there. The value reads differently and means the same thing, so
+       `expand` must allow it. -->
+  <label for="phone">Phone</label>
+  <input type="text" id="phone" name="phone">
+  <span id="formatterLabel">Formatting Combobox</span>
+  <div role="combobox" id="formatter" aria-labelledby="formatterLabel"
+       aria-controls="formatterList" aria-expanded="false" tabindex="0">Choose</div>
+  <div id="formatterList" role="listbox"></div>
+
+  <!-- Opening this one commits a value into a field nobody answered, which is
+       what the before/after comparison exists to catch. -->
+  <label for="hidden-answer">Program Code</label>
+  <input type="text" id="hidden-answer" name="hidden-answer">
+  <span id="committerLabel">Committing Combobox</span>
+  <div role="combobox" id="committer" aria-labelledby="committerLabel"
+       aria-controls="committerList" aria-expanded="false" tabindex="0">Choose</div>
+  <div id="committerList" role="listbox"></div>
+
   <button type="button" id="next-btn">Next</button>
 </form>
 
@@ -106,6 +125,46 @@
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeAgency();
+  });
+
+  // Two more comboboxes that behave like `agency`, except for what their open
+  // handler does to the rest of the form.
+  function wire(id, listId, items, onOpen) {
+    const control = document.getElementById(id);
+    const box = document.getElementById(listId);
+    function open() {
+      box.innerHTML = '';
+      for (const name of items) {
+        const item = document.createElement('div');
+        item.setAttribute('role', 'option');
+        item.textContent = name;
+        box.appendChild(item);
+      }
+      control.setAttribute('aria-expanded', 'true');
+      onOpen();
+    }
+    function close() {
+      box.innerHTML = '';
+      control.setAttribute('aria-expanded', 'false');
+    }
+    control.addEventListener('click', function () {
+      control.getAttribute('aria-expanded') === 'true' ? close() : open();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') close();
+    });
+  }
+
+  wire('formatter', 'formatterList', ['Alpha', 'Beta'], function () {
+    const phone = document.getElementById('phone');
+    const digits = phone.value.replace(/\D/g, '');
+    if (digits.length === 10) {
+      phone.value = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+    }
+  });
+
+  wire('committer', 'committerList', ['Alpha', 'Beta'], function () {
+    document.getElementById('hidden-answer').value = 'PROG-001';
   });
 </script>
 

@@ -196,6 +196,30 @@ def test_expand_reads_a_native_selects_own_options(page) -> None:
     assert page.locator("#entityType").input_value() == ""
 
 
+def test_expand_allows_a_formatter_rewriting_an_answered_field(page) -> None:
+    """A blur that reformats a value already given changes nothing downstream.
+
+    The artifact keeps what was typed and the same formatter runs on the same
+    input at replay, so the options read while the widget was open are good.
+    """
+    page.fill("#phone", "5551234567")
+
+    report = fill_one(page, Assignment(intent="expand", locator="#formatter", fieldId="q_020"), SETTINGS)
+
+    assert report.ok, report.blocked
+    assert report.optionsRevealed == ["Alpha", "Beta"]
+    assert page.locator("#phone").input_value() == "(555) 123-4567"
+
+
+def test_expand_blocks_when_the_open_answers_an_untouched_field(page) -> None:
+    """A value the walk never chose will be submitted and no artifact records it."""
+    report = fill_one(page, Assignment(intent="expand", locator="#committer", fieldId="q_021"), SETTINGS)
+
+    assert not report.ok
+    assert "hidden-answer" in report.blocked["whatYouTried"]
+    assert report.optionsRevealed is None
+
+
 # --------------------------------------------------------------------------- #
 # The retry the filler owns
 # --------------------------------------------------------------------------- #

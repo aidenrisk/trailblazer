@@ -18,8 +18,9 @@ Two things it owns that nothing else can:
 - **`expand`.** Opening a `<div role="combobox">` mounts its whole listbox at
   once, which is the only way to enumerate a set whose options are not in the
   DOM. The widget is closed again without a selection, and the page's URL and
-  every form value are compared before and after: an open that changed either
-  was not a disclosure, and the report says so rather than pretending.
+  every form value are compared before and after: an open that navigated, or
+  that answered a field nobody answered, was not a disclosure, and the report
+  says so rather than pretending.
 """
 
 import time
@@ -91,10 +92,42 @@ _OPTION_JS = """
 """
 
 _FORM_STATE_JS = """
-() => Array.from(document.querySelectorAll('input, select, textarea'))
-  .map((e) => (e.type === 'checkbox' || e.type === 'radio')
-    ? String(e.checked) : String(e.value)).join('\\x1f')
+() => {
+  const out = {};
+  const fields = document.querySelectorAll('input, select, textarea');
+  fields.forEach((e, i) => {
+    // Keyed by identity where the field has one, by index otherwise. A blob
+    // joined on position cannot say *which* field moved, and that is the whole
+    // distinction between a reformat and an answer nobody gave.
+    const key = e.id || e.name || `@${i}`;
+    out[key] = (e.type === 'checkbox' || e.type === 'radio')
+      ? String(e.checked) : String(e.value);
+  });
+  return out;
+}
 """
+"""Every form field's value, keyed by id, name, or position as a last resort."""
+
+
+def _unexpected_writes(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Fields that gained a value, lost one, or appeared, while a widget was open.
+
+    A field that was already answered and now reads differently is a formatter
+    firing on blur -- `5551234567` becoming `(555) 123-4567` -- which changes
+    nothing downstream: the artifact keeps what was typed, and at replay the
+    same formatter runs on the same input. Those are not reported.
+
+    A field that was empty and now holds something is a value the walk never
+    chose, which will be submitted and which no artifact records. A field that
+    lost its value, and a field that appeared or vanished across the click, are
+    the same class of surprise. Those are what block the expand.
+    """
+    changed = [key for key in before if key not in after]
+    for key, now in after.items():
+        was = before.get(key)
+        if was is None or bool(now) != bool(was):
+            changed.append(key)
+    return sorted(set(changed))
 
 
 def fill_one(
@@ -480,10 +513,11 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
 
     The page must be left as it was found, and the assertion for that is not the
     absence of a click: the URL and every form field's value are captured before
-    the open and compared after. A disclosure changes neither. If either moved,
-    the target was not a disclosure -- a blur fired a formatter, a React select
-    initialised its hidden input -- and the report is blocked rather than
-    carrying options gathered from a page that has silently changed.
+    the open and compared after, field by field. A disclosure navigates nowhere
+    and answers nothing. A field that merely reads differently is a formatter
+    firing on blur and is allowed; a field that gained an answer, lost one, or
+    appeared is a value the walk never chose, and the report is blocked rather
+    than carrying options gathered from a page that has silently changed.
     """
     before_url = page.url
     before_state = page.evaluate(_FORM_STATE_JS)
@@ -509,10 +543,11 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
             f"opening the widget navigated from {before_url} to {page.url}; "
             "the page is compromised and the options read from it are not trustworthy",
         )
-    if after_state != before_state:
+    written = _unexpected_writes(before_state, after_state)
+    if written:
         return _blocked(
             assignment,
-            "opening the widget changed a form field's value; the target was not a "
+            f"opening the widget wrote to {', '.join(written)}; the target was not a "
             "disclosure and the options read from it are not trustworthy",
         )
 
