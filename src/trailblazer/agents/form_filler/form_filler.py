@@ -612,7 +612,9 @@ def _close(page: Page, locator: str) -> None:
         element = write_tools.resolve(page, locator)
         if (element.get_attribute("aria-expanded") or "").lower() == "true":
             # Escape was ignored; a second click on the control itself toggles
-            # the same widget shut and still commits nothing.
-            element.click(timeout=1_000)
-    except (PlaywrightError, LocatorError) as e:
+            # the same widget shut and still commits nothing. Routed through
+            # `write_tools.click` like every other dispatch, so no click in this
+            # module reaches the page without the denylist.
+            write_tools.click(page, locator)
+    except (PlaywrightError, LocatorError, RefusedError) as e:
         log.warning("could not confirm the widget at %s closed: %s", locator, e)

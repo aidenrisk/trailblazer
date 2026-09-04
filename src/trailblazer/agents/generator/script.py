@@ -79,6 +79,16 @@ function requiredAnswer(answers, canonical, questionId) {{
   return value;
 }}
 
+// A credential the config file did not supply fails the run. Filling an empty
+// string instead makes the portal report a bad password rather than a missing
+// config key, which is the harder bug to find.
+function requireCredential(value, placeholder) {{
+  if (value === undefined || value === null || value === '') {{
+    throw new Error(`missing credential for ${{placeholder}}: set it in the --config file`);
+  }}
+  return value;
+}}
+
 function optionalAnswer(answers, canonical) {{
   const value = answers[canonical];
   return value === undefined || value === null || value === '' ? null : value;
@@ -290,6 +300,57 @@ def option_block(
         lines.append(tail)
     open_, pad, close = _guard(conditional)
     return open_ + "".join(f"{pad}{line}\n" for line in lines) + close
+
+
+def login_block(steps: list[tuple[str, str, str]]) -> str:
+    """Sign in, then assert it worked before the flow walks on.
+
+    Credentials come from the config file's `LOGIN_EMAIL`/`LOGIN_PASSWORD`,
+    resolved from the `$EMAIL`/`$PASSWORD` placeholders the crawl recorded; the
+    literals are in neither this script nor the metadata document.
+
+    The assertion is the point. A portal answers a rejected sign-in by
+    re-rendering the same form, so a submit that "succeeded" proves nothing and
+    every later stage would run against a login screen.
+    """
+    lines = [
+        "    // --- stage: login ---",
+        "    console.log('stage login');",
+    ]
+    for action, selector, value in steps:
+        if action == "goto":
+            lines.append(
+                f"    await page.goto({json.dumps(value)}, "
+                "{ waitUntil: 'domcontentloaded' });"
+            )
+        elif action == "fill":
+            source = {
+                "$EMAIL": "config.LOGIN_EMAIL",
+                "$PASSWORD": "config.LOGIN_PASSWORD",
+            }.get(value)
+            if source is None:
+                # An unresolvable placeholder would fill an empty string and the
+                # portal would report a bad credential rather than a bug.
+                raise ValueError(f"login step has no credential source for {value!r}")
+            lines.append(
+                f"    await page.fill({json.dumps(selector)}, requireCredential("
+                f"{source}, {json.dumps(value)}));"
+            )
+        elif action == "click":
+            lines.append(f"    await clickSafely(page, {json.dumps(selector)});")
+        else:
+            raise ValueError(f"unknown login step action {action!r}")
+    return "\n".join(lines) + "\n"
+
+
+def login_gate(selector: str) -> str:
+    """Fail the run when the sign-in did not take."""
+    return (
+        "    await page.waitForSelector("
+        f"{json.dumps(selector)}, {{ timeout: 30000 }})\n"
+        "      .catch(() => { throw new Error("
+        f"'login did not complete: {selector} never appeared'); }});\n"
+    )
 
 
 def advance_block(selector: str) -> str:

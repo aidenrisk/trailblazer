@@ -600,6 +600,45 @@ class Generator:
 
         self._flush()
 
+    def record_login(
+        self, steps: list[tuple[str, str, str]], authenticated_selector: str
+    ) -> None:
+        """Write the login as the flow's first stage, in all three artifacts.
+
+        Called before any form page is appended, so the login block is the
+        script's first stage and the metadata's first entry -- the order the
+        replay runner walks them in.
+
+        No question is written. A credential is not a fact the chat collects
+        from the client; it is supplied by the runner's config file, which is
+        why the fields carry `$EMAIL`/`$PASSWORD` and the questions document
+        does not mention them.
+        """
+        if self._stage_index:
+            raise ArtifactMismatch(
+                "login must be recorded before any form page; stages already open: "
+                f"{sorted(self._stage_index)}"
+            )
+        for _, _, value in steps:
+            if value and value.startswith("$") and value not in CREDENTIAL_PLACEHOLDERS:
+                raise CredentialLeak(f"login step carries {value!r}, not a placeholder")
+            if value and not value.startswith("$") and _SECRET_KEYS.search(value):
+                raise CredentialLeak("login step carries a credential literal")
+
+        url = next((v for a, _, v in steps if a == "goto"), self.metadata_doc.loginUrl)
+        stage = Stage(name="login", url=url, stageType="login")
+        self.metadata_doc.stages.append(stage)
+        self._stage_index["login"] = len(self.metadata_doc.stages) - 1
+
+        self.script_blocks.append(script_emitter.login_block(steps))
+        if authenticated_selector:
+            stage.waitForSelector = authenticated_selector
+            self.script_blocks.append(script_emitter.login_gate(authenticated_selector))
+        else:
+            log.warning("login recorded with no authenticated selector; the script cannot "
+                        "tell a completed sign-in from a rejected one")
+        self._flush()
+
     def record_route_end(self, walk: int, stage_id: str, settled: bool) -> None:
         """Note how route `walk` ended, so a complete one can be picked to publish.
 

@@ -527,6 +527,63 @@ def test_a_boolean_gate_keeps_the_yes_no_selector_shape(gen: Generator) -> None:
     assert field["selectorYes"] == "#yes" and field["selectorNo"] == "#no"
 
 
+LOGIN_STEPS = [
+    ("goto", "", "https://carrier/sign-in"),
+    ("fill", "#email", "$EMAIL"),
+    ("fill", "#password", "$PASSWORD"),
+    ("click", "#signin", ""),
+]
+
+
+def test_the_script_can_log_itself_in(gen: Generator) -> None:
+    """A replay runs in a fresh browser; without this it starts unauthenticated."""
+    gen.record_login(LOGIN_STEPS, "#dashboard")
+    p = page("form_page_1_business", [control("q_001", "Legal Business Name")])
+    gen.append(request(p, fill("q_001", "#legalName", "Acme LLC")))
+
+    script = gen.script_path.read_text()
+    assert "// --- stage: login ---" in script
+    assert 'requireCredential(config.LOGIN_EMAIL, "$EMAIL")' in script
+    assert 'requireCredential(config.LOGIN_PASSWORD, "$PASSWORD")' in script
+    # Login is the first stage the runner walks.
+    assert script.index("stage: login") < script.index("stage: form_page_1_business")
+
+
+def test_the_script_asserts_the_login_took(gen: Generator) -> None:
+    """A portal answers a rejected sign-in by re-rendering the same form."""
+    gen.record_login(LOGIN_STEPS, "#dashboard")
+
+    script = gen.script_path.read_text()
+    assert 'waitForSelector("#dashboard"' in script
+    assert "login did not complete" in script
+
+
+def test_the_login_stage_carries_no_credential_literal(gen: Generator) -> None:
+    """Persist runs a leak scan and throws; this catches it at write time."""
+    leaked = [("fill", "#password", "hunter2-password")]
+
+    with pytest.raises(CredentialLeak):
+        gen.record_login(leaked, "#dashboard")
+
+
+def test_login_must_be_recorded_before_any_form_page(gen: Generator) -> None:
+    """Login is the first stage; recording it later would emit it out of order."""
+    p = page("form_page_1_business", [control("q_001", "Legal Business Name")])
+    gen.append(request(p, fill("q_001", "#legalName", "Acme LLC")))
+
+    with pytest.raises(ArtifactMismatch, match="before any form page"):
+        gen.record_login(LOGIN_STEPS, "#dashboard")
+
+
+def test_the_login_writes_no_question(gen: Generator) -> None:
+    """A credential is supplied by the runner's config, not collected from the client."""
+    gen.record_login(LOGIN_STEPS, "#dashboard")
+
+    assert gen.state().questionIds == []
+    stages = json.loads(gen.metadata_path.read_text())["stages"]
+    assert stages[0]["name"] == "login" and stages[0]["fields"] == []
+
+
 def test_the_script_carries_the_bind_denylist(gen: Generator) -> None:
     """On the script's first run there is no agent watching."""
     p = page("form_page_1_business", [control("q_001", "Legal Business Name")])

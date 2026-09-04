@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign In</title></head>
+<body>
+<h1>Sign In</h1>
+
+<!-- The form stays on screen when the credential is rejected, which is the
+     case `authenticated()` exists for: nothing raises, and the page looks to a
+     perceiver like one that simply did not change. -->
+<form id="signin-form">
+  <label for="email">Email Address</label>
+  <input type="email" id="email" name="email">
+
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password">
+
+  <button type="submit" id="signin">Sign In</button>
+</form>
+
+<!-- Both appear only after a submit, and never together. -->
+<div id="dashboard" hidden>Signed in</div>
+<div id="otp-row" hidden>
+  <label for="otp">One-time code</label>
+  <input type="text" id="otp" name="otp">
+</div>
+
+<script>
+  const GOOD_PASSWORD = 's3cret';
+  const MFA_USER = 'mfa@example.com';
+
+  document.getElementById('signin-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+
+    if (password !== GOOD_PASSWORD) return;  // re-render the same form
+    if (email === MFA_USER) {
+      document.getElementById('otp-row').hidden = false;
+      return;
+    }
+    document.getElementById('signin-form').hidden = true;
+    document.getElementById('dashboard').hidden = false;
+  });
+</script>
+
+</body>
+</html>

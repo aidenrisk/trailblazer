@@ -3,8 +3,10 @@
 A browser already serving CDP on `cdp_port` is attached to rather than replaced,
 so one hand-authenticated headed browser serves every agent and every run.
 
-`run_crawl` runs the perceive -> Frontier -> assign -> fill -> generate cycle to
-page completion.
+`run_crawl` signs the session in, then runs the perceive -> Frontier -> assign
+-> fill -> generate cycle to page completion. Login is a carrier's own class
+(`agents/login`), because a portal answers a rejected sign-in with its own form
+and only the carrier can say which DOM proves the session took.
 
 Loop also performs backtracking. Frontier answers a `Restart` rather than an
 assignment when a page is fully attempted and a gate still owes a side; Loop
@@ -15,6 +17,7 @@ still apply.
 """
 
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -24,6 +27,7 @@ from trailblazer.agents.browser import shared_session
 from trailblazer.agents.browser.session import AttachedSession, BrowserSession, devtools_running
 from trailblazer.agents.form_filler.form_filler import fill_one
 from trailblazer.agents.frontier import Frontier
+from trailblazer.agents.login import LoginError, resolve_login
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
@@ -33,6 +37,7 @@ from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger, log_contract
 from trailblazer.shared.config import Settings, get_settings
+from trailblazer.shared.dev_carrier_creds import resolve_carrier_creds
 
 log = get_logger(__name__)
 
@@ -159,6 +164,7 @@ def run_crawl(
 
     with open_session(settings, headed) as session:
         tab = session.goto(url)
+        _sign_in(tab, carrier_id, settings, ledger, generator)
         result = perceive(
             tab,
             PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
@@ -198,6 +204,57 @@ def run_crawl(
     )
     ledger.log_summary()
     return result
+
+
+def _sign_in(
+    tab: Page,
+    carrier_id: str,
+    settings: Settings,
+    ledger: RunLedger | None,
+    generator: Generator | None = None,
+) -> None:
+    """Authenticate the session before the walk begins.
+
+    Raises rather than walking an unauthenticated page: a portal answers a
+    rejected sign-in with its own form, which perceives as an ordinary page and
+    would be recorded as the carrier's application. An MFA prompt raises too --
+    the code is not in the credential store, so the run cannot supply it and a
+    human finishes in the shared headed browser.
+
+    A carrier with no registered login class is not an error here. The local
+    fixture needs none, and `resolve_carrier_creds` may hold no username at all.
+    """
+    started = time.monotonic()
+    try:
+        login = resolve_login(carrier_id, resolve_carrier_creds(carrier_id, settings))
+    except KeyError:
+        log.info("no login class for carrier_id=%s; continuing unauthenticated", carrier_id)
+        return
+
+    result = login.sign_in(tab)
+    if ledger is not None:
+        ledger.record(
+            agent="login",
+            action="sign_in",
+            detail=carrier_id,
+            usd=0.0,
+            ok=result.ok,
+            ms=int((time.monotonic() - started) * 1000),
+        )
+    if not result.ok:
+        raise LoginError(
+            f"could not sign in to {carrier_id}: {result.reason} (at {result.url})"
+        )
+
+    # Written before any form page, so login is the script's first stage. The
+    # crawl may have skipped the sign-in on a profile that still held a session;
+    # the replay runs in a fresh browser and cannot, so the steps are recorded
+    # either way.
+    if generator is not None:
+        generator.record_login(
+            [(s.action, s.selector, s.value) for s in result.steps],
+            login.authenticated_selector,
+        )
 
 
 def _label_for(page: PageDescription, field_id: str | None) -> str | None:
