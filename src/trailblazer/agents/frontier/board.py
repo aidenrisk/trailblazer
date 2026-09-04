@@ -12,12 +12,7 @@ previous board rather than extending it, because `fieldId` is a per-page counter
 
 from dataclasses import dataclass, field
 
-from trailblazer.contracts.page_description import Control
-
-# Types whose two-valued form is a branch rather than a value. `switch` and
-# `boolean` from the spec's gate rule are not in `ControlType`, so `toggle` is
-# the whole of that clause here.
-_GATE_TYPES = {"toggle", "select"}
+from trailblazer.contracts.page_description import Control, Option
 
 # The two sides of a gate that carries no options: a checkbox is either set or
 # not, and there is no option label to name either state.
@@ -30,15 +25,25 @@ def gate_sides(control: Control) -> list[str] | None:
 
     Decided by shape, not by type name (spec §4, "What counts as a gate"): a
     `toggle` is always a gate, a control with no options is a checkbox-shaped
-    gate, and anything choice-bearing with exactly two options is a gate. A
-    control with three or more options is walked once -- the walk covers
-    branches, not combinations.
+    gate, and anything carrying exactly two options is a gate.
+
+    The two-option clause reads `options` and not `type`, because `type` is the
+    model's judgment and `options` is measured. Pie's "Legal Entity Type" is the
+    case: perceived as `other`, it is the one gate this pipeline exists to walk,
+    and a rule keyed on the type name never saw it. The contract bars
+    `text`/`number`/`date` from carrying options at all, so a control holding
+    two of them is choice-bearing whatever it was typed.
+
+    One option is not a gate: there is no second side to owe, so walking it is
+    filling it. Three or more is not either -- the walk covers branches, not
+    combinations, and each extra side costs a restart that replays the whole
+    prefix, against a `MAX_RESTARTS` of 8.
     """
     if control.options is None:
         # `text`/`number`/`date` are barred from options by the contract, so an
         # optionless control here is a toggle: a checkbox with two implicit sides.
         return [CHECKED, UNCHECKED] if control.type == "toggle" else None
-    if control.type in _GATE_TYPES and len(control.options) == 2:
+    if len(control.options) == 2:
         return [o.label for o in control.options]
     return None
 
@@ -121,6 +126,16 @@ class Board:
     restarts: int = 0
     """Restarts issued on this page, counted against `MAX_RESTARTS`."""
 
+    revealed_options: dict[str, list[Option]] = field(default_factory=dict)
+    """fieldId -> the choices an `expand` read out of the opened widget.
+
+    Held on the board rather than on the control, because the control is
+    replaced from every perceive and a combobox that unmounts its listbox on
+    close reports `options: None` again on the look after the `expand`. Without
+    this the option count never reaches `gate_sides` and a two-option combobox
+    is never recognised as a gate.
+    """
+
     unexplored: dict[str, str] = field(default_factory=dict)
     """fieldId -> why a gate's owed side was never walked.
 
@@ -132,15 +147,20 @@ class Board:
     def add(self, control: Control, revealed_by: str | None = None) -> bool:
         """Record `control`, returning True when it was not already on the board.
 
-        The control is re-stored on every observe because `options` can change:
-        a combobox reports `None` until an `expand` mounts its listbox, and the
-        gate decision depends on the option count.
+        The control is re-stored on every observe because `options` can change,
+        and options an `expand` revealed are merged back in when the fresh
+        description carries none: the widget was closed before that perceive, so
+        the scraper cannot see them and the gate decision needs the count.
         """
         new = control.fieldId not in self.controls
         if new:
             self.order.append(control.fieldId)
             if revealed_by is not None:
                 self.revealed[control.fieldId] = revealed_by
+        if control.options is None and control.fieldId in self.revealed_options:
+            control = control.model_copy(
+                update={"options": self.revealed_options[control.fieldId]}
+            )
         self.controls[control.fieldId] = control
 
         sides = None if control.disabled else gate_sides(control)

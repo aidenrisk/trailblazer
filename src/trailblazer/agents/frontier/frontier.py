@@ -17,7 +17,7 @@ import time
 
 from trailblazer.agents.frontier.board import CHECKED, Board
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
-from trailblazer.contracts.page_description import Action, Control, PageDescription
+from trailblazer.contracts.page_description import Action, Control, Option, PageDescription
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger, log_contract
 
@@ -167,6 +167,22 @@ class Frontier:
             # An `advance`: the action was clicked, so it is not re-issued.
             board.advanced.add(report.locator)
             board.dismissed_blockers.add(report.locator)
+            return
+
+        if report.intent == "expand" and report.ok and report.optionsRevealed:
+            # An `expand` reads the choices and commits nothing, so the control
+            # is still unanswered: marking it attempted would spend its only
+            # turn on the read and leave it with no value and no gate side. The
+            # options are recorded before the `board.add` loop in `observe`, so
+            # the control picks them up on this pass and `gate_sides` sees the
+            # count on the same turn it was read.
+            #
+            # An expand that failed, or that opened onto nothing, falls through
+            # and is marked attempted: the control has no options either way, so
+            # re-issuing would expand it forever.
+            board.revealed_options[report.fieldId] = [
+                Option(label=label, locator=None) for label in report.optionsRevealed
+            ]
             return
 
         board.record_fill(report.fieldId)
