@@ -23,6 +23,7 @@ def control(
     options: list[str] | None = None,
     locator: str | None = None,
     option_locators: bool = False,
+    disabled: bool = False,
 ) -> Control:
     """One control. `options` is given as bare labels; locators are optional."""
     opts = None
@@ -40,6 +41,7 @@ def control(
         options=opts,
         locator=locator or f"#{field_id}",
         unique=True,
+        disabled=disabled,
         revealedBy=None,
     )
 
@@ -406,3 +408,31 @@ def test_every_step_is_recorded_against_the_ledger_at_zero_cost() -> None:
     assert agent["usd"] == 0.0
     assert agent["unpriced"] == 0
     assert {s.action for s in ledger.steps} == {"observe", "assign", "done"}
+
+
+def test_a_disabled_control_is_never_assigned() -> None:
+    """Pie's "Agency / Program" is disabled readonly: a click on it only times out."""
+    frontier = Frontier(business_types=["contractors"], insurance_types=["workers_comp"])
+
+    frontier.observe(
+        page([control("q_001", type="other", disabled=True), control("q_002")]),
+        None,
+        ["q_001", "q_002"],
+    )
+
+    assert frontier.summary()["unattempted"] == ["q_002"]
+    assert frontier.next_assignment().fieldId == "q_002"
+
+
+def test_a_disabled_two_option_control_is_not_a_gate() -> None:
+    """A gate that cannot be set has no sides to walk."""
+    frontier = Frontier(business_types=["contractors"], insurance_types=["workers_comp"])
+
+    frontier.observe(
+        page([control("q_001", type="toggle", options=["Yes", "No"], disabled=True)]),
+        None,
+        ["q_001"],
+    )
+
+    assert frontier.summary()["gates"] == {}
+    assert frontier.page_done()

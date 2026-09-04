@@ -101,7 +101,7 @@ class Board:
                 self.revealed[control.fieldId] = revealed_by
         self.controls[control.fieldId] = control
 
-        sides = gate_sides(control)
+        sides = None if control.disabled else gate_sides(control)
         if sides is None:
             self.gates.pop(control.fieldId, None)
         elif control.fieldId not in self.gates:
@@ -109,8 +109,18 @@ class Board:
         return new
 
     def unattempted(self) -> list[str]:
-        """fieldIds with no FillReport yet, in the order they were seen."""
-        return [f for f in self.order if f not in self.attempted]
+        """fieldIds with no FillReport yet, in the order they were seen.
+
+        A disabled control is never one: the page will not let it be set, so an
+        assignment against it spends the filler's click timeout and returns
+        blocked. Pie's "Agency / Program" is the case -- pre-filled from the
+        logged-in agency, `disabled readonly`.
+        """
+        return [
+            f
+            for f in self.order
+            if f not in self.attempted and not self.controls[f].disabled
+        ]
 
     def half_walked(self) -> list[str]:
         """fieldIds of gates with a side still untaken, in the order seen."""
