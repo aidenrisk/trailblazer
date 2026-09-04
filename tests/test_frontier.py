@@ -10,7 +10,13 @@ import pytest
 
 from trailblazer.agents.frontier import MAX_RESTARTS, Frontier, gate_sides
 from trailblazer.contracts.assignment import FillReport, Restart
-from trailblazer.contracts.page_description import Action, Control, Option, PageDescription
+from trailblazer.contracts.page_description import (
+    Action,
+    Control,
+    Option,
+    PageDescription,
+    RevealedBy,
+)
 from trailblazer.observability.ledger import RunLedger
 
 STAGE = "form_page_1_business_info"
@@ -24,6 +30,7 @@ def control(
     locator: str | None = None,
     option_locators: bool = False,
     disabled: bool = False,
+    revealed_by: RevealedBy | None = None,
 ) -> Control:
     """One control. `options` is given as bare labels; locators are optional."""
     opts = None
@@ -42,7 +49,7 @@ def control(
         locator=locator or f"#{field_id}",
         unique=True,
         disabled=disabled,
-        revealedBy=None,
+        revealedBy=revealed_by,
     )
 
 
@@ -561,3 +568,63 @@ def test_a_disabled_two_option_control_is_not_a_gate() -> None:
 
     assert frontier.summary()["gates"] == {}
     assert frontier.page_done()
+
+
+def test_a_nested_gate_owes_its_side_from_off_the_page(frontier: Frontier) -> None:
+    """A gate revealed by another's branch is not assignable once that branch is left."""
+    parent = control("q_001", type="select", options=["Yes", "No"])
+    child = control(
+        "q_002",
+        type="select",
+        options=["A", "B"],
+        revealed_by=RevealedBy(fieldId="q_001", equals="Yes"),
+    )
+
+    frontier.observe(page([parent, child]))
+    frontier.board.gates["q_002"].take("A")
+    frontier.board.record_fill("q_002")
+    frontier.observe(page([parent]))
+
+    assert frontier.board.remaining_absent() == ["q_002"]
+    assert "q_002" not in frontier.board.unattempted()
+    assert "q_002" not in frontier.board.half_walked()
+
+
+def test_an_absent_nested_gate_restarts_to_the_branch_that_reveals_it(
+    frontier: Frontier,
+) -> None:
+    """The restart targets the parent's revealing side, not the unreachable child."""
+    parent = control("q_001", type="select", options=["Yes", "No"])
+    child = control(
+        "q_002",
+        type="select",
+        options=["A", "B"],
+        revealed_by=RevealedBy(fieldId="q_001", equals="Yes"),
+    )
+
+    frontier.observe(page([parent, child]))
+    frontier.board.gates["q_001"].take("Yes")
+    frontier.board.gates["q_001"].take("No")
+    frontier.board.record_fill("q_001")
+    frontier.board.gates["q_002"].take("A")
+    frontier.board.record_fill("q_002")
+    frontier.observe(page([parent]))
+
+    decision = frontier.next_assignment()
+    assert isinstance(decision, Restart)
+    assert (decision.fieldId, decision.side) == ("q_001", "Yes")
+
+
+def test_an_absent_gate_with_no_reachable_parent_is_declared_unexplored(
+    frontier: Frontier,
+) -> None:
+    """No branch point means no page state in which the owed side could be taken."""
+    orphan = control("q_001", type="select", options=["A", "B"])
+
+    frontier.observe(page([orphan]))
+    frontier.board.gates["q_001"].take("A")
+    frontier.board.record_fill("q_001")
+    frontier.observe(page([]))
+
+    assert frontier.next_assignment() is None
+    assert "q_001" in frontier.summary()["unexplored"]

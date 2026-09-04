@@ -109,6 +109,12 @@ class Frontier:
         for control in page.controls:
             board.add(control, revealed_by if control.fieldId in newly_added else None)
 
+        # Presence is replaced, not merged: a control absent from this
+        # description is off the page, and assigning against it would credit a
+        # gate side that was never taken. `controls` and `gates` keep it, so its
+        # walked sides survive until the branch that reveals it is re-entered.
+        board.present = {c.fieldId for c in page.controls}
+
         log_contract(log, "FrontierBoard", board.summary())
         self._record("observe", page.stageId, started)
 
@@ -377,11 +383,12 @@ class Frontier:
         """
         assert self.board is not None
         owed = self.board.half_walked()
-        if not owed:
+        absent = self.board.remaining_absent()
+        if not owed and not absent:
             return None
 
         if self.board.restarts >= MAX_RESTARTS:
-            for field_id in owed:
+            for field_id in owed + absent:
                 reason = f"restart cap {MAX_RESTARTS} reached on {self.board.stage_id}"
                 self.board.declare_unexplored(field_id, reason)
                 log.warning(
@@ -392,9 +399,83 @@ class Frontier:
                 )
             return None
 
-        field_id = owed[0]
-        side = self.board.gates[field_id].remaining[0]
-        return Restart(fieldId=field_id, side=side, walk=self.board.walk + 1)
+        # A present gate is restarted directly. An absent one owes a side from a
+        # page that no longer renders it, so the restart targets the gate that
+        # reveals it: replaying up to there and re-taking the revealing side
+        # mounts the nested gate again, and its own owed side is assigned once
+        # the board sees it.
+        if owed:
+            field_id = owed[0]
+            side = self.board.gates[field_id].remaining[0]
+            return Restart(fieldId=field_id, side=side, walk=self.board.walk + 1)
+
+        return self._restart_for_absent(absent[0])
+
+    def _restart_for_absent(self, field_id: str) -> Restart | None:
+        """Restart to the branch that mounts `field_id`, so its owed side becomes assignable.
+
+        The nested gate cannot be set while it is off the page. What is set
+        instead is the gate that revealed it, back to the side it was on when
+        the nested gate appeared -- that side is already walked, so re-taking it
+        adds no coverage of its own and exists only to render the child.
+
+        A gate whose revealing side is not known, or whose parent is itself
+        absent, is declared unexplored: without a reachable branch point there
+        is no page state in which the owed side could be taken.
+        """
+        assert self.board is not None
+        parent, side = self._revealing_branch(field_id)
+        if parent is None or side is None:
+            reason = f"gate is off the page and its revealing branch is unknown on {self.board.stage_id}"
+            self.board.declare_unexplored(field_id, reason)
+            log.warning(
+                "gate left unwalked stage_id=%s field_id=%s reason=%s",
+                self.board.stage_id,
+                field_id,
+                reason,
+            )
+            return None
+
+        log.info(
+            "restarting to remount a nested gate stage_id=%s field_id=%s parent=%s side=%r",
+            self.board.stage_id,
+            field_id,
+            parent,
+            side,
+        )
+        return Restart(fieldId=parent, side=side, walk=self.board.walk + 1)
+
+    def _revealing_branch(self, field_id: str) -> tuple[str | None, str | None]:
+        """The gate and the side of it that mount `field_id`.
+
+        Read from `Control.revealedBy`, which the scraper measures as
+        `{fieldId, equals}` -- the parent and the value that brings the child
+        onto the page. `Board.revealed` is the fallback: it records which
+        assignment a control first appeared after, without the value, in which
+        case the parent's first-taken side is the one it appeared under.
+
+        The parent must be on the page and be a gate: a restart sets a gate to a
+        named side, and a parent that is itself absent has no reachable branch
+        point of its own.
+        """
+        assert self.board is not None
+        control = self.board.controls.get(field_id)
+        parent = None
+        equals = None
+        if control is not None and control.revealedBy is not None:
+            parent = control.revealedBy.fieldId
+            equals = control.revealedBy.equals
+        else:
+            parent = self.board.revealed.get(field_id)
+
+        if parent is None or parent not in self.board.present:
+            return None, None
+        gate = self.board.gates.get(parent)
+        if gate is None:
+            return None, None
+        if equals is not None:
+            return parent, equals
+        return (parent, gate.walked[0]) if gate.walked else (None, None)
 
     def open_walk(self, field_id: str, side: str) -> Assignment:
         """The assignment taking `side` of gate `field_id`, on the walk just opened.

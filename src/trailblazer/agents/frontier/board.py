@@ -99,6 +99,16 @@ class Board:
     walk_of: dict[str, int] = field(default_factory=dict)
     """fieldId -> the walk its most recent fill was performed in."""
 
+    present: set[str] = field(default_factory=set)
+    """fieldIds on the page as last perceived.
+
+    A control revealed by a gate's branch is gone from the page once that gate
+    is set to its other side, but stays in `controls` and `gates` so its walked
+    sides survive the disappearance. Only presence decides what may be assigned
+    now: an assignment against an absent control is performed against nothing
+    and its report credits a side that was never taken.
+    """
+
     restarts: int = 0
     """Restarts issued on this page, counted against `MAX_RESTARTS`."""
 
@@ -142,7 +152,9 @@ class Board:
         return [
             f
             for f in self.order
-            if f not in self.attempted and not self.controls[f].disabled
+            if f not in self.attempted
+            and f in self.present
+            and not self.controls[f].disabled
         ]
 
     def half_walked(self) -> list[str]:
@@ -151,8 +163,29 @@ class Board:
         A gate declared unexplored is never one: `declare_unexplored` drops its
         remaining sides, so the page can finish with the reason recorded rather
         than restarting forever on a branch already known to be unreachable.
+
+        Absence is not counted: a gate the page has removed cannot be set, and
+        `remaining_absent` is what reports the side it still owes.
         """
-        return [f for f in self.order if f in self.gates and self.gates[f].remaining]
+        return [
+            f
+            for f in self.order
+            if f in self.gates and self.gates[f].remaining and f in self.present
+        ]
+
+    def remaining_absent(self) -> list[str]:
+        """fieldIds of gates owing a side while off the page, in the order seen.
+
+        A gate revealed only under another gate's branch owes its second side
+        from a page that no longer renders it. The side is reachable, but only
+        after the revealing gate is set back, so it is neither assignable now
+        nor walked.
+        """
+        return [
+            f
+            for f in self.order
+            if f in self.gates and self.gates[f].remaining and f not in self.present
+        ]
 
     def record_fill(self, field_id: str) -> None:
         """Mark `field_id` attempted in the current walk."""
@@ -197,6 +230,8 @@ class Board:
                 f: {"walked": g.walked, "remaining": g.remaining} for f, g in self.gates.items()
             },
             "revealed": dict(self.revealed),
+            "present": sorted(self.present),
+            "remainingAbsent": self.remaining_absent(),
             "walk": self.walk,
             "walkOf": dict(self.walk_of),
             "restarts": self.restarts,
