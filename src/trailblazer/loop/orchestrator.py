@@ -12,8 +12,11 @@ static description. Generator and validator slot in around the same seam.
 import os
 import uuid
 
+from playwright.sync_api import Page
+
 from trailblazer.agents.browser import shared_session
 from trailblazer.agents.browser.session import AttachedSession, BrowserSession, devtools_running
+from trailblazer.agents.form_filler.form_filler import fill_one
 from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.contracts.assignment import Assignment, FillReport
@@ -33,19 +36,14 @@ it burns a model call per turn. Pie's widest page carries well under this.
 """
 
 
-def fill(assignment: Assignment) -> FillReport | None:
-    """Run one assignment, once the form filler exists.
-
-    Imported lazily and by name so this module does not depend on a package that
-    is being written in parallel. Returns `None` when there is no filler, which
-    is the signal to log the assignment and stop the page rather than pretend it
-    was performed.
-    """
-    try:
-        from trailblazer.agents.form_filler.form_filler import fill_one
-    except ImportError:
-        return None
-    return fill_one(assignment)
+def fill(
+    tab: Page,
+    assignment: Assignment,
+    settings: Settings,
+    ledger: RunLedger | None = None,
+) -> FillReport:
+    """Run one assignment against the live tab."""
+    return fill_one(tab, assignment, settings, ledger)
 
 
 def open_session(settings: Settings, headed: bool = False):
@@ -132,7 +130,7 @@ def run_crawl(
             settings,
         )
         log_contract(log, "ScraperResult", result)
-        result = _walk_page(tab, result, frontier, job_id, objective, settings)
+        result = _walk_page(tab, result, frontier, job_id, objective, settings, ledger)
 
     log.info(
         "crawl end job_id=%s stage_id=%s polarity=%s board=%s",
@@ -152,6 +150,7 @@ def _walk_page(
     job_id: str,
     objective: str,
     settings: Settings,
+    ledger: RunLedger | None = None,
 ) -> ScraperResult:
     """Drive perceive -> observe -> assign -> fill -> perceive until the page is done.
 
@@ -166,17 +165,7 @@ def _walk_page(
         if assignment is None:
             return result
 
-        report = fill(assignment)
-        if report is None:
-            # No filler: the assignment cannot be performed, so re-perceiving
-            # would return the same page and the walk would not advance.
-            log.warning(
-                "no form filler: stopping after assignment job_id=%s intent=%s field_id=%s",
-                job_id,
-                assignment.intent,
-                assignment.fieldId or "-",
-            )
-            return result
+        report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
 
         result = perceive(

@@ -1,8 +1,8 @@
 """The perceive -> Frontier -> fill cycle in `_walk_page`.
 
-Browser and model are both replaced: what is under test is the routing -- that
-the loop stops when Frontier says the page is done, that it stops rather than
-looping when there is no form filler, and that a filler's report is folded back
+Browser, model and form filler are all replaced: what is under test is the
+routing -- that the loop stops when Frontier says the page is done, that it
+raises rather than looping forever, and that a filler's report is folded back
 into the board before the next assignment.
 """
 
@@ -49,20 +49,26 @@ def frontier() -> Frontier:
     return Frontier(business_types=["contractors"], insurance_types=["workers_comp"])
 
 
-def test_the_walk_stops_when_there_is_no_form_filler(monkeypatch, frontier: Frontier) -> None:
-    """Re-perceiving an unchanged page would spend a model call per turn forever."""
-    perceives: list = []
-    monkeypatch.setattr(orchestrator, "fill", lambda a: None)
-    monkeypatch.setattr(
-        orchestrator, "perceive", lambda *a, **k: perceives.append(1) or _result(["q_001"])
-    )
+def test_a_blocked_report_still_marks_the_field_attempted(
+    monkeypatch, frontier: Frontier
+) -> None:
+    """A field the filler could not fill must not be re-issued forever."""
 
-    orchestrator._walk_page(
-        None, _result(["q_001"]), frontier, "j1", "objective", Settings()
-    )
+    def refuse(tab, assignment, settings, ledger=None):
+        return FillReport(
+            fieldId=assignment.fieldId,
+            intent=assignment.intent,
+            locator=assignment.locator,
+            ok=False,
+            blocked={"control": assignment.locator, "whatYouTried": "refused"},
+        )
 
-    assert perceives == []
-    assert frontier.summary()["unattempted"] == ["q_001"]
+    monkeypatch.setattr(orchestrator, "fill", refuse)
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: _result(["q_001"]))
+
+    orchestrator._walk_page(None, _result(["q_001"]), frontier, "j1", "objective", Settings())
+
+    assert frontier.page_done()
 
 
 def test_the_walk_returns_when_frontier_reports_the_page_done(
@@ -71,7 +77,7 @@ def test_the_walk_returns_when_frontier_reports_the_page_done(
     """Every field attempted and no gate half-walked ends the page."""
     calls: list = []
 
-    def fake_fill(assignment):
+    def fake_fill(tab, assignment, settings, ledger=None):
         calls.append(assignment.fieldId)
         return FillReport(
             fieldId=assignment.fieldId,
@@ -99,7 +105,7 @@ def test_a_page_that_never_finishes_raises_rather_than_looping(
     """Failures are loud: a control re-added under a new fieldId every perceive."""
     counter = iter(range(1, 1000))
 
-    def fake_fill(assignment):
+    def fake_fill(tab, assignment, settings, ledger=None):
         return FillReport(
             fieldId=assignment.fieldId, intent=assignment.intent,
             locator=assignment.locator, ok=True, valueUsed="x",
