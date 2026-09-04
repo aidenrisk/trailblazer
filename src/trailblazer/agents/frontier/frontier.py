@@ -208,6 +208,26 @@ class Frontier:
         """Board state for logging and for the completion assertion."""
         return self.board.summary() if self.board is not None else {}
 
+    @property
+    def walk(self) -> int:
+        """The pass over the current page. 1 before any restart."""
+        return self.board.walk if self.board is not None else 1
+
+    def open_restart(self, restart: Restart) -> int:
+        """Open the walk a `Restart` names, and return its id.
+
+        Called by Loop before it renavigates. The board's attempt record is
+        cleared here rather than after the replay, because the replayed fills
+        must be recorded against the new walk, not the one being left.
+        """
+        assert self.board is not None
+        walk = self.board.restart()
+        if walk != restart.walk:
+            raise RuntimeError(
+                f"restart names walk {restart.walk} but the board opened {walk}"
+            )
+        return walk
+
     # -------------------------------------------------------------- priorities
 
     def _dismiss_blocker(self) -> Assignment | None:

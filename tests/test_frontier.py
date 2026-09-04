@@ -8,8 +8,8 @@ incomplete crawl rather than a visible failure.
 
 import pytest
 
-from trailblazer.agents.frontier import Frontier, gate_sides
-from trailblazer.contracts.assignment import FillReport
+from trailblazer.agents.frontier import MAX_RESTARTS, Frontier, gate_sides
+from trailblazer.contracts.assignment import FillReport, Restart
 from trailblazer.contracts.page_description import Action, Control, Option, PageDescription
 from trailblazer.observability.ledger import RunLedger
 
@@ -80,15 +80,31 @@ def walk(frontier: Frontier, description: PageDescription, limit: int = 20) -> l
 
     Stands in for Loop plus the filler: perceive, assign, report, repeat. The
     page never changes, which is the case for a form whose fields reveal nothing.
+
+    A `Restart` is handled the way Loop handles one -- open the walk, replay the
+    prefix, then take the owed side. There is no browser here, so the
+    renavigation is just the same description observed again and the replay is
+    the assignments already echoed back.
     """
-    assignments = []
+    assignments: list = []
     frontier.observe(description)
     for _ in range(limit):
-        assignment = frontier.next_assignment()
-        if assignment is None:
+        decision = frontier.next_assignment()
+        if decision is None:
             return assignments
-        assignments.append(assignment)
-        frontier.observe(description, report(assignment))
+
+        if isinstance(decision, Restart):
+            frontier.open_restart(decision)
+            frontier.observe(description)
+            for prior in [a for a in assignments if a.fieldId != decision.fieldId]:
+                frontier.observe(description, report(prior))
+            owed = frontier.open_walk(decision.fieldId, decision.side)
+            assignments.append(owed)
+            frontier.observe(description, report(owed))
+            continue
+
+        assignments.append(decision)
+        frontier.observe(description, report(decision))
     raise AssertionError(f"page did not finish in {limit} assignments")
 
 
@@ -208,7 +224,12 @@ def test_a_radio_gate_carries_the_chosen_options_own_locator(frontier: Frontier)
         fieldId="q_001", intent="select", locator="#q_001", ok=True, valueUsed="Yes"
     ))
 
-    second = frontier.next_assignment()
+    # The owed side arrives through a restart, so it is `open_walk` that builds
+    # the assignment rather than `next_assignment`.
+    restart = frontier.next_assignment()
+    frontier.open_restart(restart)
+    frontier.observe(page([gate]))
+    second = frontier.open_walk(restart.fieldId, restart.side)
 
     assert second.value == "No"
     assert second.optionLocator == "#q_001_1"
@@ -222,11 +243,86 @@ def test_a_native_select_gate_carries_no_option_locator(frontier: Frontier) -> N
     assert frontier.next_assignment().optionLocator is None
 
 
-def test_the_second_side_is_recorded_as_issued_without_a_reset(frontier: Frontier) -> None:
-    """Renavigation needs the Generator's action prefix, which is not built."""
-    walk(frontier, page([control("q_001", type="toggle", options=["Yes", "No"])]))
+def test_the_second_side_arrives_as_a_restart_not_an_assignment(frontier: Frontier) -> None:
+    """The page still holds the first side, so the owed side needs a reset first."""
+    gate = control("q_001", type="toggle", options=["Yes", "No"])
+    frontier.observe(page([gate]))
+    frontier.observe(page([gate]), report(frontier.next_assignment()))
 
-    assert frontier.summary()["issuedWithoutReset"] == ["q_001"]
+    decision = frontier.next_assignment()
+
+    assert isinstance(decision, Restart)
+    assert (decision.fieldId, decision.side, decision.walk) == ("q_001", "No", 2)
+
+
+def test_a_restart_opens_the_next_walk_and_clears_the_attempt_record(
+    frontier: Frontier,
+) -> None:
+    """The replay refills the prefix, so a field left attempted is never re-answered."""
+    controls = [control("q_001", type="text"), control("q_002", type="toggle",
+                                                       options=["Yes", "No"])]
+    frontier.observe(page(controls))
+    frontier.observe(page(controls), report(frontier.next_assignment()))
+    frontier.observe(page(controls), report(frontier.next_assignment()))
+
+    restart = frontier.next_assignment()
+    frontier.open_restart(restart)
+
+    assert frontier.walk == 2
+    assert frontier.summary()["attempted"] == []
+    assert frontier.summary()["gates"]["q_002"]["walked"] == ["Yes"]
+
+
+def test_a_field_filled_on_walk_two_is_recorded_against_walk_two(frontier: Frontier) -> None:
+    """The board says which pass each answer came from, so walks stay separable."""
+    gate = control("q_001", type="toggle", options=["Yes", "No"])
+    walk(frontier, page([gate]))
+
+    assert frontier.summary()["walkOf"]["q_001"] == 2
+    assert frontier.summary()["restarts"] == 1
+
+
+def test_the_restart_cap_leaves_the_rest_unexplored_with_a_reason(
+    frontier: Frontier,
+) -> None:
+    """A form with many gates must not run forever (MAX_RESTARTS)."""
+    gates = [
+        control(f"q_{i:03d}", type="toggle", options=["Yes", "No"])
+        for i in range(1, MAX_RESTARTS + 3)
+    ]
+
+    walk(frontier, page(gates), limit=200)
+
+    summary = frontier.summary()
+    assert summary["restarts"] == MAX_RESTARTS
+    unexplored = summary["unexplored"]
+    assert len(unexplored) == 2
+    assert all("restart cap" in reason for reason in unexplored.values())
+    # A capped page still finishes: the gates are declared, not silently owed.
+    assert frontier.page_done()
+
+
+def test_an_abandoned_gate_stops_owing_a_side_and_never_restarts_again(
+    frontier: Frontier,
+) -> None:
+    """A failed replay must not restart the page forever on the same gate."""
+    gate = control("q_001", type="toggle", options=["Yes", "No"])
+    frontier.observe(page([gate]))
+    frontier.observe(page([gate]), report(frontier.next_assignment()))
+    restart = frontier.next_assignment()
+    frontier.open_restart(restart)
+    frontier.abandon_gate("q_001", "prefix replay failed at q_000 on walk 2")
+
+    # The field is still owed an answer on the walk the restart opened -- it is
+    # the *side* that is abandoned, not the control.
+    frontier.observe(page([gate]))
+    remainder = walk(frontier, page([gate]))
+
+    assert [a.value for a in remainder] == [None]
+    assert frontier.summary()["restarts"] == 1
+    assert frontier.summary()["unexplored"] == {
+        "q_001": "prefix replay failed at q_000 on walk 2"
+    }
 
 
 @pytest.mark.parametrize(

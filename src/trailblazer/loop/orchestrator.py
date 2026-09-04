@@ -3,10 +3,15 @@
 A browser already serving CDP on `cdp_port` is attached to rather than replaced,
 so one hand-authenticated headed browser serves every agent and every run.
 
-`run_crawl` now runs the perceive -> Frontier -> assign cycle to page
-completion. The form filler is not built, so an assignment is logged instead of
-executed; without it the page never changes, and the walk finishes against a
-static description. Generator and validator slot in around the same seam.
+`run_crawl` runs the perceive -> Frontier -> assign -> fill -> generate cycle to
+page completion.
+
+Loop also performs backtracking. Frontier answers a `Restart` rather than an
+assignment when a page is fully attempted and a gate still owes a side; Loop
+renavigates to the page's start URL and replays the fills already made, in
+order, up to the branch point, then takes the owed side. Replay goes through the
+same `fill()` as any other assignment, so the denylist and every safety check
+still apply.
 """
 
 import os
@@ -21,7 +26,7 @@ from trailblazer.agents.form_filler.form_filler import fill_one
 from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.agents.generator import Generator
-from trailblazer.contracts.assignment import Assignment, FillReport
+from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.generation import GenerationRequest
 from trailblazer.contracts.page_description import PageDescription
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
@@ -195,49 +200,38 @@ def _walk_page(
     Returns the last `ScraperResult`, which is what the crawl endpoint answers
     with until the Generator exists to produce the three artifacts.
     """
+    start_url = result.page.url
+    prefix: list[Assignment] = []
+    """The assignments performed on this walk, in order.
+
+    A restart replays these against a freshly navigated page to put it back
+    before the branch point. Held here rather than read off disk because the
+    artifacts are keyed by questionId and reconciled across captures, so they no
+    longer carry the walk's order.
+    """
+
     report: FillReport | None = None
     for _ in range(MAX_ASSIGNMENTS):
         frontier.observe(result.page, report, result.addedControls)
 
-        assignment = frontier.next_assignment()
-        if assignment is None:
+        decision = frontier.next_assignment()
+        if decision is None:
             return result
 
+        if isinstance(decision, Restart):
+            result, prefix, report = _restart_walk(
+                tab, result, decision, prefix, start_url, frontier,
+                job_id, objective, settings, ledger, generator,
+            )
+            continue
+
+        assignment = decision
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
+        prefix.append(assignment)
 
-        if generator is not None:
-            # Appended per fill, not per page: the files on disk are the
-            # accumulation, so a run that dies mid-page leaves partial work
-            # rather than nothing.
-            generator.append(
-                GenerationRequest(
-                    job_id=job_id,
-                    carrier=generator.carrier,
-                    businessType=generator.business_type,
-                    insuranceType=generator.insurance_type,
-                    page=result.page,
-                    report=report,
-                    control_label=_label_for(result.page, report.fieldId),
-                ),
-                ledger,
-            )
-
-        result = perceive(
-            tab,
-            PerceiveRequest(
-                job_id=job_id,
-                page_index=1,
-                objective=objective,
-                prior=result.page,
-                assignment={assignment.fieldId: assignment.value or ""}
-                if assignment.fieldId
-                else None,
-            ),
-            settings,
-            ledger,
-        )
-        log_contract(log, "ScraperResult", result)
+        _generate(generator, job_id, result.page, report, frontier.walk, ledger)
+        result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
 
     log.error(
         "page did not finish in %d assignments job_id=%s stage_id=%s board=%s",
@@ -248,4 +242,162 @@ def _walk_page(
     )
     raise RuntimeError(
         f"page {result.page.stageId} did not finish in {MAX_ASSIGNMENTS} assignments"
+    )
+
+
+def _generate(
+    generator: Generator | None,
+    job_id: str,
+    page: PageDescription,
+    report: FillReport,
+    walk: int,
+    ledger: RunLedger | None,
+) -> None:
+    """Append one fill to all three artifacts.
+
+    Appended per fill, not per page: the files on disk are the accumulation, so
+    a run that dies mid-page leaves partial work rather than nothing.
+    """
+    if generator is None:
+        return
+    generator.append(
+        GenerationRequest(
+            job_id=job_id,
+            carrier=generator.carrier,
+            businessType=generator.business_type,
+            insuranceType=generator.insurance_type,
+            page=page,
+            report=report,
+            control_label=_label_for(page, report.fieldId),
+            walk=walk,
+        ),
+        ledger,
+    )
+
+
+def _perceive_after(
+    tab,
+    result: ScraperResult,
+    assignment: Assignment,
+    job_id: str,
+    objective: str,
+    settings: Settings,
+    ledger: RunLedger | None,
+) -> ScraperResult:
+    """Look at the page again, telling the scraper what was just done to it."""
+    result = perceive(
+        tab,
+        PerceiveRequest(
+            job_id=job_id,
+            page_index=1,
+            objective=objective,
+            prior=result.page,
+            assignment={assignment.fieldId: assignment.value or ""}
+            if assignment.fieldId
+            else None,
+        ),
+        settings,
+        ledger,
+    )
+    log_contract(log, "ScraperResult", result)
+    return result
+
+
+def _restart_walk(
+    tab,
+    result: ScraperResult,
+    restart: Restart,
+    prefix: list[Assignment],
+    start_url: str,
+    frontier: Frontier,
+    job_id: str,
+    objective: str,
+    settings: Settings,
+    ledger: RunLedger | None,
+    generator: Generator | None,
+) -> tuple[ScraperResult, list[Assignment], FillReport | None]:
+    """Renavigate, replay the prefix, and take the gate's owed side.
+
+    Returns the page as it stands afterwards, the prefix of the walk that has
+    just opened, and the last report -- which Loop folds into the board on the
+    next turn like any other.
+
+    What is replayed is everything performed before the gate; the gate is then
+    set to the side it owes rather than the side it already took. A replayed
+    fill coming back `ok: false` aborts the restart -- the page is not in the
+    state the walk assumed, and continuing would record answers against a page
+    that never existed -- so the gate is declared unexplored and the walk
+    resumes from wherever the replay stopped.
+    """
+    _record_restart(ledger, restart)
+    walk = frontier.open_restart(restart)
+
+    tab.goto(start_url)
+    result = perceive(
+        tab,
+        PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
+        settings,
+        ledger,
+    )
+    log_contract(log, "ScraperResult", result)
+    # The renavigated page is what the replay runs against, and the board must
+    # hold its controls before the owed side is assigned against them.
+    frontier.observe(result.page, None, result.addedControls)
+
+    replayed: list[Assignment] = []
+    report: FillReport | None = None
+    for assignment in _prefix_before(prefix, restart.fieldId):
+        report = fill(tab, assignment, settings, ledger)
+        log_contract(log, "FillReport", report)
+        if not report.ok:
+            frontier.abandon_gate(
+                restart.fieldId,
+                f"prefix replay failed at {assignment.fieldId or assignment.locator} "
+                f"on walk {walk}",
+            )
+            frontier.observe(result.page, report, result.addedControls)
+            return result, replayed, None
+
+        replayed.append(assignment)
+        _generate(generator, job_id, result.page, report, walk, ledger)
+        result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
+        # Folded in per fill, not once at the end: the new walk cleared the
+        # attempt record, so a replayed field the board never saw again would be
+        # assigned a second time.
+        frontier.observe(result.page, report, result.addedControls)
+        report = None
+
+    owed = frontier.open_walk(restart.fieldId, restart.side)
+    report = fill(tab, owed, settings, ledger)
+    log_contract(log, "FillReport", report)
+    replayed.append(owed)
+
+    _generate(generator, job_id, result.page, report, walk, ledger)
+    result = _perceive_after(tab, result, owed, job_id, objective, settings, ledger)
+    return result, replayed, report
+
+
+def _prefix_before(prefix: list[Assignment], field_id: str) -> list[Assignment]:
+    """The assignments performed before the gate, in order.
+
+    The gate itself is dropped: the restart exists to take its other side, and
+    replaying the side already taken would put the page back on the branch being
+    left. Anything after it belongs to the abandoned branch and is not replayed
+    -- the owed side renders a different set of fields, which Frontier assigns
+    once it sees them.
+    """
+    cut = next((i for i, a in enumerate(prefix) if a.fieldId == field_id), len(prefix))
+    return prefix[:cut]
+
+
+def _record_restart(ledger: RunLedger | None, restart: Restart) -> None:
+    """One ledger step per restart. Renavigation costs no model call."""
+    if ledger is None:
+        return
+    ledger.record(
+        agent="frontier",
+        action="restart",
+        detail=restart.fieldId,
+        usd=0.0,
+        ok=True,
     )

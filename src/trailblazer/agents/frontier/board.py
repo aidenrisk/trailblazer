@@ -146,17 +146,13 @@ class Board:
         ]
 
     def half_walked(self) -> list[str]:
-        """fieldIds of gates with a side still untaken and not declared unexplored.
+        """fieldIds of gates with a side still untaken, in the order seen.
 
-        A gate in `unexplored` is answered for: the completion assertion reads
-        the reason there. Re-offering it would restart the page forever on a
-        branch already known to be unreachable.
+        A gate declared unexplored is never one: `declare_unexplored` drops its
+        remaining sides, so the page can finish with the reason recorded rather
+        than restarting forever on a branch already known to be unreachable.
         """
-        return [
-            f
-            for f in self.order
-            if f in self.gates and self.gates[f].remaining and f not in self.unexplored
-        ]
+        return [f for f in self.order if f in self.gates and self.gates[f].remaining]
 
     def record_fill(self, field_id: str) -> None:
         """Mark `field_id` attempted in the current walk."""
@@ -179,8 +175,16 @@ class Board:
         return self.walk
 
     def declare_unexplored(self, field_id: str, reason: str) -> None:
-        """Record why a gate's owed side was never walked."""
+        """Record why a gate's owed side was never walked, and stop owing it.
+
+        The sides still remaining are dropped: a walk that cleared `attempted`
+        would otherwise assign the gate its owed side directly on the next pass,
+        which is the dirty-page fill the restart exists to avoid.
+        """
         self.unexplored[field_id] = reason
+        gate = self.gates.get(field_id)
+        if gate is not None:
+            gate.remaining.clear()
 
     def summary(self) -> dict:
         """Board state for logging and for the completion assertion."""
