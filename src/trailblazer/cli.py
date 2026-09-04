@@ -10,9 +10,10 @@ import typer
 from trailblazer.agents.browser import shared_session
 from trailblazer.agents.browser.launch import launch_persistent
 from trailblazer.agents.browser.session import AttachedSession
-from trailblazer.loop.orchestrator import perceive_once
+from trailblazer.loop.orchestrator import perceive_once, run_crawl
 from trailblazer.observability.logging import configure_logging
 from trailblazer.shared.config import get_settings
+from trailblazer.shared.dev_carrier_creds import resolve_carrier_creds
 
 app = typer.Typer(help="Trailblazer crawl pipeline.", no_args_is_help=True)
 
@@ -48,6 +49,40 @@ def scrape(
             json.dumps(result.page.model_dump(mode="json"), indent=2)
         )
         typer.echo(f"wrote {target / 'page_description.json'}", err=True)
+
+
+@app.command()
+def crawl(
+    carrier: str = typer.Option(..., "--carrier", help="carrier_id, e.g. `pie`."),
+    insurance: list[str] = typer.Option([], "--insurance", help="Insurance type. Repeatable."),
+    business: list[str] = typer.Option([], "--business", help="Business type. Repeatable."),
+    headed: bool = typer.Option(False, "--headed", help="Show the browser window."),
+    out: Path | None = typer.Option(None, "--out", help="Where the artifacts are written."),
+    validate: bool = typer.Option(
+        False, "--validate", help="Replay the generated script against its own walk."
+    ),
+) -> None:
+    """Crawl one carrier's form and write the three artifacts.
+
+    The URL and credentials are looked up from `carrier`, never passed in.
+    `--validate` runs the generated script against the published walk's answers,
+    which checks that the script reproduces the walk the crawl just made.
+    """
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    creds = resolve_carrier_creds(carrier, settings)
+
+    result = run_crawl(
+        carrier_id=carrier,
+        url=creds.login_url,
+        insurance_types=list(insurance),
+        business_types=list(business),
+        headed=headed,
+        settings=settings,
+        out_dir=out,
+        validate_script=validate,
+    )
+    typer.echo(json.dumps(result.model_dump(mode="json"), indent=2))
 
 
 @app.command()

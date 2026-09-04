@@ -584,6 +584,35 @@ def test_the_login_writes_no_question(gen: Generator) -> None:
     assert stages[0]["name"] == "login" and stages[0]["fields"] == []
 
 
+def test_the_answers_file_is_keyed_by_the_canonical_the_script_reads(gen: Generator) -> None:
+    """`questionId` is our join key; the script looks answers up by canonical."""
+    p = page("form_page_1_business", [control("q_001", "Legal Business Name")])
+    gen.append(request(p, fill("q_001", "#legalName", "Acme LLC")))
+    gen.record_route_end(1, "form_page_1_business", True)
+    gen.publish_walk(1)
+
+    written = json.loads(gen.write_answers().read_text())
+
+    # The canonical is the resolver's, not the label slugged: the chat's
+    # identity for a fact is reused across carriers.
+    assert written == {"answers": {"business.legal_name": "Acme LLC"}}
+    assert 'requiredAnswer(answers, "business.legal_name"' in gen.script_path.read_text()
+
+
+def test_the_answers_file_holds_no_credential(gen: Generator) -> None:
+    """The script resolves $EMAIL/$PASSWORD from --config, not from the answers."""
+    gen.record_login(LOGIN_STEPS, "#dashboard")
+    p = page("form_page_1_business", [control("q_001", "Legal Business Name")])
+    gen.append(request(p, fill("q_001", "#legalName", "Acme LLC")))
+    gen.record_route_end(1, "form_page_1_business", True)
+    gen.publish_walk(1)
+
+    written = json.loads(gen.write_answers().read_text())["answers"]
+
+    assert "$EMAIL" not in written.values()
+    assert "$PASSWORD" not in written.values()
+
+
 def test_the_script_carries_the_bind_denylist(gen: Generator) -> None:
     """On the script's first run there is no agent watching."""
     p = page("form_page_1_business", [control("q_001", "Legal Business Name")])

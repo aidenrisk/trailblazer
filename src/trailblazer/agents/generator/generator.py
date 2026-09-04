@@ -705,6 +705,30 @@ class Generator:
         log.info("published walk=%d questions=%d", walk, len(published))
         return published
 
+    def write_answers(self, path: Path | None = None) -> Path:
+        """Write the published walk's answers as the file the replay script reads.
+
+        Keyed by `canonical`, which is what the script looks up -- `questionId`
+        is our join key, not the client's vocabulary. Only questions carrying an
+        `exampleValue` are written: a control the walk never answered has no
+        value to replay, and inventing one would drive the form somewhere the
+        crawl never went.
+
+        A credential is not written. The script resolves `$EMAIL`/`$PASSWORD`
+        from its own `--config` file, and an answers file is not a credential
+        store.
+        """
+        answers = {
+            question.canonical: question.exampleValue
+            for question in self.questions_doc.questions
+            if question.exampleValue
+            and question.exampleValue not in CREDENTIAL_PLACEHOLDERS
+        }
+        target = Path(path) if path is not None else self.out_dir / "answers.json"
+        target.write_text(json.dumps({"answers": answers}, indent=2))
+        log.info("answers written path=%s count=%d", target, len(answers))
+        return target
+
     def state(self) -> GenerationState:
         """What has been written so far, so Loop can assert completion."""
         return GenerationState(

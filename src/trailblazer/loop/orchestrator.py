@@ -29,11 +29,13 @@ from trailblazer.agents.form_filler.form_filler import fill_one
 from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.login import LoginError, resolve_login
 from trailblazer.agents.scraper.scraper import perceive
+from trailblazer.agents.validator import validate
 from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.generation import GenerationRequest
 from trailblazer.contracts.page_description import PageDescription
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
+from trailblazer.contracts.validation import ValidationRequest
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger, log_contract
 from trailblazer.shared.config import Settings, get_settings
@@ -126,6 +128,7 @@ def run_crawl(
     settings: Settings | None = None,
     seed_values: dict[str, str] | None = None,
     out_dir: Path | None = None,
+    validate_script: bool = False,
 ) -> ScraperResult:
     """Crawl one carrier portal and return the last thing the scraper saw.
 
@@ -189,6 +192,8 @@ def run_crawl(
                 "no route reached a terminal page; publishing walk=%d unsettled", chosen
             )
         generator.publish_walk(chosen)
+        if validate_script:
+            _validate(generator, job_id, settings, headed, ledger)
 
     state = generator.state()
     log.info(
@@ -204,6 +209,54 @@ def run_crawl(
     )
     ledger.log_summary()
     return result
+
+
+def _validate(
+    generator: Generator,
+    job_id: str,
+    settings: Settings,
+    headed: bool,
+    ledger: RunLedger | None,
+) -> None:
+    """Run the generated script against the published walk's own answers.
+
+    The published walk is a path the form actually rendered, so replaying it is
+    the closest thing to a self-check the crawl can perform: if the script
+    cannot reproduce the walk the crawl just made, the script is wrong.
+
+    It exercises one path. The other branches are emitted but not run, and a
+    `stuck` outcome here is reported rather than raised -- the artifacts on disk
+    are the run's product, and discarding them because the replay failed would
+    throw away the evidence needed to fix it.
+    """
+    answers_path = generator.write_answers()
+    request = ValidationRequest(
+        job_id=job_id,
+        script_path=str(generator.script_path),
+        answers_path=str(answers_path),
+        headed=headed,
+    )
+    try:
+        outcome = validate(request, settings, ledger=ledger)
+    except FileNotFoundError as e:
+        log.error("validation could not run job_id=%s: %s", job_id, e)
+        return
+
+    log.info(
+        "validation job_id=%s outcome=%s reached_quote=%s stopped=%s",
+        job_id,
+        outcome.outcome,
+        outcome.reachedQuote,
+        outcome.stoppedReason or "-",
+    )
+    if not outcome.success:
+        log.error(
+            "the generated script did not reproduce the crawl's own walk "
+            "job_id=%s outcome=%s reason=%s",
+            job_id,
+            outcome.outcome,
+            outcome.stoppedReason or "-",
+        )
 
 
 def _sign_in(
