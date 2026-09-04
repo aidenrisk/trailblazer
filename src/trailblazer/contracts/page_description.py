@@ -97,6 +97,14 @@ class Control(BaseModel):
     """Playwright address. Never a snapshot ref."""
 
     unique: bool
+
+    disabled: bool = False
+    """Not interactable: `disabled`, `readonly`, or `aria-disabled`.
+
+    Pie's "Agency / Program" is pre-filled from the logged-in agency and cannot
+    be touched. Without this the field looks like an ordinary control, and an
+    assignment against it spends the filler's click timeout before failing.
+    """
     """Verified by `page.locator(locator).count() == 1`."""
 
     revealedBy: RevealedBy | None

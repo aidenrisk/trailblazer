@@ -139,7 +139,9 @@ def restore_measured_locators(
                 source["locator"],
                 source["unique"],
             )
-        _set_measured(control, source["locator"], source["unique"])
+        _set_measured(
+            control, source["locator"], source["unique"], bool(source.get("disabled"))
+        )
 
     for control in described.controls:
         if not control.unique:
@@ -182,17 +184,19 @@ def _positional_is_safe(described: PageDescription, payload_controls: list[dict]
     return True
 
 
-def _set_measured(control: Control, locator: str, unique: bool) -> None:
-    """Assign a validated locator, bypassing nothing the contract checks.
+def _set_measured(control: Control, locator: str, unique: bool, disabled: bool = False) -> None:
+    """Assign the measured fields, bypassing nothing the contract checks.
 
     Built from the live field values rather than `model_dump()`, because `key`
     is excluded from serialization and a dump would drop it -- revalidating the
     result would then fail on a field the object actually has.
     """
     fields = {name: getattr(control, name) for name in Control.model_fields}
-    Control.model_validate({**fields, "locator": locator, "unique": unique})
+    measured = {"locator": locator, "unique": unique, "disabled": disabled}
+    Control.model_validate({**fields, **measured})
     control.locator = locator
     control.unique = unique
+    control.disabled = disabled
 
 
 def perceive(

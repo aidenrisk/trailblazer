@@ -493,7 +493,12 @@ def test_key_is_required_by_the_schema_the_model_sees() -> None:
 
 
 def test_serialized_control_has_exactly_the_documented_fields() -> None:
-    """`scraper_io.txt` fixes Control at eight fields; `key` is transport, not output."""
+    """Control's serialized shape is fixed; `key` is transport, not output.
+
+    `disabled` is the ninth: a control the page will not let anyone set. The
+    filler burns its click timeout without it, and the replay script would hit
+    the same wall.
+    """
     assert list(_control(key="el_0").model_dump().keys()) == [
         "fieldId",
         "label",
@@ -502,6 +507,7 @@ def test_serialized_control_has_exactly_the_documented_fields() -> None:
         "options",
         "locator",
         "unique",
+        "disabled",
         "revealedBy",
     ]
 
@@ -601,7 +607,7 @@ def test_perceive_refuses_to_guess_when_the_response_has_no_join(monkeypatch, ca
 
 
 def test_perceive_output_matches_the_documented_contract(monkeypatch) -> None:
-    """The serialized endpoint body carries the eight documented Control fields."""
+    """The serialized endpoint body carries the documented Control fields."""
     from trailblazer.agents.scraper import scraper as scraper_mod
 
     with BrowserSession(cdp_port=9226) as session:
@@ -627,6 +633,7 @@ def test_perceive_output_matches_the_documented_contract(monkeypatch) -> None:
         "options",
         "locator",
         "unique",
+        "disabled",
         "revealedBy",
     ]
     assert body["page"]["next"] == 'button:has-text("Next")'

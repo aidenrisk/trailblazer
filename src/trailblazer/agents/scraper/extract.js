@@ -245,7 +245,12 @@
         placeholder: el.getAttribute('placeholder') || '',
         accessibleName: accName,
         required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
-        disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+        // readonly is grouped with disabled: both mean the value cannot be set,
+        // and a click on either burns the filler's timeout before failing.
+        disabled:
+          el.disabled === true ||
+          el.getAttribute('aria-disabled') === 'true' ||
+          el.hasAttribute('readonly'),
         visible: isVisible(el),
         options,
         candidates: candidates(el, name, testid, role, accName),
