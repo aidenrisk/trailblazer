@@ -10,6 +10,7 @@ because which one wins is a property of the portal, not of the design.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,7 +24,12 @@ log = get_logger(__name__)
 _EXTRACT_JS = (Path(__file__).parent / "extract.js").read_text()
 
 # Buttons that move between pages. Read-only: found, never clicked.
-_NEXT_PATTERNS = ["next", "continue", "save and continue", "submit", "get quote"]
+#
+# "submit" is deliberately absent. `:has-text()` is a substring match, so it hit
+# a dashboard column header reading "Submitted" and the walk clicked it. Submit
+# is also the terminal action of a form, not a step through it: the crawl stops
+# before it rather than pressing it.
+_NEXT_PATTERNS = ["next", "continue", "save and continue", "get quote"]
 _BACK_PATTERNS = ["back", "previous", "return"]
 
 
@@ -67,20 +73,24 @@ def _prefer_visible_text(page: Page, loc: Any, fallback: str) -> str:
 
 
 def _find_button(page: Page, patterns: list[str]) -> str | None:
-    """Locator for the first visible button whose text matches one of `patterns`.
+    """Locator for the first visible button whose whole text is one of `patterns`.
 
-    The emitted locator carries the button's *visible* text, not the lowercase
-    search pattern that found it, so a "Next" button yields
-    `button:has-text("Next")` as the architecture spec documents. `:has-text()` is
-    case-insensitive either way; matching the documented literal is what makes
-    the output comparable against the contract.
+    The match is on the button's *entire* text, not a substring: `:has-text()`
+    matched a dashboard column header reading "Submitted" against the pattern
+    "submit", and the walk clicked it. It would equally match "Next Steps"
+    against "next".
+
+    The emitted locator carries the button's visible text, so a "Next" button
+    yields `button:has-text("Next")` as the architecture spec documents.
     """
     for word in patterns:
-        sel = f'button:has-text("{word}")'
+        # An anchored regex: Playwright's `exact=True` and `:text-is()` are both
+        # case-sensitive, and the patterns are lowercase.
+        whole = re.compile(rf"^\s*{re.escape(word)}\s*$", re.IGNORECASE)
         try:
-            loc = page.locator(sel)
+            loc = page.get_by_role("button", name=whole)
             if loc.count() == 1 and loc.is_visible():
-                return _prefer_visible_text(page, loc, sel)
+                return _prefer_visible_text(page, loc, f'button:has-text("{word}")')
         except PlaywrightError:
             continue
     return None
