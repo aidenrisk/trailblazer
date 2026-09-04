@@ -6,15 +6,17 @@ no LLM call: every decision here is a lookup against state it already holds, so
 a model would add cost and nondeterminism to arithmetic.
 
 `observe` folds one PageDescription and the previous FillReport into the board;
-`next_assignment` reads the board and returns one Assignment, or `None` when the
-page is done. Loop routes on that `None`.
+`next_assignment` reads the board and returns one Assignment, a `Restart`, or
+`None` when the page is done. Loop routes on all three: a `Restart` is not an
+action and is never handed to the filler -- Loop renavigates, replays the fills
+that preceded the branch point, and then asks again.
 """
 
 import re
 import time
 
 from trailblazer.agents.frontier.board import CHECKED, Board
-from trailblazer.contracts.assignment import Assignment, FillReport
+from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.page_description import Action, Control, PageDescription
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger, log_contract
@@ -24,6 +26,15 @@ log = get_logger(__name__)
 # Controls typed as a choice but carrying no options: the listbox is mounted on
 # click, so the set cannot be read until the widget is opened (spec §5).
 _EXPANDABLE_TYPES = {"select", "other"}
+
+MAX_RESTARTS = 8
+"""Restarts allowed on one page before the remaining gates are declared unwalked.
+
+Each one costs a renavigation and a replay of every fill made before the branch
+point, so a page carrying many gates would otherwise spend the whole run on it.
+Gates past the cap reach `branchExploration.unexplored` with a reason, which the
+completion assertion accepts in place of a walk.
+"""
 
 
 def _normalise(text: str) -> str:
@@ -108,7 +119,7 @@ class Frontier:
             board.dismissed_blockers.add(report.locator)
             return
 
-        board.attempted.add(report.fieldId)
+        board.record_fill(report.fieldId)
         gate = board.gates.get(report.fieldId)
         if gate is not None and report.valueUsed is not None:
             gate.take(report.valueUsed)
@@ -127,40 +138,56 @@ class Frontier:
 
     # --------------------------------------------------------------- decisions
 
-    def next_assignment(self) -> Assignment | None:
+    def next_assignment(self) -> Assignment | Restart | None:
         """The next thing to do, or None when the page is done.
 
         Priority, highest first: clear a blocker, advance a page with nothing
-        fillable, act on an unattempted field, walk a gate's remaining side,
-        advance a page whose fields are all done.
+        fillable, act on an unattempted field, restart the page for a gate still
+        owing a side, advance a page whose fields are all done.
+
+        A `Restart` is not an action. Loop performs the renavigation and the
+        prefix replay itself and then calls here again; the gate's owed side is
+        issued as an ordinary assignment on the walk that opens.
         """
         started = time.monotonic()
         if self.board is None or self.page is None:
             raise RuntimeError("next_assignment called before observe")
 
-        assignment = (
+        decision = (
             self._dismiss_blocker()
             or self._advance_to_target()
             or self._first_unattempted()
-            or self._walk_remaining_gate()
+            or self._restart_for_gate()
             or self._advance_when_filled()
         )
 
-        if assignment is None:
+        if decision is None:
             log.info("page done stage_id=%s", self.board.stage_id)
             self._record("done", self.board.stage_id, started)
             return None
 
-        log_contract(log, "Assignment", assignment)
+        if isinstance(decision, Restart):
+            log_contract(log, "Restart", decision)
+            log.info(
+                "restart stage_id=%s field_id=%s side=%r walk=%d",
+                self.board.stage_id,
+                decision.fieldId,
+                decision.side,
+                decision.walk,
+            )
+            self._record("restart", decision.fieldId, started)
+            return decision
+
+        log_contract(log, "Assignment", decision)
         log.info(
             "assign stage_id=%s intent=%s field_id=%s value=%s",
             self.board.stage_id,
-            assignment.intent,
-            assignment.fieldId or "-",
-            assignment.value or "-",
+            decision.intent,
+            decision.fieldId or "-",
+            decision.value or "-",
         )
-        self._record("assign", assignment.fieldId or assignment.intent, started)
-        return assignment
+        self._record("assign", decision.fieldId or decision.intent, started)
+        return decision
 
     def page_done(self) -> bool:
         """True when every field is attempted and every two-sided gate is walked.
@@ -315,32 +342,65 @@ class Frontier:
             return self._assign(control)
         return None
 
-    def _walk_remaining_gate(self) -> Assignment | None:
-        """Walk the other side of a gate taken only one way.
+    def _restart_for_gate(self) -> Restart | None:
+        """Ask Loop to reset the page so a gate's owed side can be taken cleanly.
 
-        The page still holds the first side: returning it to the pre-choice
-        state needs renavigation and a replay of the action prefix, which is the
-        Generator's output and does not exist yet. The assignment is issued
-        anyway and the gate is recorded in `issued_without_reset`, so the
-        completion assertion can see that the branch was walked from a dirty
-        page rather than a clean one.
+        Setting the gate back is not the same as never having set it: the
+        abandoned branch's fields stay mounted and anything filled underneath
+        them stays filled (spec §4, "Backtracking"). So the owed side is not
+        issued against the page as it stands -- Loop renavigates and replays the
+        prefix, and the side is assigned on the walk that opens.
+
+        Past `MAX_RESTARTS` the remaining gates are declared unexplored with a
+        reason rather than walked, which the completion assertion accepts.
         """
         assert self.board is not None
-        for field_id in self.board.half_walked():
-            gate = self.board.gates[field_id]
-            control = self.board.controls[field_id]
-            value = gate.remaining[0]
-            self.board.issued_without_reset.append(field_id)
-            log.warning(
-                "walking gate second side with no reset stage_id=%s field_id=%s value=%r "
-                "-- renavigation needs the Generator's action prefix, which is not built",
-                self.board.stage_id,
-                field_id,
-                value,
-            )
-            gate.take(value)
-            return self._assign(control, value)
-        return None
+        owed = self.board.half_walked()
+        if not owed:
+            return None
+
+        if self.board.restarts >= MAX_RESTARTS:
+            for field_id in owed:
+                reason = f"restart cap {MAX_RESTARTS} reached on {self.board.stage_id}"
+                self.board.declare_unexplored(field_id, reason)
+                log.warning(
+                    "gate left unwalked stage_id=%s field_id=%s reason=%s",
+                    self.board.stage_id,
+                    field_id,
+                    reason,
+                )
+            return None
+
+        field_id = owed[0]
+        side = self.board.gates[field_id].remaining[0]
+        return Restart(fieldId=field_id, side=side, walk=self.board.walk + 1)
+
+    def open_walk(self, field_id: str, side: str) -> Assignment:
+        """Take `side` of gate `field_id`, on the walk a restart has just opened.
+
+        Called by Loop once the renavigation and the prefix replay have put the
+        page back before the branch point. The side is marked taken here rather
+        than on the report, so a replay that dies after this point still leaves
+        the board saying which branch was being attempted.
+        """
+        assert self.board is not None
+        self.board.gates[field_id].take(side)
+        return self._assign(self.board.controls[field_id], side)
+
+    def abandon_gate(self, field_id: str, reason: str) -> None:
+        """Declare a gate's owed side unwalked, so the page can finish without it.
+
+        Used when the prefix replay did not reproduce the page the walk assumed:
+        continuing would record answers against a page that never existed.
+        """
+        assert self.board is not None
+        self.board.declare_unexplored(field_id, reason)
+        log.warning(
+            "gate left unwalked stage_id=%s field_id=%s reason=%s",
+            self.board.stage_id,
+            field_id,
+            reason,
+        )
 
     # ------------------------------------------------------------------ intent
 

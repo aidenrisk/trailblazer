@@ -146,6 +146,19 @@ class Generator:
         self._next_question = 1
         self._by_field: dict[tuple[str, str], str] = {}
         """`(stageId, fieldId)` -> questionId. fieldId alone repeats across pages."""
+
+        self._answers: dict[int, dict[str, str]] = {}
+        """walk -> questionId -> the value that walk answered with.
+
+        Kept per walk rather than per question because backtracking answers the
+        same field once per walk, and the answers assembled across walks are not
+        a path the form ever rendered: q_010's answer from the walk where q_009
+        was Yes survives even after q_009 is set back to No. `publish_walk`
+        fixes one walk's set as `exampleValue`.
+        """
+
+        self._published_walk: int | None = None
+        """The walk whose answers are currently written as `exampleValue`."""
         self._stage_index: dict[str, int] = {}
 
     # -- identity ---------------------------------------------------------
@@ -330,6 +343,8 @@ class Generator:
                 return self.state()
 
             qid, is_new = self._question_id(stage_id, report.fieldId)
+            if report.valueUsed is not None:
+                self._answers.setdefault(request.walk, {})[qid] = report.valueUsed
             control = next((c for c in page.controls if c.fieldId == report.fieldId), None)
 
             raw_label = request.control_label or (control.label if control else report.fieldId)
@@ -403,9 +418,13 @@ class Generator:
             existing.required = merged_required
             if existing.type == "enum" and merged_options:
                 existing.options = [o.label for o in merged_options]
-            if question.exampleValue:
+            if question.exampleValue and self._published_walk is None:
+                # Before any walk is published, the latest capture stands, which
+                # is what a corrected fill needs: the correction replaces the
+                # rejected value rather than both being kept. Once a walk is
+                # published, `publish_walk` owns `exampleValue` and a later
+                # walk's answer must not overwrite it.
                 existing.exampleValue = question.exampleValue
-            # A corrected fill replaces the earlier action; both are never kept.
             return
 
         self.questions_doc.questions.append(question)
@@ -498,6 +517,47 @@ class Generator:
             ms=int((time.monotonic() - started) * 1000),
             ok=ok,
         )
+
+    def publish_walk(self, walk: int) -> list[str]:
+        """Fix one walk's answers as the `exampleValue` set, and return the ids set.
+
+        Example values assembled per field across different walks are not a path
+        the form ever rendered: q_010's answer survives from the walk where
+        q_009 was Yes even after q_009 is set back to No, so replaying that set
+        drives the form down a branch it never took. One walk's answers are a
+        path that was actually walked.
+
+        A question no walk answered -- one recorded from a blocked fill, or
+        answered only in a walk that is not the published one -- keeps whatever
+        it holds; the walk being published says nothing about it either way.
+        """
+        answers = self._answers.get(walk)
+        if answers is None:
+            raise ValueError(f"no walk {walk} to publish; walks recorded: {sorted(self._answers)}")
+
+        self._published_walk = walk
+        published = []
+        for question in self.questions_doc.questions:
+            value = answers.get(question.questionId)
+            if value is None:
+                continue
+            if _SECRET_KEYS.search(question.canonical or "") and (
+                value not in CREDENTIAL_PLACEHOLDERS
+            ):
+                # The same guard `append` applies. Publishing is a second write
+                # path to `exampleValue`, and a rule enforced on only one of them
+                # is not enforced.
+                raise CredentialLeak(
+                    f"{question.questionId} ({question.canonical}) carries a credential "
+                    f"literal as exampleValue in walk {walk}; "
+                    f"expected one of {CREDENTIAL_PLACEHOLDERS}"
+                )
+            question.exampleValue = value
+            published.append(question.questionId)
+
+        self._flush()
+        log.info("published walk=%d questions=%d", walk, len(published))
+        return published
 
     def state(self) -> GenerationState:
         """What has been written so far, so Loop can assert completion."""

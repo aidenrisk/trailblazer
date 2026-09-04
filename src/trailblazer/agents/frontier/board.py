@@ -1,8 +1,9 @@
 """The board: what Frontier knows about one page.
 
 The only state in the pipeline. It answers, for one page, which controls exist,
-which have been acted on, which two-sided gates remain half-walked, and which
-controls appeared as a result of which assignment.
+which have been acted on, which two-sided gates remain half-walked, which
+controls appeared as a result of which assignment, and which walk each fill
+belongs to.
 
 A board covers exactly one `stageId`. Advancing to a new stage retires the
 previous board rather than extending it, because `fieldId` is a per-page counter
@@ -70,7 +71,11 @@ class Board:
     """fieldIds in the order they were first seen, so assignments are stable."""
 
     attempted: set[str] = field(default_factory=set)
-    """fieldIds carrying at least one FillReport."""
+    """fieldIds carrying a FillReport in the current walk.
+
+    Cleared by `restart`: the replay refills the prefix, and the fields after
+    the branch point are answered again against whatever the owed side reveals.
+    """
 
     gates: dict[str, GateWalk] = field(default_factory=dict)
     revealed: dict[str, str] = field(default_factory=dict)
@@ -83,9 +88,27 @@ class Board:
     advanced: set[str] = field(default_factory=set)
     """Locators of actions already clicked on this page."""
 
-    issued_without_reset: list[str] = field(default_factory=list)
-    """Gates whose second side was assigned with the page still holding the
-    first. See `Frontier.next_assignment`."""
+    walk: int = 1
+    """Which pass over the page is under way. Incremented by `restart`.
+
+    A gate's second side cannot be taken against the page the first side left
+    behind, so Loop renavigates and replays the prefix; the walk id names the
+    pass that replay opens, and every fill is filed under it.
+    """
+
+    walk_of: dict[str, int] = field(default_factory=dict)
+    """fieldId -> the walk its most recent fill was performed in."""
+
+    restarts: int = 0
+    """Restarts issued on this page, counted against `MAX_RESTARTS`."""
+
+    unexplored: dict[str, str] = field(default_factory=dict)
+    """fieldId -> why a gate's owed side was never walked.
+
+    Reaches `branchExploration.unexplored` in the completion assertion. A gate
+    is entered here when the restart cap is reached or when replaying the
+    prefix for it failed.
+    """
 
     def add(self, control: Control, revealed_by: str | None = None) -> bool:
         """Record `control`, returning True when it was not already on the board.
@@ -123,8 +146,41 @@ class Board:
         ]
 
     def half_walked(self) -> list[str]:
-        """fieldIds of gates with a side still untaken, in the order seen."""
-        return [f for f in self.order if f in self.gates and self.gates[f].remaining]
+        """fieldIds of gates with a side still untaken and not declared unexplored.
+
+        A gate in `unexplored` is answered for: the completion assertion reads
+        the reason there. Re-offering it would restart the page forever on a
+        branch already known to be unreachable.
+        """
+        return [
+            f
+            for f in self.order
+            if f in self.gates and self.gates[f].remaining and f not in self.unexplored
+        ]
+
+    def record_fill(self, field_id: str) -> None:
+        """Mark `field_id` attempted in the current walk."""
+        self.attempted.add(field_id)
+        self.walk_of[field_id] = self.walk
+
+    def restart(self) -> int:
+        """Open the next walk and return its id.
+
+        The attempt record is cleared because the replay refills the prefix and
+        the page past the branch point is re-rendered by the owed side: a field
+        left marked attempted would never be answered on the new branch. Gate
+        sides already taken are kept, so a gate is not walked twice down the
+        same side.
+        """
+        self.walk += 1
+        self.restarts += 1
+        self.attempted.clear()
+        self.advanced.clear()
+        return self.walk
+
+    def declare_unexplored(self, field_id: str, reason: str) -> None:
+        """Record why a gate's owed side was never walked."""
+        self.unexplored[field_id] = reason
 
     def summary(self) -> dict:
         """Board state for logging and for the completion assertion."""
@@ -137,5 +193,8 @@ class Board:
                 f: {"walked": g.walked, "remaining": g.remaining} for f, g in self.gates.items()
             },
             "revealed": dict(self.revealed),
-            "issuedWithoutReset": list(self.issued_without_reset),
+            "walk": self.walk,
+            "walkOf": dict(self.walk_of),
+            "restarts": self.restarts,
+            "unexplored": dict(self.unexplored),
         }
