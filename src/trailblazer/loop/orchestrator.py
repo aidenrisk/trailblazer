@@ -467,24 +467,25 @@ def _record_route_end(
 
 
 def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:
-    """Write the finished page's gate coverage into the metadata artifact.
+    """Write every page's gate coverage into the metadata artifact.
 
-    The completion assertion reads `branchExploration`, not Frontier's board, so
-    a gate walked both ways or declared unexplored has to reach the artifact
-    while the board that knows about it is still open -- the next stage retires
-    it.
+    The completion assertion reads `branchExploration`, not Frontier's boards,
+    so a gate walked both ways or declared unexplored has to reach the artifact
+    or it fails the run. Every board is written, not just the page the crawl
+    ended on: boards outlive their pages, and an earlier page's gate is the one
+    that decided what the later pages rendered.
     """
     if generator is None:
         return
-    board = frontier.summary()
-    if not board:
-        return
-    walked_both = [
-        field_id
-        for field_id, gate in board["gates"].items()
-        if not gate["remaining"] and len(gate["walked"]) == 2
-    ]
-    generator.record_branch_exploration(board["stageId"], walked_both, board["unexplored"])
+    for board in frontier.coverage():
+        walked_both = [
+            field_id
+            for field_id, gate in board["gates"].items()
+            if not gate["remaining"] and len(gate["walked"]) == 2
+        ]
+        generator.record_branch_exploration(
+            board["stageId"], walked_both, board["unexplored"]
+        )
 
 
 def _record_restart(ledger: RunLedger | None, restart: Restart) -> None:

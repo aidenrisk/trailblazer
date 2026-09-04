@@ -247,7 +247,14 @@ class Frontier:
         return decision
 
     def page_done(self) -> bool:
-        """True when every field is attempted and every two-sided gate is walked.
+        """True when this page needs nothing more on the route under way.
+
+        Every field attempted and every gate on it either walked both ways or
+        holding a side for a later route. A gate still owing a side does not
+        keep the route on the page: the side decides what the *later* pages
+        render, so the route advances and the flow is re-entered for it (spec
+        4, "Backtracking"). `flow_done` is what reports the spec's page-done
+        condition -- every two-sided gate walked both ways -- across the flow.
 
         A pure read: unlike `next_assignment` it records nothing, so Loop can
         ask before deciding whether to assign.
@@ -258,12 +265,34 @@ class Frontier:
             self._blocking_action()
             or self._target_action()
             or self.board.unattempted()
-            or self.board.half_walked()
+        )
+
+    def flow_done(self) -> bool:
+        """True when no page owes a gate side that has not been declared.
+
+        The spec's completion condition, read across every page rather than the
+        one under the walk: a gate owing a side is a route not yet taken, and a
+        gate whose side was declared unexplored carries its reason instead.
+        """
+        return not any(
+            self.boards[stage_id].half_walked()
+            or self.boards[stage_id].remaining_absent()
+            for stage_id in self.stage_order
         )
 
     def summary(self) -> dict:
-        """Board state for logging and for the completion assertion."""
+        """The current board's state, for logging."""
         return self.board.summary() if self.board is not None else {}
+
+    def coverage(self) -> list[dict]:
+        """Every page's gate coverage, in the order the pages were entered.
+
+        Boards outlive their pages, so the crawl ends holding one per stage and
+        the last one is not the whole record. The completion assertion reads the
+        artifact rather than this, and a gate missing from here never reaches
+        the artifact to be graded.
+        """
+        return [self.boards[stage_id].summary() for stage_id in self.stage_order]
 
     @property
     def walk(self) -> int:
