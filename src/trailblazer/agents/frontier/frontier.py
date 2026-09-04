@@ -70,6 +70,27 @@ class Frontier:
         all, so a guessed one silently crawls the wrong branch of the form.
         """
         self.board: Board | None = None
+        """The board for the stage currently under the walk."""
+
+        self.boards: dict[str, Board] = {}
+        """stageId -> its board, kept after the page is left.
+
+        A gate on page 1 decides what page 4 renders, so its owed side is still
+        owed once page 4 is reached and the board that records it has to outlive
+        its page. `fieldId` is a per-page counter, which is why boards are keyed
+        by stage rather than merged.
+        """
+
+        self.stage_order: list[str] = []
+        """stageIds in the order they were first entered."""
+
+        self.walk_seq: int = 1
+        """The route under way. Shared by every board, unlike `Board.walk`.
+
+        One walk is one path from entry to the last page reached, which is what
+        makes a walk's answers a set the form actually rendered together.
+        """
+
         self.page: PageDescription | None = None
         self._pin_for: dict[str, str] = {}
         """Ancestor sides to pin when the next restart's walk opens.
@@ -97,13 +118,28 @@ class Frontier:
         if self.board is None or self.board.stage_id != page.stageId:
             if self.board is not None:
                 log.info(
-                    "board retired stage_id=%s attempted=%d gates_remaining=%d",
+                    "board suspended stage_id=%s attempted=%d gates_remaining=%d",
                     self.board.stage_id,
                     len(self.board.attempted),
                     len(self.board.half_walked()),
                 )
-            self.board = Board(stage_id=page.stageId)
-            log.info("board opened stage_id=%s url=%s", page.stageId, page.url)
+            # A board is kept when its page is left, not discarded: a gate on an
+            # earlier page still owes a side, and the fields a later page renders
+            # depend on which side that is. Re-entering the stage resumes the
+            # board rather than starting it over.
+            resumed = self.boards.get(page.stageId)
+            self.board = resumed or Board(stage_id=page.stageId, walk=self.walk_seq)
+            self.boards[page.stageId] = self.board
+            if resumed is None:
+                self.stage_order.append(page.stageId)
+                log.info("board opened stage_id=%s url=%s", page.stageId, page.url)
+            else:
+                log.info(
+                    "board resumed stage_id=%s walk=%d attempted=%d",
+                    page.stageId,
+                    resumed.walk,
+                    len(resumed.attempted),
+                )
 
         board = self.board
         self.page = page
@@ -156,12 +192,18 @@ class Frontier:
         """The next thing to do, or None when the page is done.
 
         Priority, highest first: clear a blocker, advance a page with nothing
-        fillable, act on an unattempted field, restart the page for a gate still
-        owing a side, advance a page whose fields are all done.
+        fillable, act on an unattempted field, advance a page whose fields are
+        all done, restart the flow for a gate still owing a side.
 
-        A `Restart` is not an action. Loop performs the renavigation and the
-        prefix replay itself and then calls here again; the gate's owed side is
-        issued as an ordinary assignment on the walk that opens.
+        Advancing outranks restarting so a route runs to the end of the flow
+        before any branch is revisited. A gate's side decides what the *later*
+        pages render, so exhausting one page's gates before moving on would
+        record every later page under whichever side the last restart happened
+        to leave set, and no walk would be a path from entry to the last page.
+
+        A `Restart` is not an action. Loop performs the re-entry and the prefix
+        replay itself and then calls here again; the gate's owed side is issued
+        as an ordinary assignment on the walk that opens.
         """
         started = time.monotonic()
         if self.board is None or self.page is None:
@@ -171,8 +213,9 @@ class Frontier:
             self._dismiss_blocker()
             or self._advance_to_target()
             or self._first_unattempted()
-            or self._restart_for_gate()
             or self._advance_when_filled()
+            or self._restart_for_gate()
+            or self._restart_for_earlier_page()
         )
 
         if decision is None:
@@ -224,8 +267,13 @@ class Frontier:
 
     @property
     def walk(self) -> int:
-        """The pass over the current page. 1 before any restart."""
-        return self.board.walk if self.board is not None else 1
+        """The route under way. 1 before any restart.
+
+        Flow-wide rather than per page: a restart re-enters the flow from its
+        entry URL, so every page walked after it belongs to the same route and
+        the answers filed under it are a set the form rendered together.
+        """
+        return self.walk_seq
 
     def open_restart(self, restart: Restart) -> int:
         """Open the walk a `Restart` names, and return its id.
@@ -235,16 +283,21 @@ class Frontier:
         must be recorded against the new walk, not the one being left.
         """
         assert self.board is not None
-        walk = self.board.restart()
-        if walk != restart.walk:
+        self.walk_seq += 1
+        if self.walk_seq != restart.walk:
             raise RuntimeError(
-                f"restart names walk {restart.walk} but the board opened {walk}"
+                f"restart names walk {restart.walk} but the flow opened {self.walk_seq}"
             )
-        # `restart()` cleared the previous walk's pins; a nested restart's
-        # ancestors are pinned for the walk it just opened.
+        # The replay re-enters from the flow's entry URL, so every page is
+        # walked again: each board drops the attempt record it built on the
+        # route being left while keeping the gate sides it has taken.
+        for board in self.boards.values():
+            board.restart_for(self.walk_seq)
+        # A nested restart's ancestors are pinned for the walk just opened;
+        # `restart_for` cleared the previous walk's pins.
         self.board.pinned.update(self._pin_for)
         self._pin_for = {}
-        return walk
+        return self.walk_seq
 
     # -------------------------------------------------------------- priorities
 
@@ -423,9 +476,56 @@ class Frontier:
         if owed:
             field_id = owed[0]
             side = self.board.gates[field_id].remaining[0]
-            return Restart(fieldId=field_id, side=side, walk=self.board.walk + 1)
+            self.board.charge_restart()
+            return Restart(
+                fieldId=field_id,
+                side=side,
+                walk=self.walk_seq + 1,
+                stageId=self.board.stage_id,
+            )
 
         return self._restart_for_absent(absent[0])
+
+    def _restart_for_earlier_page(self) -> Restart | None:
+        """Restart the flow for a gate on a page already left behind.
+
+        Reached only when the current page has nothing left to do and cannot be
+        advanced -- the end of a route. An earlier page's gate still owing a
+        side is what makes the next route different: the side it was not set to
+        may render a different set of later pages, so the flow is re-entered
+        rather than the crawl ending here.
+
+        Pages are taken in the order they were entered, so the earliest
+        undecided branch is resolved first and the routes come out in a stable
+        order.
+        """
+        assert self.board is not None
+        for stage_id in self.stage_order:
+            if stage_id == self.board.stage_id:
+                continue
+            board = self.boards[stage_id]
+            if board.restarts >= MAX_RESTARTS:
+                continue
+            owed = board.half_walked() or board.remaining_absent()
+            if not owed:
+                continue
+
+            field_id = owed[0]
+            gate = board.gates[field_id]
+            if not gate.remaining:
+                continue
+            side = gate.remaining[0]
+            board.charge_restart()
+            log.info(
+                "restarting the flow for an earlier page stage_id=%s field_id=%s side=%r",
+                stage_id,
+                field_id,
+                side,
+            )
+            return Restart(
+                fieldId=field_id, side=side, walk=self.walk_seq + 1, stageId=stage_id
+            )
+        return None
 
     def _restart_for_absent(self, field_id: str) -> Restart | None:
         """Restart to the branch that mounts `field_id`, so its owed side becomes assignable.
@@ -460,7 +560,13 @@ class Frontier:
             side,
         )
         self._pin_for = self._ancestor_sides(field_id)
-        return Restart(fieldId=parent, side=side, walk=self.board.walk + 1)
+        self.board.charge_restart()
+        return Restart(
+            fieldId=parent,
+            side=side,
+            walk=self.walk_seq + 1,
+            stageId=self.board.stage_id,
+        )
 
     def _ancestor_sides(self, field_id: str) -> dict[str, str]:
         """Every ancestor of `field_id` and the side that keeps it revealed.
@@ -546,29 +652,37 @@ class Frontier:
             return parent, equals
         return (parent, gate.walked[0]) if gate.walked else (None, None)
 
-    def open_walk(self, field_id: str, side: str) -> Assignment:
+    def open_walk(self, field_id: str, side: str, stage_id: str | None = None) -> Assignment:
         """The assignment taking `side` of gate `field_id`, on the walk just opened.
 
         Called by Loop once the renavigation and the prefix replay have put the
-        page back before the branch point. The side is not marked taken here:
+        flow back before the branch point. The side is not marked taken here:
         `_apply` records it from the report's `valueUsed`, so a control that did
         not actually leave the first branch still owes a side rather than being
         credited with one it never took.
-        """
-        assert self.board is not None
-        return self._assign(self.board.controls[field_id], side)
 
-    def abandon_gate(self, field_id: str, reason: str) -> None:
+        `stage_id` names the board the gate belongs to, which is not the current
+        one when the restart targets a page the walk had already left.
+        """
+        board = self.boards[stage_id] if stage_id is not None else self.board
+        assert board is not None
+        return self._assign(board.controls[field_id], side)
+
+    def abandon_gate(self, field_id: str, reason: str, stage_id: str | None = None) -> None:
         """Declare a gate's owed side unwalked, so the page can finish without it.
 
         Used when the prefix replay did not reproduce the page the walk assumed:
         continuing would record answers against a page that never existed.
+
+        `stage_id` names the board the gate belongs to, which is not the current
+        one when the restart targeted a page the walk had already left.
         """
-        assert self.board is not None
-        self.board.declare_unexplored(field_id, reason)
+        board = self.boards[stage_id] if stage_id is not None else self.board
+        assert board is not None
+        board.declare_unexplored(field_id, reason)
         log.warning(
             "gate left unwalked stage_id=%s field_id=%s reason=%s",
-            self.board.stage_id,
+            board.stage_id,
             field_id,
             reason,
         )

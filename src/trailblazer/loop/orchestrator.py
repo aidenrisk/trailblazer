@@ -45,12 +45,17 @@ from the carrier's credentials at the moment of typing, so the literal never
 enters an assignment, a report or the metadata artifact.
 """
 
-MAX_ASSIGNMENTS = 60
-"""Assignments allowed on one page before the walk is abandoned.
+MAX_ASSIGNMENTS = 400
+"""Actions allowed on one flow before the crawl is abandoned.
 
-A page that keeps producing assignments is a defect -- a blocker that never
+A walk that keeps producing assignments is a defect -- a blocker that never
 clears, a control re-added under a new fieldId every perceive -- and looping on
-it burns a model call per turn. Pie's widest page carries well under this.
+it burns a model call per turn.
+
+Flow-wide, not per page: one crawl walks every route through every page, and a
+restart replays the whole route before the branch point, so the count covers
+every page of every route plus every replay. `MAX_RESTARTS` per page is what
+bounds how many routes there are; this bounds the total work if that fails.
 """
 
 
@@ -207,14 +212,16 @@ def _walk_page(
     Returns the last `ScraperResult`, which is what the crawl endpoint answers
     with until the Generator exists to produce the three artifacts.
     """
-    start_url = result.page.url
-    prefix: list[Assignment] = []
-    """The assignments performed on this walk, in order.
+    entry_url = result.page.url
+    prefix: list[tuple[str, Assignment]] = []
+    """(stageId, assignment) for every action on this route, in order.
 
-    A restart replays these against a freshly navigated page to put it back
-    before the branch point. Held here rather than read off disk because the
-    artifacts are keyed by questionId and reconciled across captures, so they no
-    longer carry the walk's order.
+    A restart replays these from the flow's entry URL to put it back before the
+    branch point, crossing page boundaries when the gate is on a page the route
+    had already left. Each entry carries its stage so the replay knows where to
+    stop. Held here rather than read off disk because the artifacts are keyed by
+    questionId and reconciled across captures, so they no longer carry the
+    route's order.
     """
 
     report: FillReport | None = None
@@ -228,7 +235,7 @@ def _walk_page(
 
         if isinstance(decision, Restart):
             result, prefix, report = _restart_walk(
-                tab, result, decision, prefix, start_url, frontier,
+                tab, result, decision, prefix, entry_url, frontier,
                 job_id, objective, settings, ledger, generator,
             )
             continue
@@ -236,20 +243,22 @@ def _walk_page(
         assignment = decision
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
-        prefix.append(assignment)
+        prefix.append((result.page.stageId, assignment))
 
         _generate(generator, job_id, result.page, report, frontier.walk, ledger)
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
 
     log.error(
-        "page did not finish in %d assignments job_id=%s stage_id=%s board=%s",
+        "flow did not finish in %d actions job_id=%s stage_id=%s walk=%d board=%s",
         MAX_ASSIGNMENTS,
         job_id,
         result.page.stageId,
+        frontier.walk,
         frontier.summary(),
     )
     raise RuntimeError(
-        f"page {result.page.stageId} did not finish in {MAX_ASSIGNMENTS} assignments"
+        f"flow did not finish in {MAX_ASSIGNMENTS} actions; "
+        f"stopped on {result.page.stageId} walk {frontier.walk}"
     )
 
 
@@ -315,32 +324,38 @@ def _restart_walk(
     tab,
     result: ScraperResult,
     restart: Restart,
-    prefix: list[Assignment],
-    start_url: str,
+    prefix: list[tuple[str, Assignment]],
+    entry_url: str,
     frontier: Frontier,
     job_id: str,
     objective: str,
     settings: Settings,
     ledger: RunLedger | None,
     generator: Generator | None,
-) -> tuple[ScraperResult, list[Assignment], FillReport | None]:
-    """Renavigate, replay the prefix, and take the gate's owed side.
+) -> tuple[ScraperResult, list[tuple[str, Assignment]], FillReport | None]:
+    """Re-enter the flow, replay the route up to the gate, and take its owed side.
 
-    Returns the page as it stands afterwards, the prefix of the walk that has
+    Returns the page as it stands afterwards, the prefix of the route that has
     just opened, and the last report -- which Loop folds into the board on the
     next turn like any other.
+
+    Navigation goes to the flow's entry URL, not the gate's page: a portal
+    carries the application in server-side state, so a form page deep in the
+    flow does not render from its URL alone. The replay therefore crosses page
+    boundaries, including the `advance` actions that move between them, which is
+    what lets a gate on page 1 be re-set after page 4 has been seen.
 
     What is replayed is everything performed before the gate; the gate is then
     set to the side it owes rather than the side it already took. A replayed
     fill coming back `ok: false` aborts the restart -- the page is not in the
-    state the walk assumed, and continuing would record answers against a page
+    state the route assumed, and continuing would record answers against a page
     that never existed -- so the gate is declared unexplored and the walk
     resumes from wherever the replay stopped.
     """
     _record_restart(ledger, restart)
     walk = frontier.open_restart(restart)
 
-    tab.goto(start_url)
+    tab.goto(entry_url)
     result = perceive(
         tab,
         PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
@@ -348,13 +363,13 @@ def _restart_walk(
         ledger,
     )
     log_contract(log, "ScraperResult", result)
-    # The renavigated page is what the replay runs against, and the board must
-    # hold its controls before the owed side is assigned against them.
+    # The re-entered page is what the replay runs against, and the board must
+    # hold its controls before anything is assigned against them.
     frontier.observe(result.page, None, result.addedControls)
 
-    replayed: list[Assignment] = []
+    replayed: list[tuple[str, Assignment]] = []
     report: FillReport | None = None
-    for assignment in _prefix_before(prefix, restart.fieldId):
+    for _, assignment in _prefix_before(prefix, restart.fieldId, restart.stageId):
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
         if not report.ok:
@@ -362,11 +377,14 @@ def _restart_walk(
                 restart.fieldId,
                 f"prefix replay failed at {assignment.fieldId or assignment.locator} "
                 f"on walk {walk}",
+                restart.stageId,
             )
             frontier.observe(result.page, report, result.addedControls)
             return result, replayed, None
 
-        replayed.append(assignment)
+        # Recorded against the stage the page was on when the action ran, which
+        # an `advance` changes: the entry is what a later restart cuts on.
+        replayed.append((result.page.stageId, assignment))
         _generate(generator, job_id, result.page, report, walk, ledger)
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
         # Folded in per fill, not once at the end: the new walk cleared the
@@ -375,26 +393,49 @@ def _restart_walk(
         frontier.observe(result.page, report, result.addedControls)
         report = None
 
-    owed = frontier.open_walk(restart.fieldId, restart.side)
+    if result.page.stageId != restart.stageId:
+        # The replay did not arrive where the gate is, so setting it would act
+        # on whatever control happens to carry that fieldId on this page.
+        frontier.abandon_gate(
+            restart.fieldId,
+            f"replay reached {result.page.stageId} not {restart.stageId} on walk {walk}",
+            restart.stageId,
+        )
+        return result, replayed, None
+
+    owed = frontier.open_walk(restart.fieldId, restart.side, restart.stageId)
     report = fill(tab, owed, settings, ledger)
     log_contract(log, "FillReport", report)
-    replayed.append(owed)
+    replayed.append((result.page.stageId, owed))
 
     _generate(generator, job_id, result.page, report, walk, ledger)
     result = _perceive_after(tab, result, owed, job_id, objective, settings, ledger)
     return result, replayed, report
 
 
-def _prefix_before(prefix: list[Assignment], field_id: str) -> list[Assignment]:
-    """The assignments performed before the gate, in order.
+def _prefix_before(
+    prefix: list[tuple[str, Assignment]], field_id: str, stage_id: str
+) -> list[tuple[str, Assignment]]:
+    """The actions performed before the gate, in order, across pages.
 
     The gate itself is dropped: the restart exists to take its other side, and
     replaying the side already taken would put the page back on the branch being
     left. Anything after it belongs to the abandoned branch and is not replayed
-    -- the owed side renders a different set of fields, which Frontier assigns
-    once it sees them.
+    -- the owed side renders a different set of fields, and possibly a different
+    set of later pages, which Frontier assigns once it sees them.
+
+    The gate is matched on its stage as well as its fieldId, because `fieldId`
+    is a per-page counter: `q_001` names a different control on every page, and
+    matching on it alone would cut the prefix at the first page.
     """
-    cut = next((i for i, a in enumerate(prefix) if a.fieldId == field_id), len(prefix))
+    cut = next(
+        (
+            i
+            for i, (stage, a) in enumerate(prefix)
+            if a.fieldId == field_id and stage == stage_id
+        ),
+        len(prefix),
+    )
     return prefix[:cut]
 
 

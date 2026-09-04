@@ -688,3 +688,94 @@ def test_a_pinned_ancestor_is_assigned_its_revealing_side_not_its_owed_one(
     assert isinstance(decision, Assignment)
     assert (decision.fieldId, decision.value) == ("q_002", "Yes")
     assert frontier.board.gates["q_002"].remaining == ["No"]
+
+
+def test_a_route_advances_to_the_end_before_a_gate_is_revisited(
+    frontier: Frontier,
+) -> None:
+    """A gate decides what later pages render, so the route runs on before restarting."""
+    gate = control("q_001", type="select", options=["LLC", "Sole"])
+    described = page([gate])
+    described = described.model_copy(update={"next": "#next"})
+
+    frontier.observe(described)
+    first = frontier.next_assignment()
+    assert isinstance(first, Assignment)
+    assert (first.fieldId, first.value) == ("q_001", "LLC")
+
+    frontier.observe(
+        described,
+        FillReport(fieldId="q_001", intent="select", locator="#q_001", ok=True, valueUsed="LLC"),
+    )
+    # The gate still owes "Sole", but the page can be advanced, so it is.
+    second = frontier.next_assignment()
+    assert isinstance(second, Assignment)
+    assert second.intent == "advance"
+
+
+def test_a_gate_on_an_earlier_page_restarts_the_flow(frontier: Frontier) -> None:
+    """The route ended, and page one's owed side is what makes the next route differ."""
+    gate = control("q_001", type="select", options=["LLC", "Sole"])
+    first_page = page([gate]).model_copy(update={"next": "#next"})
+    second_page = page([control("q_001")], stage_id="form_page_2_details")
+
+    frontier.observe(first_page)
+    frontier.next_assignment()
+    frontier.observe(
+        first_page,
+        FillReport(fieldId="q_001", intent="select", locator="#q_001", ok=True, valueUsed="LLC"),
+    )
+    frontier.next_assignment()
+    frontier.observe(
+        first_page,
+        FillReport(fieldId=None, intent="advance", locator="#next", ok=True),
+    )
+
+    # On page two, with nothing left to do there and no way forward.
+    frontier.observe(second_page)
+    frontier.next_assignment()
+    frontier.observe(
+        second_page,
+        FillReport(fieldId="q_001", intent="fill", locator="#q_001", ok=True, valueUsed="x"),
+    )
+
+    decision = frontier.next_assignment()
+    assert isinstance(decision, Restart)
+    assert (decision.stageId, decision.fieldId, decision.side) == (
+        "form_page_1_business_info",
+        "q_001",
+        "Sole",
+    )
+
+
+def test_a_boards_gates_survive_leaving_its_page(frontier: Frontier) -> None:
+    """A gate on page one still owes a side once page two is reached."""
+    gate = control("q_001", type="select", options=["LLC", "Sole"])
+    first_page = page([gate]).model_copy(update={"next": "#next"})
+    second_page = page([control("q_001")], stage_id="form_page_2_details")
+
+    frontier.observe(first_page)
+    frontier.board.gates["q_001"].take("LLC")
+    frontier.observe(second_page)
+
+    assert frontier.board.stage_id == "form_page_2_details"
+    kept = frontier.boards["form_page_1_business_info"]
+    assert kept.gates["q_001"].remaining == ["Sole"]
+
+
+def test_the_walk_id_is_flow_wide_not_per_page(frontier: Frontier) -> None:
+    """One walk is one route, so answers filed under it rendered together."""
+    gate = control("q_001", type="select", options=["LLC", "Sole"])
+    first_page = page([gate]).model_copy(update={"next": "#next"})
+    second_page = page([control("q_001")], stage_id="form_page_2_details")
+
+    frontier.observe(first_page)
+    assert frontier.walk == 1
+    frontier.observe(second_page)
+    assert frontier.walk == 1
+
+    restart = Restart(
+        fieldId="q_001", side="Sole", walk=2, stageId="form_page_1_business_info"
+    )
+    assert frontier.open_restart(restart) == 2
+    assert frontier.walk == 2

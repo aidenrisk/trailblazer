@@ -87,7 +87,15 @@ class Restart(BaseModel):
     """
 
     walk: int
-    """The walk id this restart opens. `Board.walk` after the increment."""
+    """The walk id this restart opens. `Frontier.walk_seq` after the increment."""
+
+    stageId: str
+    """The stage the gate is on.
+
+    A restart may target a gate on a page the walk has already left, in which
+    case the replay crosses page boundaries to reach it. Loop replays the
+    prefix up to this stage's branch point and no further.
+    """
 
 
 class FillReport(BaseModel):

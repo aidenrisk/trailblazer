@@ -205,21 +205,27 @@ class Board:
         self.attempted.add(field_id)
         self.walk_of[field_id] = self.walk
 
-    def restart(self) -> int:
-        """Open the next walk and return its id.
+    def restart_for(self, walk: int) -> None:
+        """Join route `walk`, dropping what was recorded on the route being left.
 
         The attempt record is cleared because the replay refills the prefix and
-        the page past the branch point is re-rendered by the owed side: a field
-        left marked attempted would never be answered on the new branch. Gate
-        sides already taken are kept, so a gate is not walked twice down the
-        same side.
+        the pages past the branch point are re-rendered by the owed side: a
+        field left marked attempted would never be answered on the new branch.
+        Gate sides already taken are kept, so a gate is not walked twice down
+        the same side.
+
+        `restarts` counts only the restarts issued for this page's own gates,
+        which is what `MAX_RESTARTS` bounds; a board dragged onto a new route by
+        a restart for another page's gate is not charged for it.
         """
-        self.walk += 1
-        self.restarts += 1
+        self.walk = walk
         self.attempted.clear()
         self.advanced.clear()
         self.pinned.clear()
-        return self.walk
+
+    def charge_restart(self) -> None:
+        """Count one restart against this page's own budget."""
+        self.restarts += 1
 
     def declare_unexplored(self, field_id: str, reason: str) -> None:
         """Record why a gate's owed side was never walked, and stop owing it.
