@@ -56,10 +56,39 @@ _DENIED_PHRASES = (
     "place order",
     "complete purchase",
     "subscribe and pay",
+    # Anything that could commit money or bind cover, however worded. The cost
+    # of refusing a harmless button is one blocked report; the cost of pressing
+    # a real one is an irreversible external action.
+    "activate",
+    "accept quote",
+    "accept and",
+    "agree and pay",
+    "authorize",
+    "card",
+    "charge",
+    "confirm and",
+    "credit card",
+    "debit",
+    "deposit",
+    "down payment",
+    "enroll",
+    "finalize",
+    "invoice",
+    "issue policy",
+    "issue",
+    "order",
+    "pay by",
+    "premium",
+    "request to bind",
+    "submit payment",
+    "subscribe",
 )
 
+# Substring, not word-boundary: "Prepay", "Rebind" and "PaymentBtn" all carry a
+# denied phrase glued to other text, and a boundary match would let them past.
+# False positives cost one blocked report; a false negative is irreversible.
 _DENY_RE = re.compile(
-    r"\b(?:" + "|".join(p.replace(" ", r"\s+") for p in _DENIED_PHRASES) + r")\b",
+    "|".join(p.replace(" ", r"\s+") for p in _DENIED_PHRASES),
     re.IGNORECASE,
 )
 
