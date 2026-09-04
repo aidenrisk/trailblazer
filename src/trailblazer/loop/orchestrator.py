@@ -186,11 +186,14 @@ def run_crawl(
 
     state = generator.state()
     log.info(
-        "crawl end job_id=%s stage_id=%s polarity=%s board=%s artifacts=%s",
+        "crawl end job_id=%s stage_id=%s polarity=%s routes=%d flow_done=%s "
+        "coverage=%s artifacts=%s",
         job_id,
         result.page.stageId,
         result.polarity,
-        frontier.summary(),
+        frontier.walk,
+        frontier.flow_done(),
+        frontier.coverage(),
         state.model_dump(),
     )
     ledger.log_summary()
