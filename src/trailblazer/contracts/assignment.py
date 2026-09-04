@@ -4,6 +4,10 @@ One assignment is one action on one control. The filler never chooses the next
 one: Frontier holds the board and decides, so a walk is reconstructible from
 the assignment sequence alone.
 
+`Restart` is the other thing Frontier can answer with. It is not an action and
+never reaches the filler: it tells Loop to renavigate and replay the prefix so a
+gate's owed side is taken against a clean page rather than a dirty one.
+
 Field names are camelCase for the same reason as `page_description.py` -- the
 wire format is the contract.
 """
@@ -54,6 +58,36 @@ class Assignment(BaseModel):
 
     constraintHint: str | None = None
     """A format requirement learned from a previous rejection of this field."""
+
+
+class Restart(BaseModel):
+    """Frontier's request that Loop return the page to its pre-gate state.
+
+    Returned instead of an Assignment when every field on the page has been
+    attempted and a gate still has a side owed. Setting the gate back is not
+    equivalent to never having set it: the abandoned branch's fields stay
+    mounted and anything filled underneath them stays filled, so the owed side
+    must be taken after a renavigation and a replay of the fills that preceded
+    the branch point.
+
+    Not an action. The filler never receives one -- Loop performs the
+    renavigation itself and then asks Frontier for assignments again.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    fieldId: str
+    """The gate owing a side."""
+
+    side: str
+    """The value the gate is to be set to once the prefix is replayed.
+
+    An option label, or `"true"`/`"false"` for a checkbox-shaped gate, matching
+    `Assignment.value`.
+    """
+
+    walk: int
+    """The walk id this restart opens. `Board.walk` after the increment."""
 
 
 class FillReport(BaseModel):

@@ -1,9 +1,12 @@
 """What Loop hands the Generator, and what the Generator has produced so far.
 
 Generation is incremental: the Generator is called after every fill, not once
-per finished page, and appends to all three artifacts in one step. There is no
-walk slice -- the files on disk are the accumulation, so no agent holds a page's
-action sequence in state.
+per finished page, and appends to all three artifacts in one step. The files on
+disk are the accumulation, so no agent holds a page's action sequence in state.
+
+A request carries the `walk` it belongs to, because backtracking answers the
+same field once per walk and only one walk's answers are a path the form
+actually rendered.
 
 The artifacts themselves are the external boundary and are specified in
 `.sessions/03-architecture-and-spec.md` sections 3.3 and 3.4. This module is
@@ -40,6 +43,17 @@ class GenerationRequest(BaseModel):
 
     Loop resolves it from the page so the Generator need not re-find the control
     whose fieldId the report carries.
+    """
+
+    walk: int = 1
+    """Which pass over the page this fill belongs to. `Board.walk`.
+
+    Backtracking walks a gate's second side after renavigating and replaying the
+    prefix, so one field is answered once per walk. Answers assembled per field
+    across different walks are not a path the form ever rendered: q_010's answer
+    from the walk where q_009 was Yes survives into the record even after q_009
+    is set back to No. The Generator keeps each walk's answers separately and
+    publishes one of them as the `exampleValue` set.
     """
 
 
