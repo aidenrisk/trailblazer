@@ -165,6 +165,13 @@ def run_crawl(
             tab, result, frontier, job_id, objective, settings, ledger, generator
         )
 
+    # The last walk that answered anything. Its answers are a path the form
+    # actually rendered; the per-field latest across walks is not. A
+    # terminal-aware choice needs the Validator's outcome, which runs after this
+    # returns. A crawl that filled nothing has no walk to publish.
+    if generator.walks:
+        generator.publish_walk(generator.walks[-1])
+
     state = generator.state()
     log.info(
         "crawl end job_id=%s stage_id=%s polarity=%s board=%s artifacts=%s",
@@ -216,6 +223,7 @@ def _walk_page(
 
         decision = frontier.next_assignment()
         if decision is None:
+            _record_branch_exploration(generator, frontier)
             return result
 
         if isinstance(decision, Restart):
@@ -388,6 +396,27 @@ def _prefix_before(prefix: list[Assignment], field_id: str) -> list[Assignment]:
     """
     cut = next((i for i, a in enumerate(prefix) if a.fieldId == field_id), len(prefix))
     return prefix[:cut]
+
+
+def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:
+    """Write the finished page's gate coverage into the metadata artifact.
+
+    The completion assertion reads `branchExploration`, not Frontier's board, so
+    a gate walked both ways or declared unexplored has to reach the artifact
+    while the board that knows about it is still open -- the next stage retires
+    it.
+    """
+    if generator is None:
+        return
+    board = frontier.summary()
+    if not board:
+        return
+    walked_both = [
+        field_id
+        for field_id, gate in board["gates"].items()
+        if not gate["remaining"] and len(gate["walked"]) == 2
+    ]
+    generator.record_branch_exploration(board["stageId"], walked_both, board["unexplored"])
 
 
 def _record_restart(ledger: RunLedger | None, restart: Restart) -> None:

@@ -81,12 +81,13 @@ def walk(frontier: Frontier, description: PageDescription, limit: int = 20) -> l
     Stands in for Loop plus the filler: perceive, assign, report, repeat. The
     page never changes, which is the case for a form whose fields reveal nothing.
 
-    A `Restart` is handled the way Loop handles one -- open the walk, replay the
-    prefix, then take the owed side. There is no browser here, so the
-    renavigation is just the same description observed again and the replay is
-    the assignments already echoed back.
+    A `Restart` is handled the way `orchestrator._restart_walk` handles one --
+    open the walk, replay the fills made before the branch point, then take the
+    owed side. There is no browser here, so the renavigation is just the same
+    description observed again and `prefix` stands in for what Loop holds.
     """
     assignments: list = []
+    prefix: list = []
     frontier.observe(description)
     for _ in range(limit):
         decision = frontier.next_assignment()
@@ -96,14 +97,20 @@ def walk(frontier: Frontier, description: PageDescription, limit: int = 20) -> l
         if isinstance(decision, Restart):
             frontier.open_restart(decision)
             frontier.observe(description)
-            for prior in [a for a in assignments if a.fieldId != decision.fieldId]:
+            replayed = []
+            for prior in prefix:
+                if prior.fieldId == decision.fieldId:
+                    break
                 frontier.observe(description, report(prior))
+                replayed.append(prior)
             owed = frontier.open_walk(decision.fieldId, decision.side)
             assignments.append(owed)
             frontier.observe(description, report(owed))
+            prefix = replayed + [owed]
             continue
 
         assignments.append(decision)
+        prefix.append(decision)
         frontier.observe(description, report(decision))
     raise AssertionError(f"page did not finish in {limit} assignments")
 
@@ -285,20 +292,42 @@ def test_a_field_filled_on_walk_two_is_recorded_against_walk_two(frontier: Front
 def test_the_restart_cap_leaves_the_rest_unexplored_with_a_reason(
     frontier: Frontier,
 ) -> None:
-    """A form with many gates must not run forever (MAX_RESTARTS)."""
-    gates = [
-        control(f"q_{i:03d}", type="toggle", options=["Yes", "No"])
-        for i in range(1, MAX_RESTARTS + 3)
-    ]
+    """A page whose gates each cost a restart must not run forever (MAX_RESTARTS).
 
-    walk(frontier, page(gates), limit=200)
+    One gate is walked per page here, so each owed side costs its own restart.
+    Independent gates sharing a page cost one restart between them, because the
+    walk a restart opens takes every owed side -- see the four-walks test.
+    """
+    gate = control("q_001", type="toggle", options=["Yes", "No"])
+    description = page([gate])
 
+    frontier.observe(description)
+    restarts = 0
+    for _ in range(200):
+        decision = frontier.next_assignment()
+        if decision is None:
+            break
+        if isinstance(decision, Restart):
+            restarts += 1
+            frontier.open_restart(decision)
+            frontier.observe(description)
+            owed = frontier.open_walk(decision.fieldId, decision.side)
+            # The page reports the side it already held: the control did not
+            # leave the branch the first side selected, so the gate still owes
+            # one and the page restarts again.
+            frontier.observe(description, report(owed, value="Yes"))
+            continue
+        frontier.observe(description, report(decision, value="Yes"))
+    else:
+        raise AssertionError("page did not finish")
+
+    assert restarts == MAX_RESTARTS
     summary = frontier.summary()
     assert summary["restarts"] == MAX_RESTARTS
-    unexplored = summary["unexplored"]
-    assert len(unexplored) == 2
-    assert all("restart cap" in reason for reason in unexplored.values())
-    # A capped page still finishes: the gates are declared, not silently owed.
+    assert summary["unexplored"] == {
+        "q_001": f"restart cap {MAX_RESTARTS} reached on {STAGE}"
+    }
+    # A capped page still finishes: the gate is declared, not silently owed.
     assert frontier.page_done()
 
 

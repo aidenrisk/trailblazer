@@ -31,9 +31,10 @@ MAX_RESTARTS = 8
 """Restarts allowed on one page before the remaining gates are declared unwalked.
 
 Each one costs a renavigation and a replay of every fill made before the branch
-point, so a page carrying many gates would otherwise spend the whole run on it.
-Gates past the cap reach `branchExploration.unexplored` with a reason, which the
-completion assertion accepts in place of a walk.
+point, so a gate that never leaves its first side would otherwise spend the
+whole run on one page. Gates past the cap are declared unexplored with a reason,
+which Loop copies to `branchExploration.unexplored` and the completion assertion
+accepts in place of a walk.
 """
 
 
@@ -396,15 +397,15 @@ class Frontier:
         return Restart(fieldId=field_id, side=side, walk=self.board.walk + 1)
 
     def open_walk(self, field_id: str, side: str) -> Assignment:
-        """Take `side` of gate `field_id`, on the walk a restart has just opened.
+        """The assignment taking `side` of gate `field_id`, on the walk just opened.
 
         Called by Loop once the renavigation and the prefix replay have put the
-        page back before the branch point. The side is marked taken here rather
-        than on the report, so a replay that dies after this point still leaves
-        the board saying which branch was being attempted.
+        page back before the branch point. The side is not marked taken here:
+        `_apply` records it from the report's `valueUsed`, so a control that did
+        not actually leave the first branch still owes a side rather than being
+        credited with one it never took.
         """
         assert self.board is not None
-        self.board.gates[field_id].take(side)
         return self._assign(self.board.controls[field_id], side)
 
     def abandon_gate(self, field_id: str, reason: str) -> None:

@@ -518,6 +518,41 @@ class Generator:
             ok=ok,
         )
 
+    @property
+    def walks(self) -> list[int]:
+        """The walks that answered at least one question, in order."""
+        return sorted(self._answers)
+
+    def record_branch_exploration(
+        self, stage_id: str, walked_both: list[str], unexplored: dict[str, str]
+    ) -> None:
+        """Write one page's gate coverage into the metadata artifact.
+
+        The completion assertion reads `branchExploration`, not Frontier's board:
+        a gate owed a side and neither walked nor declared here fails the run.
+        Frontier names gates by `fieldId`, which is per-page, so the questionId
+        this class allocated is what the entries carry.
+        """
+        exploration = self.metadata_doc.branchExploration
+        for field_id in walked_both:
+            qid = self._by_field.get((stage_id, field_id))
+            if qid is not None and qid not in exploration.gatesWalkedBothSides:
+                exploration.gatesWalkedBothSides.append(qid)
+
+        for field_id, reason in unexplored.items():
+            qid = self._by_field.get((stage_id, field_id))
+            if qid is None:
+                # No question was appended for the control, so there is nothing
+                # for the assertion to join the entry to. Recorded as prose so
+                # the gap is visible rather than silently absent.
+                exploration.notes.append(f"{stage_id}/{field_id}: {reason}")
+                continue
+            if any(e.get("questionId") == qid for e in exploration.unexplored):
+                continue
+            exploration.unexplored.append({"questionId": qid, "reason": reason})
+
+        self._flush()
+
     def publish_walk(self, walk: int) -> list[str]:
         """Fix one walk's answers as the `exampleValue` set, and return the ids set.
 

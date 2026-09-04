@@ -105,9 +105,9 @@ class Board:
     unexplored: dict[str, str] = field(default_factory=dict)
     """fieldId -> why a gate's owed side was never walked.
 
-    Reaches `branchExploration.unexplored` in the completion assertion. A gate
-    is entered here when the restart cap is reached or when replaying the
-    prefix for it failed.
+    A gate is entered here when the restart cap is reached or when replaying the
+    prefix for it failed. Loop copies these into `branchExploration.unexplored`
+    when the page finishes, which is what the completion assertion reads.
     """
 
     def add(self, control: Control, revealed_by: str | None = None) -> bool:
