@@ -16,6 +16,7 @@ same `fill()` as any other assignment, so the denylist and every safety check
 still apply.
 """
 
+import json
 import os
 import time
 import uuid
@@ -52,6 +53,14 @@ from the carrier's credentials at the moment of typing, so the literal never
 enters an assignment, a report or the metadata artifact.
 """
 
+MFA_WAIT_S = 180
+"""How long a headed run waits for a one-time code to be entered by hand.
+
+A code is not in the credential store, so the crawl cannot supply it. Where a
+human is watching the browser it is cheaper to wait than to fail a login whose
+credentials the portal already accepted.
+"""
+
 MAX_ASSIGNMENTS = 400
 """Actions allowed on one flow before the crawl is abandoned.
 
@@ -77,23 +86,24 @@ def fill(
 
 
 def open_session(settings: Settings, headed: bool = False):
-    """Attach to the shared browser, or launch a private one if none is serving.
+    """Attach to the shared browser, or launch one if none is serving.
 
     The port comes from the record `trailblazer launch` wrote, so agents share
-    one browser without being told where it is. Attaching leaves a hand-done
-    login intact: `AttachedSession.close()` drops the connection only.
+    one browser without being told where it is. Attaching leaves a login already
+    made intact: `AttachedSession.close()` drops the connection only.
+
+    Launching is not a fallback to apologise for -- it is what makes a crawl one
+    command. The profile is persistent, so a launched browser carries whatever
+    session the last run left, and `_sign_in` establishes one if it does not.
     """
     port = shared_session.live_port(settings.session_file, settings.cdp_port)
-    if settings.attach_if_running:
-        if devtools_running(port):
-            return AttachedSession(cdp_port=port)
-        # Launching here would produce a browser with no login, which perceives
-        # a sign-in page instead of the form and reports it as the carrier's.
-        raise RuntimeError(
-            f"no shared browser serving CDP on port {port}. "
-            "Run `trailblazer launch` and log in, then retry. "
-            "(Set ATTACH_IF_RUNNING=false to launch a private browser instead.)"
-        )
+    if settings.attach_if_running and devtools_running(port):
+        return AttachedSession(cdp_port=port)
+    # Nothing is serving, so launch one. This used to raise: the crawl could not
+    # log itself in, and a fresh browser perceived a sign-in page and recorded it
+    # as the carrier's form. `_sign_in` authenticates now, and the profile
+    # persists, so a launched browser is as good as an attached one.
+    log.info("no browser on CDP port %d; launching one", port)
     return BrowserSession(
         cdp_port=port,
         headed=headed or settings.headed,
@@ -167,7 +177,7 @@ def run_crawl(
 
     with open_session(settings, headed) as session:
         tab = session.goto(url)
-        _sign_in(tab, carrier_id, settings, ledger, generator)
+        _sign_in(tab, carrier_id, settings, ledger, generator, headed)
         result = perceive(
             tab,
             PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
@@ -193,7 +203,7 @@ def run_crawl(
             )
         generator.publish_walk(chosen)
         if validate_script:
-            _validate(generator, job_id, settings, headed, ledger)
+            _validate(generator, job_id, carrier_id, settings, headed, ledger)
 
     state = generator.state()
     log.info(
@@ -211,9 +221,48 @@ def run_crawl(
     return result
 
 
+def _write_replay_config(carrier_id: str, settings: Settings, out_dir: Path) -> Path | None:
+    """Write the four-key creds file the replay script reads as `--config`.
+
+    Exactly the keys section 6 fixes. Reading any other name yields an empty
+    password that still gets typed, so the portal reports a bad credential
+    rather than a missing key.
+
+    The literals are here and nowhere else: the script holds `$EMAIL` and
+    `$PASSWORD`, the metadata artifact holds the same placeholders, and this
+    file is the only place the real values live. It sits beside the artifacts
+    rather than inside them, and is written 0600 because it is a secret on disk.
+
+    `None` when the carrier has no credentials -- a portal may need no login,
+    and the fixture does not.
+    """
+    creds = resolve_carrier_creds(carrier_id, settings)
+    if not creds.username or not creds.password:
+        log.info("no credentials for carrier_id=%s; the replay runs unauthenticated",
+                 carrier_id)
+        return None
+
+    path = out_dir / "replay-config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "LOGIN_EMAIL": creds.username,
+                "LOGIN_PASSWORD": creds.password,
+                "MFA_CARRIER_ID": carrier_id,
+                "HEADLESS": not settings.headed,
+            },
+            indent=2,
+        )
+    )
+    path.chmod(0o600)
+    log.info("replay config written path=%s", path)
+    return path
+
+
 def _validate(
     generator: Generator,
     job_id: str,
+    carrier_id: str,
     settings: Settings,
     headed: bool,
     ledger: RunLedger | None,
@@ -230,6 +279,7 @@ def _validate(
     throw away the evidence needed to fix it.
     """
     answers_path = generator.write_answers()
+    config_path = _write_replay_config(carrier_id, settings, generator.out_dir)
     request = ValidationRequest(
         job_id=job_id,
         script_path=str(generator.script_path),
@@ -237,7 +287,7 @@ def _validate(
         headed=headed,
     )
     try:
-        outcome = validate(request, settings, ledger=ledger)
+        outcome = validate(request, settings, config_path=config_path, ledger=ledger)
     except FileNotFoundError as e:
         log.error("validation could not run job_id=%s: %s", job_id, e)
         return
@@ -265,6 +315,7 @@ def _sign_in(
     settings: Settings,
     ledger: RunLedger | None,
     generator: Generator | None = None,
+    headed: bool = False,
 ) -> None:
     """Authenticate the session before the walk begins.
 
@@ -285,6 +336,16 @@ def _sign_in(
         return
 
     result = login.sign_in(tab)
+    if result.mfa_required and (headed or settings.headed):
+        # The code is not in the credential store, so the run cannot supply it.
+        # In a headed run a human is watching the window, so the crawl waits for
+        # the sign-in to complete by hand rather than failing a login whose
+        # credentials were accepted. A headless run has nobody to ask.
+        log.warning(
+            "waiting up to %ds for the one-time code to be entered in the browser window",
+            MFA_WAIT_S,
+        )
+        result = login.wait_for_manual_completion(tab, MFA_WAIT_S)
     if ledger is not None:
         ledger.record(
             agent="login",

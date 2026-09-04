@@ -7,6 +7,9 @@ the board before the next assignment, and that a Restart renavigates and
 replays the prefix before the owed side is taken.
 """
 
+import json
+import stat
+
 import pytest
 
 from trailblazer.agents.frontier import MAX_RESTARTS, Frontier
@@ -16,6 +19,7 @@ from trailblazer.contracts.scraper_result import ScraperResult
 from trailblazer.loop import orchestrator
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.shared.config import Settings
+from trailblazer.shared.dev_carrier_creds import CarrierCreds
 
 
 def _control(field_id: str, type: str = "text") -> Control:
@@ -537,3 +541,51 @@ def test_no_settled_route_leaves_the_choice_to_the_caller(tmp_path) -> None:
     generator.record_route_end(1, "form_page_2_details", settled=False)
 
     assert generator.first_settled_walk() is None
+
+
+# -- the replay config -------------------------------------------------------
+
+
+def test_the_replay_config_carries_exactly_the_four_keys(tmp_path, monkeypatch) -> None:
+    """Reading any other name yields an empty password that still gets typed."""
+    settings = Settings(
+        carrier_url="https://carrier/sign-in",
+        carrier_username="agent@example.com",
+        carrier_password="s3cret",
+        headed=True,
+    )
+
+    path = orchestrator._write_replay_config("pie", settings, tmp_path)
+
+    written = json.loads(path.read_text())
+    assert set(written) == {"LOGIN_EMAIL", "LOGIN_PASSWORD", "MFA_CARRIER_ID", "HEADLESS"}
+    assert written["LOGIN_EMAIL"] == "agent@example.com"
+    assert written["HEADLESS"] is False  # headed run, so the replay is headed too
+
+
+def test_the_replay_config_is_not_world_readable(tmp_path) -> None:
+    """It is the one place the literals live; the artifacts hold placeholders."""
+    settings = Settings(
+        carrier_url="https://carrier/sign-in",
+        carrier_username="agent@example.com",
+        carrier_password="s3cret",
+    )
+
+    path = orchestrator._write_replay_config("pie", settings, tmp_path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_no_credentials_means_no_config_rather_than_an_empty_one(
+    tmp_path, monkeypatch
+) -> None:
+    """A portal may need no login, and an empty password would still be typed."""
+    # `Settings()` reads `.env`, so the absence has to be stated rather than
+    # assumed: a developer's own credentials would otherwise satisfy this.
+    monkeypatch.setattr(
+        orchestrator,
+        "resolve_carrier_creds",
+        lambda carrier_id, settings=None: CarrierCreds(login_url="https://carrier/form"),
+    )
+
+    assert orchestrator._write_replay_config("fixture", Settings(), tmp_path) is None

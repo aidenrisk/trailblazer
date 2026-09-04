@@ -180,6 +180,32 @@ class CarrierLogin:
             )
         return LoginResult(ok=True, url=page.url, steps=list(self.steps))
 
+    def wait_for_manual_completion(self, page: Page, timeout_s: int) -> LoginResult:
+        """Poll until the session is authenticated, or give up.
+
+        For a headed run stopped at a one-time code: the credentials were
+        accepted, the code is not in the credential store, and a human is
+        watching the window. Waiting is cheaper than failing.
+
+        Polls `authenticated()` rather than watching the MFA field disappear: a
+        portal may clear the prompt and still not have signed the session in,
+        and it is the signed-in marker that the crawl depends on.
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.authenticated(page):
+                log.info("login completed by hand carrier_id=%s", self.carrier_id)
+                return LoginResult(ok=True, url=page.url, steps=self.recorded_journey())
+            page.wait_for_timeout(2_000)
+
+        return LoginResult(
+            ok=False,
+            url=page.url,
+            mfa_required=True,
+            reason=f"no one-time code entered within {timeout_s}s",
+            steps=self.recorded_journey(),
+        )
+
     # -- steps a carrier may override --------------------------------------
 
     def navigate(self, page: Page) -> None:

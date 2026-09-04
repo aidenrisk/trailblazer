@@ -115,6 +115,30 @@ def test_a_skipped_login_still_reports_the_journey(page) -> None:
     assert [s.value for s in again.steps if s.action == "fill"] == ["$EMAIL", "$PASSWORD"]
 
 
+def test_a_headed_run_can_wait_for_a_code_entered_by_hand(page) -> None:
+    """The credentials were accepted; only the code is missing, and a human has it."""
+    mfa = CarrierCreds(login_url=FIXTURE_URL, username="mfa@example.com", password="s3cret")
+    login = FixtureLogin(mfa)
+    assert login.sign_in(page).mfa_required
+
+    # What a person entering the code in the window amounts to.
+    page.evaluate("document.getElementById('dashboard').hidden = false")
+
+    assert login.wait_for_manual_completion(page, timeout_s=10).ok
+
+
+def test_waiting_for_a_code_gives_up_rather_than_hanging(page) -> None:
+    mfa = CarrierCreds(login_url=FIXTURE_URL, username="mfa@example.com", password="s3cret")
+    login = FixtureLogin(mfa)
+    login.sign_in(page)
+
+    result = login.wait_for_manual_completion(page, timeout_s=3)
+
+    assert not result.ok and result.mfa_required
+    # The replay still needs the journey, whether or not this run completed it.
+    assert [s.action for s in result.steps] == ["goto", "fill", "fill", "click"]
+
+
 def test_an_unknown_carrier_has_no_login_rather_than_the_base_journey() -> None:
     """The base class cannot tell a signed-in page from a rejected one."""
     with pytest.raises(KeyError, match="no login class registered"):
