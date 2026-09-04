@@ -109,6 +109,15 @@ class Board:
     and its report credits a side that was never taken.
     """
 
+    pinned: dict[str, str] = field(default_factory=dict)
+    """fieldId -> the side a gate must hold for the current walk.
+
+    A nested gate is only on the page while its ancestors hold the sides that
+    reveal it. Taking an ancestor's owed side would unmount the target before
+    it can be reached, so the ancestors are pinned for the walk that goes after
+    it and their own owed sides are taken on a later walk.
+    """
+
     restarts: int = 0
     """Restarts issued on this page, counted against `MAX_RESTARTS`."""
 
@@ -165,12 +174,16 @@ class Board:
         than restarting forever on a branch already known to be unreachable.
 
         Absence is not counted: a gate the page has removed cannot be set, and
-        `remaining_absent` is what reports the side it still owes.
+        `remaining_absent` is what reports the side it still owes. Neither is a
+        pinned gate: it is holding a branch open for a deeper gate this walk.
         """
         return [
             f
             for f in self.order
-            if f in self.gates and self.gates[f].remaining and f in self.present
+            if f in self.gates
+            and self.gates[f].remaining
+            and f in self.present
+            and f not in self.pinned
         ]
 
     def remaining_absent(self) -> list[str]:
@@ -205,6 +218,7 @@ class Board:
         self.restarts += 1
         self.attempted.clear()
         self.advanced.clear()
+        self.pinned.clear()
         return self.walk
 
     def declare_unexplored(self, field_id: str, reason: str) -> None:
@@ -231,6 +245,7 @@ class Board:
             },
             "revealed": dict(self.revealed),
             "present": sorted(self.present),
+            "pinned": dict(self.pinned),
             "remainingAbsent": self.remaining_absent(),
             "walk": self.walk,
             "walkOf": dict(self.walk_of),

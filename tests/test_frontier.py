@@ -9,7 +9,7 @@ incomplete crawl rather than a visible failure.
 import pytest
 
 from trailblazer.agents.frontier import MAX_RESTARTS, Frontier, gate_sides
-from trailblazer.contracts.assignment import FillReport, Restart
+from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.page_description import (
     Action,
     Control,
@@ -628,3 +628,63 @@ def test_an_absent_gate_with_no_reachable_parent_is_declared_unexplored(
 
     assert frontier.next_assignment() is None
     assert "q_001" in frontier.summary()["unexplored"]
+
+
+def test_a_chained_nested_gate_restarts_to_the_deepest_reachable_ancestor(
+    frontier: Frontier,
+) -> None:
+    """q_003 under q_002 under q_001: with both ancestors absent, q_001 is set first."""
+    g1 = control("q_001", type="select", options=["Yes", "No"])
+    g2 = control(
+        "q_002",
+        type="select",
+        options=["Yes", "No"],
+        revealed_by=RevealedBy(fieldId="q_001", equals="Yes"),
+    )
+    g3 = control(
+        "q_003",
+        type="select",
+        options=["A", "B"],
+        revealed_by=RevealedBy(fieldId="q_002", equals="Yes"),
+    )
+
+    frontier.observe(page([g1, g2, g3]))
+    for field_id, sides in (("q_001", ["Yes", "No"]), ("q_002", ["Yes", "No"])):
+        for side in sides:
+            frontier.board.gates[field_id].take(side)
+        frontier.board.record_fill(field_id)
+    frontier.board.gates["q_003"].take("A")
+    frontier.board.record_fill("q_003")
+    frontier.observe(page([g1]))
+
+    decision = frontier.next_assignment()
+    assert isinstance(decision, Restart)
+    assert (decision.fieldId, decision.side) == ("q_001", "Yes")
+
+    frontier.open_restart(decision)
+    # Both ancestors are pinned, so neither is set to its owed side on this
+    # walk and q_003 stays reachable.
+    assert frontier.board.pinned == {"q_001": "Yes", "q_002": "Yes"}
+
+
+def test_a_pinned_ancestor_is_assigned_its_revealing_side_not_its_owed_one(
+    frontier: Frontier,
+) -> None:
+    """Taking the owed side of an intermediate gate would unmount the target."""
+    g1 = control("q_001", type="select", options=["Yes", "No"])
+    g2 = control(
+        "q_002",
+        type="select",
+        options=["Yes", "No"],
+        revealed_by=RevealedBy(fieldId="q_001", equals="Yes"),
+    )
+
+    frontier.observe(page([g1, g2]))
+    frontier.board.pinned["q_002"] = "Yes"
+    frontier.board.gates["q_002"].take("Yes")
+    frontier.board.record_fill("q_001")
+
+    decision = frontier.next_assignment()
+    assert isinstance(decision, Assignment)
+    assert (decision.fieldId, decision.value) == ("q_002", "Yes")
+    assert frontier.board.gates["q_002"].remaining == ["No"]

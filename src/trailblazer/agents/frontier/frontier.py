@@ -71,6 +71,13 @@ class Frontier:
         """
         self.board: Board | None = None
         self.page: PageDescription | None = None
+        self._pin_for: dict[str, str] = {}
+        """Ancestor sides to pin when the next restart's walk opens.
+
+        Set by `_restart_for_absent`, consumed by `open_restart`: the pins
+        belong to the walk the restart opens, which does not exist yet when the
+        Restart is returned.
+        """
 
     # ----------------------------------------------------------------- observe
 
@@ -233,6 +240,10 @@ class Frontier:
             raise RuntimeError(
                 f"restart names walk {restart.walk} but the board opened {walk}"
             )
+        # `restart()` cleared the previous walk's pins; a nested restart's
+        # ancestors are pinned for the walk it just opened.
+        self.board.pinned.update(self._pin_for)
+        self._pin_for = {}
         return walk
 
     # -------------------------------------------------------------- priorities
@@ -362,6 +373,11 @@ class Frontier:
         for field_id in self.board.unattempted():
             control = self.board.controls[field_id]
             gate = self.board.gates.get(field_id)
+            pinned = self.board.pinned.get(field_id)
+            if pinned is not None:
+                # Holding the branch that mounts a deeper gate. The side is
+                # already walked, so `_apply` credits nothing new.
+                return self._assign(control, pinned)
             if gate is not None and gate.remaining:
                 value = gate.remaining[0]
                 gate.take(value)
@@ -419,12 +435,12 @@ class Frontier:
         the nested gate appeared -- that side is already walked, so re-taking it
         adds no coverage of its own and exists only to render the child.
 
-        A gate whose revealing side is not known, or whose parent is itself
-        absent, is declared unexplored: without a reachable branch point there
-        is no page state in which the owed side could be taken.
+        A gate whose revealing side is not known is declared unexplored:
+        without a reachable branch point there is no page state in which the
+        owed side could be taken.
         """
         assert self.board is not None
-        parent, side = self._revealing_branch(field_id)
+        parent, side = self._reachable_ancestor(field_id)
         if parent is None or side is None:
             reason = f"gate is off the page and its revealing branch is unknown on {self.board.stage_id}"
             self.board.declare_unexplored(field_id, reason)
@@ -443,7 +459,60 @@ class Frontier:
             parent,
             side,
         )
+        self._pin_for = self._ancestor_sides(field_id)
         return Restart(fieldId=parent, side=side, walk=self.board.walk + 1)
+
+    def _ancestor_sides(self, field_id: str) -> dict[str, str]:
+        """Every ancestor of `field_id` and the side that keeps it revealed.
+
+        Applied as pins once the restart's walk opens, so the walk that goes
+        after a nested gate does not unmount it by taking an intermediate
+        gate's owed side on the way down.
+        """
+        assert self.board is not None
+        sides: dict[str, str] = {}
+        current = field_id
+        while True:
+            parent, side = self._revealing_branch(current)
+            if parent is None or side is None or parent in sides:
+                return sides
+            sides[parent] = side
+            current = parent
+
+    def _reachable_ancestor(self, field_id: str) -> tuple[str | None, str | None]:
+        """The nearest ancestor gate that is on the page, and the side to set it to.
+
+        Nested gates chain: `q_003` may be revealed by `q_002`, which is itself
+        revealed by `q_001`. When `q_003` owes a side, every ancestor above it
+        can be off the page too, so the chain is walked upward until a gate the
+        page currently renders is found -- that is the deepest branch point
+        reachable now, and setting it re-mounts the next level down. The owed
+        side is assigned once the board sees the gate again, which may take one
+        restart per level of nesting.
+
+        A cycle would mean a control revealed by its own descendant. The visited
+        set bounds the walk rather than trusting the scraper's links to be
+        acyclic.
+        """
+        assert self.board is not None
+        seen: set[str] = set()
+        current = field_id
+        while True:
+            parent, side = self._revealing_branch(current)
+            if parent is None or side is None:
+                return None, None
+            if parent in self.board.present:
+                return parent, side
+            if parent in seen:
+                log.warning(
+                    "revealedBy chain cycles stage_id=%s field_id=%s at=%s",
+                    self.board.stage_id,
+                    field_id,
+                    parent,
+                )
+                return None, None
+            seen.add(parent)
+            current = parent
 
     def _revealing_branch(self, field_id: str) -> tuple[str | None, str | None]:
         """The gate and the side of it that mount `field_id`.
@@ -454,9 +523,9 @@ class Frontier:
         assignment a control first appeared after, without the value, in which
         case the parent's first-taken side is the one it appeared under.
 
-        The parent must be on the page and be a gate: a restart sets a gate to a
-        named side, and a parent that is itself absent has no reachable branch
-        point of its own.
+        The parent must be a gate, because a restart sets a gate to a named
+        side. Presence is not checked here -- `_reachable_ancestor` walks the
+        chain upward and decides which link is settable now.
         """
         assert self.board is not None
         control = self.board.controls.get(field_id)
@@ -468,7 +537,7 @@ class Frontier:
         else:
             parent = self.board.revealed.get(field_id)
 
-        if parent is None or parent not in self.board.present:
+        if parent is None:
             return None, None
         gate = self.board.gates.get(parent)
         if gate is None:
