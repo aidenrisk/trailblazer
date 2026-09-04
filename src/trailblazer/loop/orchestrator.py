@@ -11,6 +11,7 @@ static description. Generator and validator slot in around the same seam.
 
 import os
 import uuid
+from pathlib import Path
 
 from playwright.sync_api import Page
 
@@ -19,7 +20,10 @@ from trailblazer.agents.browser.session import AttachedSession, BrowserSession, 
 from trailblazer.agents.form_filler.form_filler import fill_one
 from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.scraper.scraper import perceive
+from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport
+from trailblazer.contracts.generation import GenerationRequest
+from trailblazer.contracts.page_description import PageDescription
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger, log_contract
@@ -106,6 +110,7 @@ def run_crawl(
     headed: bool = False,
     settings: Settings | None = None,
     seed_values: dict[str, str] | None = None,
+    out_dir: Path | None = None,
 ) -> ScraperResult:
     """Crawl one carrier portal and return the last thing the scraper saw.
 
@@ -115,6 +120,13 @@ def run_crawl(
     settings = settings or get_settings()
     job_id = uuid.uuid4().hex[:12]
     ledger = RunLedger(job_id=job_id)
+    generator = Generator(
+        out_dir=Path(out_dir or settings.artifacts_dir) / job_id,
+        carrier=carrier_id,
+        business_type=business_types[0] if business_types else "",
+        insurance_type=insurance_types[0] if insurance_types else "",
+        login_url=url,
+    )
     frontier = Frontier(
         business_types=business_types,
         insurance_types=insurance_types,
@@ -144,17 +156,28 @@ def run_crawl(
             ledger,
         )
         log_contract(log, "ScraperResult", result)
-        result = _walk_page(tab, result, frontier, job_id, objective, settings, ledger)
+        result = _walk_page(
+            tab, result, frontier, job_id, objective, settings, ledger, generator
+        )
 
+    state = generator.state()
     log.info(
-        "crawl end job_id=%s stage_id=%s polarity=%s board=%s",
+        "crawl end job_id=%s stage_id=%s polarity=%s board=%s artifacts=%s",
         job_id,
         result.page.stageId,
         result.polarity,
         frontier.summary(),
+        state.model_dump(),
     )
     ledger.log_summary()
     return result
+
+
+def _label_for(page: PageDescription, field_id: str | None) -> str | None:
+    """The acting control's label, so the Generator need not re-find it."""
+    if field_id is None:
+        return None
+    return next((c.label for c in page.controls if c.fieldId == field_id), None)
 
 
 def _walk_page(
@@ -165,8 +188,9 @@ def _walk_page(
     objective: str,
     settings: Settings,
     ledger: RunLedger | None = None,
+    generator: Generator | None = None,
 ) -> ScraperResult:
-    """Drive perceive -> observe -> assign -> fill -> perceive until the page is done.
+    """Drive perceive -> observe -> assign -> fill -> generate -> perceive until done.
 
     Returns the last `ScraperResult`, which is what the crawl endpoint answers
     with until the Generator exists to produce the three artifacts.
@@ -181,6 +205,23 @@ def _walk_page(
 
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
+
+        if generator is not None:
+            # Appended per fill, not per page: the files on disk are the
+            # accumulation, so a run that dies mid-page leaves partial work
+            # rather than nothing.
+            generator.append(
+                GenerationRequest(
+                    job_id=job_id,
+                    carrier=generator.carrier,
+                    businessType=generator.business_type,
+                    insuranceType=generator.insurance_type,
+                    page=result.page,
+                    report=report,
+                    control_label=_label_for(result.page, report.fieldId),
+                ),
+                ledger,
+            )
 
         result = perceive(
             tab,

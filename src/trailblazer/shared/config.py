@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     attach_if_running: bool = True
     """Attach to a browser already serving CDP on `cdp_port` instead of launching."""
 
+    artifacts_dir: str = "outputs"
+    """Where a crawl writes its questions, metadata and replay script."""
+
     log_level: str = "INFO"
     """Level for the `trailblazer` logger. DEBUG adds payload sizes and locator misses."""
 

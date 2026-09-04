@@ -120,3 +120,36 @@ def test_a_page_that_never_finishes_raises_rather_than_looping(
         orchestrator._walk_page(
             None, _result(["q_000"]), frontier, "j1", "objective", Settings()
         )
+
+
+def test_every_fill_reaches_the_generator(monkeypatch, tmp_path, frontier: Frontier) -> None:
+    """A fill recorded in no artifact is a branch the replay script cannot take."""
+    from trailblazer.agents.generator import Generator
+
+    appended: list = []
+
+    def fake_fill(tab, assignment, settings, ledger=None):
+        return FillReport(
+            fieldId=assignment.fieldId,
+            intent=assignment.intent,
+            locator=assignment.locator,
+            ok=True,
+            valueUsed="x",
+        )
+
+    generator = Generator(
+        out_dir=tmp_path, carrier="pie", business_type="contractors",
+        insurance_type="workers_comp",
+    )
+    monkeypatch.setattr(generator, "append", lambda req, ledger=None: appended.append(req))
+    monkeypatch.setattr(orchestrator, "fill", fake_fill)
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: _result(["q_001", "q_002"]))
+
+    orchestrator._walk_page(
+        None, _result(["q_001", "q_002"]), frontier, "j1", "objective",
+        Settings(), None, generator,
+    )
+
+    assert [r.report.fieldId for r in appended] == ["q_001", "q_002"]
+    assert appended[0].control_label == "Field"
+    assert appended[0].carrier == "pie"
