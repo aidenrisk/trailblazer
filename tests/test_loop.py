@@ -509,3 +509,31 @@ def test_answers_are_filed_per_walk_as_the_loop_appends(
     )
 
     assert generator.walks == [1, 2]
+
+
+def test_the_published_route_is_the_first_that_reached_a_terminal(tmp_path) -> None:
+    """A route cut short by a restart is not a path to a terminal."""
+    from trailblazer.agents.generator import Generator
+
+    generator = Generator(
+        out_dir=tmp_path, carrier="c", business_type="b", insurance_type="i"
+    )
+    generator._answers = {1: {"q_001": "LLC"}, 2: {"q_001": "Sole"}, 3: {"q_001": "LLC"}}
+    generator.record_route_end(1, "form_page_2_details", settled=False)
+    generator.record_route_end(2, "quote_page", settled=True)
+    generator.record_route_end(3, "quote_page", settled=True)
+
+    assert generator.first_settled_walk() == 2
+
+
+def test_no_settled_route_leaves_the_choice_to_the_caller(tmp_path) -> None:
+    """`None` rather than a plausible-looking route the crawl never finished."""
+    from trailblazer.agents.generator import Generator
+
+    generator = Generator(
+        out_dir=tmp_path, carrier="c", business_type="b", insurance_type="i"
+    )
+    generator._answers = {1: {"q_001": "x"}}
+    generator.record_route_end(1, "form_page_2_details", settled=False)
+
+    assert generator.first_settled_walk() is None

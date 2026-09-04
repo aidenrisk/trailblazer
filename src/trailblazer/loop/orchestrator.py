@@ -170,12 +170,19 @@ def run_crawl(
             tab, result, frontier, job_id, objective, settings, ledger, generator
         )
 
-    # The last walk that answered anything. Its answers are a path the form
-    # actually rendered; the per-field latest across walks is not. A
-    # terminal-aware choice needs the Validator's outcome, which runs after this
-    # returns. A crawl that filled nothing has no walk to publish.
+    # The first route that ran to a terminal page. Its answers are one path the
+    # form actually rendered, which the per-field latest across routes is not.
+    # Whether that terminal is a quote or an appetite decline is the Validator's
+    # determination and it runs after this returns; a settled page is as close
+    # as the crawl can get. A crawl that filled nothing has no route to publish.
     if generator.walks:
-        generator.publish_walk(generator.walks[-1])
+        chosen = generator.first_settled_walk()
+        if chosen is None:
+            chosen = generator.walks[-1]
+            log.warning(
+                "no route reached a terminal page; publishing walk=%d unsettled", chosen
+            )
+        generator.publish_walk(chosen)
 
     state = generator.state()
     log.info(
@@ -230,10 +237,14 @@ def _walk_page(
 
         decision = frontier.next_assignment()
         if decision is None:
+            _record_route_end(generator, frontier, result)
             _record_branch_exploration(generator, frontier)
             return result
 
         if isinstance(decision, Restart):
+            # The route ends here: the restart re-enters the flow and everything
+            # after it belongs to the next one.
+            _record_route_end(generator, frontier, result)
             result, prefix, report = _restart_walk(
                 tab, result, decision, prefix, entry_url, frontier,
                 job_id, objective, settings, ledger, generator,
@@ -437,6 +448,22 @@ def _prefix_before(
         len(prefix),
     )
     return prefix[:cut]
+
+
+def _record_route_end(
+    generator: Generator | None, frontier: Frontier, result: ScraperResult
+) -> None:
+    """Note where the route under way stopped, and whether the page had settled.
+
+    A settled page is a terminal the route actually reached; a route that ends
+    because a restart re-enters the flow did not. Which terminal it is -- quote
+    or appetite decline -- is the Validator's determination.
+    """
+    if generator is None:
+        return
+    generator.record_route_end(
+        frontier.walk, result.page.stageId, result.polarity == "-ve"
+    )
 
 
 def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:

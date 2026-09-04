@@ -159,6 +159,13 @@ class Generator:
 
         self._published_walk: int | None = None
         """The walk whose answers are currently written as `exampleValue`."""
+
+        self._route_ends: dict[int, tuple[str, bool]] = {}
+        """walk -> (the stage it ended on, whether the page had settled).
+
+        A route cut short by a restart is not a path to a terminal, so it is a
+        worse `exampleValue` set than one that ran to the end of the flow.
+        """
         self._stage_index: dict[str, int] = {}
 
     # -- identity ---------------------------------------------------------
@@ -552,6 +559,31 @@ class Generator:
             exploration.unexplored.append({"questionId": qid, "reason": reason})
 
         self._flush()
+
+    def record_route_end(self, walk: int, stage_id: str, settled: bool) -> None:
+        """Note how route `walk` ended, so a complete one can be picked to publish.
+
+        `settled` is the scraper's `-ve` polarity: the page stopped changing, so
+        the route reached a terminal rather than being cut short by a restart.
+        Whether that terminal is a quote or an appetite decline is the
+        Validator's determination and is not known here.
+        """
+        self._route_ends[walk] = (stage_id, settled)
+        log.info("route ended walk=%d stage_id=%s settled=%s", walk, stage_id, settled)
+
+    def first_settled_walk(self) -> int | None:
+        """The earliest route that reached a terminal page and answered something.
+
+        Routes are walked in a stable order, so the first settled one is a
+        deterministic choice rather than whichever route happened to run last.
+        `None` when no route settled, which leaves the caller to decide whether
+        publishing an unfinished route is better than publishing none.
+        """
+        for walk in sorted(self._answers):
+            end = self._route_ends.get(walk)
+            if end is not None and end[1]:
+                return walk
+        return None
 
     def publish_walk(self, walk: int) -> list[str]:
         """Fix one walk's answers as the `exampleValue` set, and return the ids set.
