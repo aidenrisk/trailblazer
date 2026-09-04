@@ -1,7 +1,7 @@
 """The scraper's output contract: one page of a carrier form, described.
 
 Field names are camelCase because the wire format *is* the contract (see
-`scraper_io.txt`). `populate_by_name` lets Python callers use the same names
+the architecture spec, §3.1). `populate_by_name` lets Python callers use those names
 without an alias layer.
 """
 
@@ -77,8 +77,8 @@ class Control(BaseModel):
     right control after the model returns. No default, so it lands in the JSON
     schema's `required` list: a model that drops it fails structured-output
     parsing loudly instead of leaving the join to guesswork. `exclude=True`
-    keeps it out of the serialized output, which `scraper_io.txt` fixes at
-    exactly eight fields.
+    keeps it out of the serialized output, which the architecture spec fixes at
+    exactly nine fields.
     """
 
     label: str

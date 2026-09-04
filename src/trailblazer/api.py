@@ -21,7 +21,7 @@ app = FastAPI(title="Trailblazer", version="0.1.0")
 
 
 class CrawlRequest(BaseModel):
-    """Exactly the payload documented in `scraper_io.txt`.
+    """Exactly the payload documented in the architecture spec, section 1.
 
     No `url`: a crawl starts from the carrier's own portal URL, which is looked
     up from `carrier_id` along with its username and password. The client never

@@ -71,7 +71,7 @@ def _find_button(page: Page, patterns: list[str]) -> str | None:
 
     The emitted locator carries the button's *visible* text, not the lowercase
     search pattern that found it, so a "Next" button yields
-    `button:has-text("Next")` as `scraper_io.txt` documents. `:has-text()` is
+    `button:has-text("Next")` as the architecture spec documents. `:has-text()` is
     case-insensitive either way; matching the documented literal is what makes
     the output comparable against the contract.
     """
