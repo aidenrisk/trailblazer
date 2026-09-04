@@ -44,10 +44,19 @@ class Frontier:
         business_types: list[str],
         insurance_types: list[str],
         ledger: RunLedger | None = None,
+        seed_values: dict[str, str] | None = None,
     ) -> None:
         self.business_types = business_types
         self.insurance_types = insurance_types
         self.ledger = ledger
+        self.seed_values = seed_values or {}
+        """Values the crawl must not invent, keyed by a label substring.
+
+        Two kinds. A credential is a placeholder the filler resolves at typing
+        time, so `$EMAIL` and `$PASSWORD` reach the metadata artifact instead of
+        the literal. A class code decides which eligibility questions render at
+        all, so a guessed one silently crawls the wrong branch of the form.
+        """
         self.board: Board | None = None
         self.page: PageDescription | None = None
 
@@ -122,7 +131,8 @@ class Frontier:
         """The next thing to do, or None when the page is done.
 
         Priority, highest first: clear a blocker, advance a page with nothing
-        fillable, act on an unattempted field, walk a gate's remaining side.
+        fillable, act on an unattempted field, walk a gate's remaining side,
+        advance a page whose fields are all done.
         """
         started = time.monotonic()
         if self.board is None or self.page is None:
@@ -133,6 +143,7 @@ class Frontier:
             or self._advance_to_target()
             or self._first_unattempted()
             or self._walk_remaining_gate()
+            or self._advance_when_filled()
         )
 
         if assignment is None:
@@ -187,6 +198,39 @@ class Frontier:
 
         self.board.dismissed_blockers.add(action.locator)
         return Assignment(intent="advance", locator=action.locator)
+
+    def _advance_when_filled(self) -> Assignment | None:
+        """Press the page's forward control once every field has been acted on.
+
+        `next` is the scraper's measured forward locator, so this covers a form
+        page's "Next" and a login page's "Sign In" by the same rule -- a login
+        page is a form with two fields and a submit, and needs no special case.
+        """
+        assert self.board is not None and self.page is not None
+        if not self.page.next or self.page.next in self.board.advanced:
+            return None
+        self.board.advanced.add(self.page.next)
+        log.info("advancing stage_id=%s locator=%r", self.board.stage_id, self.page.next)
+        return Assignment(intent="advance", locator=self.page.next)
+
+    def _seed_for(self, control: Control) -> str | None:
+        """A value the caller supplied for this control, matched on its label.
+
+        Matched by label substring because `Control` carries no canonical key --
+        that is assigned later, by the Generator -- and `fieldId` is a per-page
+        counter that names nothing.
+        """
+        haystack = f"{control.label} {control.locator}".casefold()
+        for needle, value in self.seed_values.items():
+            if needle.casefold() in haystack:
+                log.info(
+                    "seeded field_id=%s label=%r value=%s",
+                    control.fieldId,
+                    control.label,
+                    value if value.startswith("$") else "<supplied>",
+                )
+                return value
+        return None
 
     def _blocking_action(self) -> Action | None:
         """The first un-clicked action that would clear a blocker, if the page has one.
@@ -322,7 +366,12 @@ class Frontier:
                     fieldId=control.fieldId,
                     value=value,
                 )
-            return Assignment(intent="fill", locator=control.locator, fieldId=control.fieldId)
+            return Assignment(
+                intent="fill",
+                locator=control.locator,
+                fieldId=control.fieldId,
+                value=self._seed_for(control),
+            )
 
         option_locator = None
         if value is not None:

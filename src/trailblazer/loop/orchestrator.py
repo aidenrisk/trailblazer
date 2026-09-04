@@ -27,6 +27,15 @@ from trailblazer.shared.config import Settings, get_settings
 
 log = get_logger(__name__)
 
+LOGIN_SEEDS = {"email": "$EMAIL", "password": "$PASSWORD"}
+"""Fields the crawl must not invent a value for.
+
+A login page is an ordinary form, so the filler fills it like any other -- but
+typing an invented address gets the run nowhere. The placeholder is resolved
+from the carrier's credentials at the moment of typing, so the literal never
+enters an assignment, a report or the metadata artifact.
+"""
+
 MAX_ASSIGNMENTS = 60
 """Assignments allowed on one page before the walk is abandoned.
 
@@ -96,6 +105,7 @@ def run_crawl(
     business_types: list[str],
     headed: bool = False,
     settings: Settings | None = None,
+    seed_values: dict[str, str] | None = None,
 ) -> ScraperResult:
     """Crawl one carrier portal and return the last thing the scraper saw.
 
@@ -106,7 +116,10 @@ def run_crawl(
     job_id = uuid.uuid4().hex[:12]
     ledger = RunLedger(job_id=job_id)
     frontier = Frontier(
-        business_types=business_types, insurance_types=insurance_types, ledger=ledger
+        business_types=business_types,
+        insurance_types=insurance_types,
+        ledger=ledger,
+        seed_values=seed_values or LOGIN_SEEDS,
     )
     log.info(
         "crawl start job_id=%s carrier_id=%s url=%s insurance_types=%s business_types=%s",
