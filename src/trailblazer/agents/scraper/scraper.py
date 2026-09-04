@@ -21,6 +21,7 @@ from trailblazer.agents.scraper.perceive import get_perceiver, payload_to_text
 from trailblazer.contracts.page_description import Action, Control, PageDescription
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.cost import CostTracker
+from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings, get_settings
 from trailblazer.shared.models import get_model
@@ -194,7 +195,12 @@ def _set_measured(control: Control, locator: str, unique: bool) -> None:
     control.unique = unique
 
 
-def perceive(page: Page, request: PerceiveRequest, settings: Settings | None = None) -> ScraperResult:
+def perceive(
+    page: Page,
+    request: PerceiveRequest,
+    settings: Settings | None = None,
+    ledger: RunLedger | None = None,
+) -> ScraperResult:
     """Look at `page`, describe it, and diff against `request.prior`.
 
     The verified extractor payload goes in the human message so the model has
@@ -269,14 +275,24 @@ def perceive(page: Page, request: PerceiveRequest, settings: Settings | None = N
     )
 
     scraper_result = diff_pages(described, request.prior, request.assignment)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     log.info(
         "perceive end job_id=%s stage_id=%s controls=%d polarity=%s ms=%d",
         request.job_id,
         described.stageId,
         len(described.controls),
         scraper_result.polarity,
-        (time.monotonic() - started) * 1000,
+        elapsed_ms,
     )
+    if ledger is not None:
+        ledger.record(
+            agent="scraper",
+            action="perceive",
+            detail=described.stageId,
+            usd=total or 0.0,
+            ms=elapsed_ms,
+            unpriced=total is None,
+        )
     return scraper_result
 
 

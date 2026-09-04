@@ -128,6 +128,7 @@ def run_crawl(
             tab,
             PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
             settings,
+            ledger,
         )
         log_contract(log, "ScraperResult", result)
         result = _walk_page(tab, result, frontier, job_id, objective, settings, ledger)
@@ -180,6 +181,7 @@ def _walk_page(
                 else None,
             ),
             settings,
+            ledger,
         )
         log_contract(log, "ScraperResult", result)
 
