@@ -57,7 +57,13 @@ class Assignment(BaseModel):
     """
 
     constraintHint: str | None = None
-    """A format requirement learned from a previous rejection of this field."""
+    """What is known about the shape the field wants.
+
+    Two sources. `Control.formatHint` is what the page states about itself --
+    the placeholder, a `pattern`, a length or numeric bound -- and is available
+    before the first attempt. A rejection replaces it with what the page
+    actually complained about, which is the stronger evidence.
+    """
 
 
 class Restart(BaseModel):

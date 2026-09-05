@@ -109,6 +109,18 @@ class Control(BaseModel):
 
     revealedBy: RevealedBy | None
 
+    formatHint: str = Field(default="", exclude=True)
+    """What the page itself says about the shape it wants: the placeholder, a
+    `pattern`, a length or numeric bound, a `title`, the `aria-describedby` text.
+
+    Measured by the extractor and restored after the model returns, like
+    `locator`. It reaches the filler's value chooser, which otherwise learns a
+    format only by having a value rejected -- a full page round trip and a
+    second model call to discover something the DOM already stated.
+
+    `exclude=True` keeps the serialized shape at the nine fields the spec fixes.
+    """
+
     @field_validator("locator")
     @classmethod
     def _reject_snapshot_ref(cls, v: str) -> str:

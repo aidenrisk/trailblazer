@@ -243,6 +243,32 @@
         ariaLabelledbyText: byLabelled,
         labelText: forLabel,
         placeholder: el.getAttribute('placeholder') || '',
+        // What the page already says about the shape it wants. Read here rather
+        // than discovered by being rejected: a date input carrying
+        // placeholder="MM/DD/YYYY" states its format before the first attempt.
+        formatHints: [
+          el.getAttribute('placeholder'),
+          el.getAttribute('pattern') ? `pattern ${el.getAttribute('pattern')}` : '',
+          el.getAttribute('maxlength') ? `at most ${el.getAttribute('maxlength')} characters` : '',
+          el.getAttribute('minlength') ? `at least ${el.getAttribute('minlength')} characters` : '',
+          el.getAttribute('inputmode') ? `inputmode ${el.getAttribute('inputmode')}` : '',
+          el.getAttribute('type') === 'number' || el.getAttribute('type') === 'range'
+            ? [
+                el.getAttribute('min') ? `min ${el.getAttribute('min')}` : '',
+                el.getAttribute('max') ? `max ${el.getAttribute('max')}` : '',
+                el.getAttribute('step') ? `step ${el.getAttribute('step')}` : '',
+              ].filter(Boolean).join(', ')
+            : '',
+          el.getAttribute('title') || '',
+          (el.getAttribute('aria-describedby') || '')
+            .split(/\s+/)
+            .map((id) => {
+              const n = id && el.ownerDocument.getElementById(id);
+              return n ? (n.textContent || '').trim() : '';
+            })
+            .filter(Boolean)
+            .join(' '),
+        ].filter(Boolean).join('; ').slice(0, 300),
         accessibleName: accName,
         required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
         // readonly is grouped with disabled: both mean the value cannot be set,

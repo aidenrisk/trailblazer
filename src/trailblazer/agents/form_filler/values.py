@@ -36,6 +36,7 @@ def choose_value(
     settings: Settings,
     business_type: str = "",
     state: str = "",
+    control_type: str = "",
 ) -> tuple[str, float, bool]:
     """Decide what to type into one field.
 
@@ -65,8 +66,10 @@ def choose_value(
         lines.append(f"State the crawl is scoped to: {state}")
     if business_type:
         lines.append(f"Business type: {business_type}")
+    if control_type:
+        lines.append(f"Control type: {control_type}")
     if constraint_hint:
-        lines.append(f"Known format requirement: {constraint_hint}")
+        lines.append(f"What the page says about the format: {constraint_hint}")
     if error_text:
         lines.append(f"The page rejected the previous value with: {error_text}")
         lines.append("Return a corrected value that satisfies it.")

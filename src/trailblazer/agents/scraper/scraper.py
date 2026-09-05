@@ -140,7 +140,11 @@ def restore_measured_locators(
                 source["unique"],
             )
         _set_measured(
-            control, source["locator"], source["unique"], bool(source.get("disabled"))
+            control,
+            source["locator"],
+            source["unique"],
+            bool(source.get("disabled")),
+            str(source.get("formatHints") or ""),
         )
 
     for control in described.controls:
@@ -184,7 +188,13 @@ def _positional_is_safe(described: PageDescription, payload_controls: list[dict]
     return True
 
 
-def _set_measured(control: Control, locator: str, unique: bool, disabled: bool = False) -> None:
+def _set_measured(
+    control: Control,
+    locator: str,
+    unique: bool,
+    disabled: bool = False,
+    format_hint: str = "",
+) -> None:
     """Assign the measured fields, bypassing nothing the contract checks.
 
     Built from the live field values rather than `model_dump()`, because `key`
@@ -192,11 +202,17 @@ def _set_measured(control: Control, locator: str, unique: bool, disabled: bool =
     result would then fail on a field the object actually has.
     """
     fields = {name: getattr(control, name) for name in Control.model_fields}
-    measured = {"locator": locator, "unique": unique, "disabled": disabled}
+    measured = {
+        "locator": locator,
+        "unique": unique,
+        "disabled": disabled,
+        "formatHint": format_hint,
+    }
     Control.model_validate({**fields, **measured})
     control.locator = locator
     control.unique = unique
     control.disabled = disabled
+    control.formatHint = format_hint
 
 
 def perceive(

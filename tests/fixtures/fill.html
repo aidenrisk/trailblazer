@@ -8,6 +8,12 @@
   <label for="legalName">Legal Business Name</label>
   <input type="text" id="legalName" name="legalName">
 
+  <!-- States its format before any attempt, which is what the crawl should read
+       rather than discover by being rejected. -->
+  <label for="effectiveDate">Policy Effective Date</label>
+  <input type="text" id="effectiveDate" name="effectiveDate"
+         placeholder="MM/DD/YYYY" maxlength="10" title="Two-digit month and day">
+
   <!-- Validates on input, and the only reliable signal is aria-invalid: no
        pattern attribute, no maxlength, no aria-describedby. Mirrors Pie. -->
   <div id="feinRow">

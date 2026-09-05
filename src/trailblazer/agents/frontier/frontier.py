@@ -799,6 +799,7 @@ class Frontier:
                 locator=control.locator,
                 fieldId=control.fieldId,
                 value=self._seed_for(control),
+                constraintHint=control.formatHint or None,
             )
 
         option_locator = None

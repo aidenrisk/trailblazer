@@ -509,3 +509,35 @@ def test_a_fill_never_takes_the_visible_one(page) -> None:
     one is invisible downstream, since the locator still resolves to one node."""
     with pytest.raises(LocatorError, match="not unique"):
         write_tools.fill(page, "input", "anything")
+
+
+def test_the_pages_own_format_reaches_the_chooser_before_any_rejection(
+    page, monkeypatch
+) -> None:
+    """A rejection costs a page round trip and a second model call to learn
+    what the placeholder already said."""
+    calls = _no_llm(monkeypatch, "01/15/2027")
+
+    fill_one(
+        page,
+        Assignment(
+            intent="fill",
+            locator="#effectiveDate",
+            fieldId="q_030",
+            constraintHint="MM/DD/YYYY; at most 10 characters; Two-digit month and day",
+        ),
+        SETTINGS,
+    )
+
+    assert calls[0]["hint"] == "MM/DD/YYYY; at most 10 characters; Two-digit month and day"
+    assert calls[0]["error_text"] is None
+    assert page.locator("#effectiveDate").input_value() == "01/15/2027"
+
+
+def test_the_control_type_reaches_the_chooser(page, monkeypatch) -> None:
+    """`input[type=date]` states its shape with no placeholder at all."""
+    calls = _no_llm(monkeypatch, "Acme")
+
+    fill_one(page, Assignment(intent="fill", locator="#legalName", fieldId="q_001"), SETTINGS)
+
+    assert calls[0]["control_type"] == "input[type=text]"

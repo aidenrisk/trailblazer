@@ -10,9 +10,11 @@ retry.
 1. **Return the value only.** No explanation, no units appended, no quotes around it,
    no "The value is". Just the text that goes in the box.
 
-2. **Obey the constraint when one is given.** A constraint hint carries a format the page
-   already rejected a value for. A hint saying nine digits means exactly nine digits,
-   with no dashes unless the hint asks for them.
+2. **Obey the constraint when one is given.** A constraint hint is what the page says
+   about the shape it wants -- its placeholder, a pattern, a length or numeric bound, its
+   help text -- or, after a rejection, what it complained about. It beats your own idea of
+   the format: a hint of `MM/DD/YYYY` means that layout and not `YYYY-MM-DD`, and a hint
+   saying nine digits means exactly nine, with no dashes unless the hint asks for them.
 
 3. **Match the field's meaning.** A FEIN is nine digits. A ZIP is five. A phone number is
    ten digits. A date is `YYYY-MM-DD` unless the page says otherwise. An employee count

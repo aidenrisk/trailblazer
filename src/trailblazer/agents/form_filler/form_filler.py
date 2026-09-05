@@ -291,6 +291,7 @@ def _do_fill(
             settings=settings,
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
+            control_type=_type_of(page, assignment.locator),
         )
 
     write_tools.fill(page, assignment.locator, value)
@@ -312,6 +313,7 @@ def _do_fill(
             settings=settings,
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
+            control_type=_type_of(page, assignment.locator),
         )
         usd += call_usd
         unpriced = unpriced or call_unpriced
@@ -370,6 +372,29 @@ def _label_of(page: Page, locator: str) -> str | None:
         return write_tools.resolve(page, locator).evaluate(_LABEL_JS)
     except (PlaywrightError, LocatorError):
         return None
+
+
+def _type_of(page: Page, locator: str) -> str:
+    """The control's own type, read off the live element.
+
+    `<input type="date">` and `<input type="tel">` state the shape they want
+    without any placeholder or pattern, which Pie's inputs do not carry. Read
+    here rather than taken from `Control.type`, whose five-value enum is the
+    model's normalisation and collapses `date`, `tel` and `email` detail away.
+    """
+    try:
+        return write_tools.resolve(page, locator).evaluate(_TYPE_JS) or ""
+    except (PlaywrightError, LocatorError):
+        return ""
+
+
+_TYPE_JS = """
+(el) => {
+  const tag = el.tagName.toLowerCase();
+  const type = (el.getAttribute('type') || '').toLowerCase();
+  return type && tag === 'input' ? `input[type=${type}]` : tag;
+}
+"""
 
 
 def _rejection_text(page: Page, locator: str) -> str | None:
