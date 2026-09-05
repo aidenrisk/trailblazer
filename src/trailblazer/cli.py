@@ -61,6 +61,12 @@ def crawl(
     validate: bool = typer.Option(
         False, "--validate", help="Replay the generated script against its own walk."
     ),
+    start_text: str | None = typer.Option(
+        None,
+        "--start-text",
+        help="Text of the control that starts an application, e.g. 'Get a Quote'. "
+        "Needed when the portal lands on a dashboard rather than the form.",
+    ),
 ) -> None:
     """Crawl one carrier's form and write the three artifacts.
 
@@ -81,6 +87,7 @@ def crawl(
         settings=settings,
         out_dir=out,
         validate_script=validate,
+        start_text=start_text,
     )
     typer.echo(json.dumps(result.model_dump(mode="json"), indent=2))
 

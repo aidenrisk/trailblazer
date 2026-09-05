@@ -57,10 +57,23 @@ class Frontier:
         insurance_types: list[str],
         ledger: RunLedger | None = None,
         seed_values: dict[str, str] | None = None,
+        start_text: str | None = None,
     ) -> None:
         self.business_types = business_types
         self.insurance_types = insurance_types
         self.ledger = ledger
+        self.start_text = start_text or ""
+        """The text of the control that starts an application, when the flow
+        needs one clicked before any form renders.
+
+        Pie's dashboard is such a page: a search box, filter toggles and a
+        paginated table of past submissions, with "Get a Quote" among them.
+        Without this the crawl filled the search box and paged the table --
+        31 perceives on one page, a model call each -- because no action matched
+        the job's types. Reaches the metadata artifact as
+        `config.createSubmissionText`.
+        """
+
         self.seed_values = seed_values or {}
         """Values the crawl must not invent, keyed by a label substring.
 
@@ -422,14 +435,25 @@ class Frontier:
         return Assignment(intent="advance", locator=action.locator)
 
     def _target_action(self) -> Action | None:
-        """The un-clicked action to advance on, when the page holds nothing fillable.
+        """The un-clicked action that starts or continues the crawl's own journey.
 
         A unique action is preferred over a non-unique one: a portal that repeats
         "Get a Quote" in a header and again in a card offers two locators for one
         destination, and only one of them resolves to a single node.
+
+        An action matching the target is taken even when the page has fillable
+        controls. Pie's dashboard is the case: it carries a search box, a row of
+        filter toggles and a paginated table of past submissions, none of which
+        are the application. Filling first meant the crawl typed into the search
+        box, paged the table with its "Next" button and never reached "Get a
+        Quote" -- 31 perceives on one page, a model call each.
+
+        Where nothing matches, the page must hold nothing fillable before an
+        action is taken: on a form page every unmatched action is chrome, and
+        clicking one abandons the form.
         """
         assert self.board is not None and self.page is not None
-        if self.page.controls or not self.page.actions:
+        if not self.page.actions:
             return None
 
         candidates = [a for a in self.page.actions if a.locator not in self.board.advanced]
@@ -437,25 +461,39 @@ class Frontier:
             return None
 
         matched = [a for a in candidates if self._matches_target(a)]
-        pool = matched or candidates
-        chosen = next((a for a in pool if a.unique), pool[0])
-        if not matched:
-            log.warning(
-                "no action matches the crawl target stage_id=%s types=%s advancing on %r",
-                self.board.stage_id,
-                ",".join(self.business_types + self.insurance_types),
-                chosen.label,
-            )
+        if matched:
+            return next((a for a in matched if a.unique), matched[0])
+
+        if self.page.controls:
+            return None
+        chosen = next((a for a in candidates if a.unique), candidates[0])
+        log.warning(
+            "no action matches the crawl target stage_id=%s types=%s advancing on %r",
+            self.board.stage_id,
+            ",".join(self.business_types + self.insurance_types),
+            chosen.label,
+        )
         return chosen
 
     def _matches_target(self, action: Action) -> bool:
-        """Case-insensitive substring of the job's types against label and href.
+        """True when the action names the job's business or insurance type.
 
         Both sides are normalised because the job names a type as an identifier
         (`workers_comp`) and the page renders it as prose ("Workers Comp Quote"):
         matching the raw strings never fires.
+
+        `start_text` matches first and exactly. The job's types are our
+        vocabulary, not the portal's: Pie links to `/work-comp/business-info`,
+        which normalises to "work comp", and the phrase "workers comp" is not a
+        substring of it -- so a type match said no and the crawl walked the
+        dashboard instead of starting the application. Guessing at stems and
+        prefixes to close that gap matches on nothing ("cont" pairs
+        `contractors` with "Contact Us"); the portal's own wording is a fact to
+        be configured, so `createSubmissionText` carries it.
         """
         haystack = _normalise(f"{action.label} {action.href}")
+        if self.start_text:
+            return _normalise(self.start_text) in haystack
         return any(
             _normalise(t) in haystack for t in self.business_types + self.insurance_types
         )

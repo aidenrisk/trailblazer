@@ -433,12 +433,50 @@ def test_an_action_already_clicked_is_not_re_issued(frontier: Frontier) -> None:
     assert frontier.page_done()
 
 
-def test_actions_are_ignored_while_the_page_still_holds_controls(frontier: Frontier) -> None:
-    """`advance` is for a page with nothing fillable; fields come first."""
-    actions = [Action(label="Workers Comp", href="", locator="#wc", unique=True)]
+def test_an_unmatched_action_is_ignored_while_the_page_still_holds_controls(
+    frontier: Frontier,
+) -> None:
+    """On a form page every unmatched action is chrome; clicking one leaves the form."""
+    actions = [Action(label="Contact Us", href="/help", locator="#help", unique=True)]
     frontier.observe(page([control("q_001")], actions=actions))
 
     assert frontier.next_assignment().fieldId == "q_001"
+
+
+def test_the_action_starting_the_journey_outranks_the_page_it_sits_on() -> None:
+    """Pie's dashboard carries a search box, filters and a paginated table.
+
+    Filling first meant typing into the search box and paging the table with its
+    "Next" button, never reaching "Get a Quote": 31 perceives on one page.
+    """
+    started = Frontier(
+        business_types=["contractors"],
+        insurance_types=["workers_comp"],
+        start_text="Get a Quote",
+    )
+    actions = [
+        Action(label="Get a Quote", href="/work-comp/business-info", locator="#quote", unique=True)
+    ]
+    started.observe(page([control("q_001", label="Search")], actions=actions))
+
+    assignment = started.next_assignment()
+
+    assert assignment.intent == "advance"
+    assert assignment.locator == "#quote"
+
+
+def test_the_start_control_is_matched_on_its_own_text_not_the_job_types() -> None:
+    """`workers_comp` is our identifier; Pie's href says "work comp"."""
+    started = Frontier(
+        business_types=["contractors"],
+        insurance_types=["workers_comp"],
+        start_text="Get a Quote",
+    )
+    quote = Action(label="Get a Quote", href="/work-comp/business-info", locator="#q", unique=True)
+    other = Action(label="Appetite Checker", href="/appetite", locator="#a", unique=True)
+
+    assert started._matches_target(quote)
+    assert not started._matches_target(other)
 
 
 # --------------------------------------------------------------------------- #
