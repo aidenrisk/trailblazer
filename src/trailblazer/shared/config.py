@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     """Level for the `trailblazer` logger. DEBUG adds payload sizes and locator misses."""
 
+    crawl_state: str = "California"
+    """The state the crawl is scoped to. Reaches the value chooser, which must put
+    a real address of that state into every location field: a ZIP from elsewhere
+    walks a path the flow does not cover."""
+
+    crawl_business_type: str = ""
+    """The business the values must hang together for, set per run by the crawl."""
+
     carrier_url: str | None = None
     """Dev-only stand-in for `carrier_creds.login_url`. See `dev_carrier_creds.py`."""
 

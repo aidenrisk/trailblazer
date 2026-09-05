@@ -289,6 +289,8 @@ def _do_fill(
             constraint_hint=assignment.constraintHint,
             error_text=None,
             settings=settings,
+            business_type=settings.crawl_business_type,
+            state=settings.crawl_state,
         )
 
     write_tools.fill(page, assignment.locator, value)
@@ -308,6 +310,8 @@ def _do_fill(
             constraint_hint=assignment.constraintHint,
             error_text=error_text,
             settings=settings,
+            business_type=settings.crawl_business_type,
+            state=settings.crawl_state,
         )
         usd += call_usd
         unpriced = unpriced or call_unpriced

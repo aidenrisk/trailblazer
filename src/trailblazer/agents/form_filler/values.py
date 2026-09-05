@@ -12,6 +12,7 @@ prose is trimmed to its first line rather than being parsed.
 """
 
 import time
+from datetime import date
 from pathlib import Path
 
 from trailblazer.observability.cost import CostTracker
@@ -33,6 +34,8 @@ def choose_value(
     constraint_hint: str | None,
     error_text: str | None,
     settings: Settings,
+    business_type: str = "",
+    state: str = "",
 ) -> tuple[str, float, bool]:
     """Decide what to type into one field.
 
@@ -48,7 +51,20 @@ def choose_value(
     model = get_model(settings)
     tracker = CostTracker(step="choose_value")
 
-    lines = [f"Field: {label}", f"Locator: {locator}", f"Page: {url}"]
+    # Today's date is sent because the model has no clock: without it a policy
+    # effective date came back in the past, which every carrier rejects. The
+    # state and business type scope the values the same way -- a ZIP from the
+    # wrong state walks a path the flow does not cover.
+    lines = [
+        f"Field: {label}",
+        f"Locator: {locator}",
+        f"Page: {url}",
+        f"Today's date: {date.today().isoformat()}",
+    ]
+    if state:
+        lines.append(f"State the crawl is scoped to: {state}")
+    if business_type:
+        lines.append(f"Business type: {business_type}")
     if constraint_hint:
         lines.append(f"Known format requirement: {constraint_hint}")
     if error_text:

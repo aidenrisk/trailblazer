@@ -139,6 +139,7 @@ def run_crawl(
     seed_values: dict[str, str] | None = None,
     out_dir: Path | None = None,
     validate_script: bool = False,
+    start_text: str | None = None,
 ) -> ScraperResult:
     """Crawl one carrier portal and return the last thing the scraper saw.
 
@@ -146,6 +147,10 @@ def run_crawl(
     against a page's actions to pick which branch of a chooser page to take.
     """
     settings = settings or get_settings()
+    if business_types:
+        # The value chooser needs the business to make its figures hang together,
+        # and it only ever receives `settings`.
+        settings = settings.model_copy(update={"crawl_business_type": business_types[0]})
     job_id = uuid.uuid4().hex[:12]
     ledger = RunLedger(job_id=job_id)
     generator = Generator(
@@ -160,7 +165,12 @@ def run_crawl(
         insurance_types=insurance_types,
         ledger=ledger,
         seed_values=seed_values or LOGIN_SEEDS,
+        start_text=start_text,
     )
+    if start_text:
+        # The nav step from the landing page into the application is part of the
+        # flow, so the replay script has to make it too.
+        generator.metadata_doc.config.createSubmissionText = start_text
     log.info(
         "crawl start job_id=%s carrier_id=%s url=%s insurance_types=%s business_types=%s",
         job_id,
