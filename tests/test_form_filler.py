@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from trailblazer.agents.browser.session import BrowserSession
+from trailblazer.agents.browser import write_tools
 from trailblazer.agents.browser.write_tools import LocatorError, resolve
 from trailblazer.agents.form_filler import form_filler
 from trailblazer.agents.form_filler.form_filler import _shape_of, fill_one
@@ -39,8 +40,13 @@ def _no_llm(monkeypatch, value: str = "123456789"):
     """Replace the value chooser with a fixed answer and record its calls."""
     calls: list[dict] = []
 
-    def fake(label, locator, url, constraint_hint, error_text, settings):
-        calls.append({"label": label, "error_text": error_text, "hint": constraint_hint})
+    def fake(label, locator, url, constraint_hint, error_text, settings, **scope):
+        calls.append({
+            "label": label,
+            "error_text": error_text,
+            "hint": constraint_hint,
+            **scope,
+        })
         answer = value(len(calls)) if callable(value) else value
         return answer, 0.0012, False
 
@@ -470,3 +476,36 @@ def test_a_step_with_no_llm_call_records_no_cost(page) -> None:
 def test_shape_of_records_the_format_the_page_accepted(value: str, mask: str) -> None:
     """The error text often states no format, so the accepted value is the evidence."""
     assert _shape_of(value) == mask
+
+
+# --------------------------------------------------------------------------- #
+# Duplicated controls
+# --------------------------------------------------------------------------- #
+
+
+def test_a_link_rendered_twice_resolves_to_the_visible_copy(page) -> None:
+    """A responsive nav renders one destination twice and hides the other copy."""
+    assert page.locator("a.nav-start").count() == 2
+
+    element = write_tools.resolve_click_target(page, "a.nav-start")
+
+    assert element.is_visible()
+
+
+def test_two_visible_copies_are_still_refused(page) -> None:
+    """Two visible matches is a real ambiguity, not a responsive duplicate."""
+    with pytest.raises(LocatorError, match="2 visible"):
+        write_tools.resolve_click_target(page, "a.nav-both")
+
+
+def test_matches_that_differ_are_still_refused(page) -> None:
+    """Same selector, different destinations: picking one is a guess."""
+    with pytest.raises(LocatorError, match="not the same control"):
+        write_tools.resolve_click_target(page, "a.nav-differs")
+
+
+def test_a_fill_never_takes_the_visible_one(page) -> None:
+    """Two inputs sharing a selector are different fields; a value in the wrong
+    one is invisible downstream, since the locator still resolves to one node."""
+    with pytest.raises(LocatorError, match="not unique"):
+        write_tools.fill(page, "input", "anything")

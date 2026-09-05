@@ -35,6 +35,10 @@ log = get_logger(__name__)
 _SETTLE_MS = 10_000
 """How long a submit is given to land before the result is graded."""
 
+_PROBE_MS = 2_000
+"""How long a question about the page's current state waits. Short: it asks what
+is true now, unlike the grade after a submit, which waits for the page to arrive."""
+
 
 class LoginError(RuntimeError):
     """The session could not be authenticated. Never swallowed, never defaulted."""
@@ -231,9 +235,20 @@ class CarrierLogin:
         Not routed through the no-pay denylist: this is the one click the crawl
         makes before an application exists, on a page with no money on it. The
         denylist guards the application walk, where a submit may be a bind.
+
+        A detached element after the click is success, not failure. Pie's button
+        is `disabled` until the form validates, so Playwright retries; the click
+        that lands navigates, the button goes with the old document, and the
+        retry then raises against an element that is gone. Whether the sign-in
+        took is `authenticated()`'s answer, not this click's.
         """
         element = self._one(page, self.submit_selector, "submit control")
-        element.click(timeout=_SETTLE_MS)
+        try:
+            element.click(timeout=_SETTLE_MS)
+        except PlaywrightError as e:
+            if "detached" not in str(e) and "not attached" not in str(e):
+                raise
+            log.debug("submit control detached after the click; the page navigated")
         self.record("click", selector=self.submit_selector)
 
     def settle(self, page: Page) -> None:
@@ -264,7 +279,11 @@ class CarrierLogin:
                 f"{type(self).__name__} sets no `authenticated_selector`, so a "
                 "successful sign-in cannot be told from a rejected one"
             )
-        return self._present(page, self.authenticated_selector)
+        # Waited for, not probed: `settle` returns when the network goes quiet,
+        # which on an SPA is before the dashboard has finished mounting. Pie
+        # signed in and landed on /search with the nav still not rendered, and a
+        # probe read that as a rejected password.
+        return self._present(page, self.authenticated_selector, _SETTLE_MS)
 
     def awaiting_mfa(self, page: Page) -> bool:
         """True when the portal is asking for a one-time code."""
@@ -301,11 +320,28 @@ class CarrierLogin:
             )
         return located
 
-    def _present(self, page: Page, selector: str) -> bool:
-        """True when `selector` resolves to at least one visible node."""
+    def _present(self, page: Page, selector: str, timeout_ms: int = _PROBE_MS) -> bool:
+        """True when `selector` resolves to at least one visible node.
+
+        Every match is checked, not `.first`. A responsive layout renders its
+        nav twice and hides the copy that does not apply, so Pie's signed-in
+        marker matched two nodes with the hidden one first: `.first.is_visible()`
+        answered False on a page that was signed in, and the login was reported
+        as a rejected password.
+
+        Polled rather than waited on, because Playwright's own wait applies to
+        one locator and the question here is about the set.
+        """
         if not selector:
             return False
-        try:
-            return page.locator(selector).first.is_visible(timeout=2_000)
-        except PlaywrightError:
-            return False
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            try:
+                located = page.locator(selector)
+                if any(located.nth(i).is_visible() for i in range(located.count())):
+                    return True
+            except PlaywrightError:
+                pass  # mid-render the page can refuse the query; retry until the deadline
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(250)

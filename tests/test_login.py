@@ -139,6 +139,19 @@ def test_waiting_for_a_code_gives_up_rather_than_hanging(page) -> None:
     assert [s.action for s in result.steps] == ["goto", "fill", "fill", "click"]
 
 
+def test_a_marker_rendered_twice_is_found_when_only_the_second_is_visible(page) -> None:
+    """A responsive nav renders twice and hides one copy; Pie's hidden one is first."""
+
+    class Responsive(FixtureLogin):
+        carrier_id = "responsive"
+        authenticated_selector = '[data-testid="navSearch"]'
+
+    login = Responsive(CREDS)
+    assert page.locator('[data-testid="navSearch"]').count() == 2
+
+    assert login.sign_in(page).ok
+
+
 def test_an_unknown_carrier_has_no_login_rather_than_the_base_journey() -> None:
     """The base class cannot tell a signed-in page from a rejected one."""
     with pytest.raises(KeyError, match="no login class registered"):

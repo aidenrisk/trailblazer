@@ -64,6 +64,19 @@
   <div id="committerList" role="listbox"></div>
 
   <button type="button" id="next-btn">Next</button>
+
+  <!-- A responsive nav: the same link rendered twice with the copy that does
+       not apply hidden. Pie renders its whole nav this way. -->
+  <a href="/start" class="nav-start" style="display:none">Get a Quote</a>
+  <a href="/start" class="nav-start">Get a Quote</a>
+
+  <!-- Two visible copies: a real ambiguity, and still refused. -->
+  <a href="/both" class="nav-both">Both Visible</a>
+  <a href="/both" class="nav-both">Both Visible</a>
+
+  <!-- Same selector, different destinations: never equivalent. -->
+  <a href="/one" class="nav-differs" style="display:none">One</a>
+  <a href="/two" class="nav-differs">Two</a>
 </form>
 
 <!-- A separate form, so the denylist's payment-context and card-relationship

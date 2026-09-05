@@ -17,8 +17,13 @@
   <button type="submit" id="signin">Sign In</button>
 </form>
 
-<!-- Both appear only after a submit, and never together. -->
-<div id="dashboard" hidden>Signed in</div>
+<!-- Both appear only after a submit, and never together. The marker is
+     rendered twice and the hidden copy comes first, which is Pie's responsive
+     nav: `.first.is_visible()` reads False on a page that is signed in. -->
+<div id="dashboard" hidden>
+  <span data-testid="navSearch" style="display:none">Dashboard</span>
+  <span data-testid="navSearch">Dashboard</span>
+</div>
 <div id="otp-row" hidden>
   <label for="otp">One-time code</label>
   <input type="text" id="otp" name="otp">

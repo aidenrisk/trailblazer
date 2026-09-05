@@ -64,6 +64,70 @@ def resolve(page: Page, locator: str):
     return found
 
 
+_EQUIVALENCE_JS = """
+(el) => [
+  el.tagName.toLowerCase(),
+  el.getAttribute('href') || '',
+  (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\\s+/g, ' '),
+].join('\\x1f')
+"""
+"""What makes two matches the same destination: tag, href and accessible name."""
+
+
+def resolve_click_target(page: Page, locator: str):
+    """The element to click, allowing one visible node among equivalent duplicates.
+
+    `resolve` demands exactly one match, which is right for a fill: two inputs
+    sharing a selector are different fields, and typing into whichever came
+    first records a value against a control that never received it -- invisibly,
+    since the wrong locator still resolves to one node.
+
+    A duplicated nav link is not that. A responsive layout renders the same link
+    twice and hides the copy that does not apply, so both matches carry the same
+    tag, the same href and the same name, and clicking either does the same
+    thing. Pie renders its whole nav that way, and "Get a Quote" was unclickable
+    because of it.
+
+    So the relaxation is bounded twice over: it is only reachable from `click`,
+    never from `fill`, and it applies only when every match is equivalent and
+    exactly one of them is visible. Two visible matches, or matches that differ,
+    raise as before -- that is a real ambiguity and guessing at it is what the
+    uniqueness rule exists to prevent.
+    """
+    try:
+        found = page.locator(locator)
+        count = found.count()
+    except PlaywrightError as e:
+        raise LocatorError(f"locator {locator!r} is not a usable selector: {e}") from e
+    if count == 0:
+        raise LocatorError(f"locator {locator!r} matched no element on {page.url}")
+    if count == 1:
+        return found
+
+    try:
+        signatures = {found.nth(i).evaluate(_EQUIVALENCE_JS) for i in range(count)}
+        visible = [i for i in range(count) if found.nth(i).is_visible()]
+    except PlaywrightError as e:
+        raise LocatorError(f"locator {locator!r} matched {count} elements: {e}") from e
+
+    if len(signatures) > 1:
+        raise LocatorError(
+            f"locator {locator!r} matched {count} elements that are not the same "
+            "control; it is not unique"
+        )
+    if len(visible) != 1:
+        raise LocatorError(
+            f"locator {locator!r} matched {count} equivalent elements with "
+            f"{len(visible)} visible; exactly one must be"
+        )
+    log.info(
+        "locator %r matched %d equivalent copies; clicking the visible one",
+        locator,
+        count,
+    )
+    return found.nth(visible[0])
+
+
 def fill(page: Page, locator: str, value: str) -> None:
     """Type `value` into the control at `locator`, replacing what is there.
 
@@ -84,8 +148,12 @@ def click(page: Page, locator: str) -> None:
     The check runs on the resolved element and before dispatch. A refusal raises
     `RefusedError`, which the filler turns into a blocked report; it never falls
     through to the click.
+
+    Resolution is `resolve_click_target`, not `resolve`: a nav link rendered
+    twice by a responsive layout is one destination, and the denylist still runs
+    on whichever copy is visible.
     """
-    element = resolve(page, locator)
+    element = resolve_click_target(page, locator)
     reason = refuse_if_denied(element, locator)
     if reason is not None:
         raise RefusedError(reason)
