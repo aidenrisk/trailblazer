@@ -380,7 +380,10 @@ class Generator:
             # mounts its listbox only on click, so a read-only extraction of it
             # reported `options: null`.
             if report.optionsRevealed is not None:
-                captured = [Option(label=o, locator=None) for o in report.optionsRevealed]
+                captured = [
+                    Option(label=o["label"], locator=o.get("locator"))
+                    for o in report.optionsRevealed
+                ]
             else:
                 captured = control.options if control else None
             options, open_set = clean_options(captured)

@@ -52,44 +52,51 @@ report, whose `valueUsed` keeps the placeholder, and not into a log line. The
 report becomes the metadata artifact's login stage, which is written to disk.
 """
 
-_OPTION_JS = """
+_MARK_JS = """
+() => { let i = 0; document.querySelectorAll('*').forEach((n) => { if (!n.__tbSeen) n.__tbSeen = ++i; }); }
+"""
+"""Stamp every element that exists now, so what an open mounts can be told apart.
+
+Identity, not visibility: a widget that opens by scrolling the page into view
+makes dozens of existing elements newly visible, and a visibility diff read
+those as options once.
+"""
+
+_APPEARED_OPTIONS_JS = """
 (el) => {
-  const seen = new Set();
+  const doc = el.ownerDocument;
+  const text = (n) => (n.textContent || '').trim().replace(/\\s+/g, ' ');
+  const isNew = (n) => !n.__tbSeen;
+  const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const out = [];
-  const add = (t) => {
-    const s = (t || '').trim();
-    if (s && !seen.has(s)) { seen.add(s); out.push(s); }
+  const seen = new Set();
+  const add = (n) => {
+    const t = text(n);
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    out.push({ label: t, id: n.id || '', testid: n.getAttribute('data-testid') || '',
+               role: n.getAttribute('role') || '' });
   };
-  // A native select never mounts a listbox -- the browser draws its popup
-  // outside the DOM -- so its own <option> elements are the whole answer.
+  // A native select never mounts anything: its <option> children are the set.
   if (el.tagName.toLowerCase() === 'select') {
-    for (const o of el.options) add(o.textContent);
+    for (const o of el.options) { const t = text(o); if (t && !seen.has(t)) { seen.add(t); out.push({ label: t, id: '', testid: '', role: 'option', native: true }); } }
     return out;
   }
-  const controlled = el.getAttribute('aria-controls');
-  const roots = [];
-  if (controlled) {
-    for (const id of controlled.split(/\\s+/)) {
-      const n = el.ownerDocument.getElementById(id);
-      if (n) roots.push(n);
-    }
+  // A root the control names is authoritative wherever the page put it.
+  for (const id of (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '').split(/\\s+/)) {
+    const root = id && doc.getElementById(id);
+    if (root) root.querySelectorAll('[role="option"], [role="menuitem"], option').forEach(add);
   }
-  // A portal-rendered listbox is not a descendant of the control, so the whole
-  // document is searched for a listbox that is visible right now.
-  if (!roots.length) {
-    for (const n of el.ownerDocument.querySelectorAll('[role="listbox"], [role="menu"], ul, ol')) {
-      const r = n.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) roots.push(n);
-    }
-  }
-  for (const root of roots) {
-    const items = root.querySelectorAll('[role="option"], [role="menuitem"], li, option');
-    if (items.length) { for (const i of items) add(i.textContent); }
-    else add(root.textContent);
-  }
+  if (out.length) return out;
+  // Otherwise: exactly the option-shaped elements that did not exist before
+  // the open and are visible now. Never a page-wide search -- that returned
+  // the portal's nav as a field's options.
+  doc.querySelectorAll('[role="option"], [role="menuitem"]').forEach((n) => { if (isNew(n) && vis(n)) add(n); });
+  if (!out.length) doc.querySelectorAll('li').forEach((n) => { if (isNew(n) && vis(n)) add(n); });
   return out;
 }
 """
+
 
 _FORM_STATE_JS = """
 () => {
@@ -519,7 +526,13 @@ def _do_select(page: Page, assignment: Assignment) -> FillReport:
     the parent.
     """
     if assignment.optionLocator:
+        # A radio's option is always in the DOM. A custom listbox's is mounted
+        # only while the widget is open, so if it does not resolve the widget
+        # is opened first and the option clicked while it is showing.
+        if page.locator(assignment.optionLocator).count() == 0:
+            _open_widget(page, assignment.locator)
         write_tools.click(page, assignment.optionLocator)
+        page.wait_for_timeout(150)
         return _report(assignment, ok=True, valueUsed=assignment.value)
 
     if assignment.value is None:
@@ -585,9 +598,10 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
             "relationship, and is not a native select",
         )
 
-    write_tools.click(page, assignment.locator)
+    page.evaluate(_MARK_JS)
+    _open_widget(page, assignment.locator)
     try:
-        options = _read_mounted_options(page, assignment.locator)
+        options = _read_appeared_options(page, assignment.locator)
     finally:
         _close(page, assignment.locator)
 
@@ -606,6 +620,8 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
             "disclosure and the options read from it are not trustworthy",
         )
 
+    if not options:
+        log.info("expand opened %s and no options appeared", assignment.locator)
     return _report(assignment, ok=True, optionsRevealed=options)
 
 
@@ -641,18 +657,69 @@ def _is_disclosure(element) -> bool:
         return False
 
 
-def _read_mounted_options(page: Page, locator: str) -> list[str]:
-    """The option labels visible while the widget is open.
+def _option_locator(page: Page, item: dict) -> str | None:
+    """A unique address for one mounted option, or None.
 
-    A native `<select>` never mounts a listbox -- the browser draws its popup
-    outside the DOM -- so its own `<option>` elements are read instead.
+    `#id` and `[data-testid]` when the option has one. Pie's have neither, so
+    the address is the role plus the option's own text, and it is measured
+    unique while the widget is open like every other locator in the pipeline.
+    """
+    if item.get("native"):
+        return None  # set by label against the select; an <option> is not clicked
+    label = item["label"]
+    candidates = []
+    if item.get("id"):
+        candidates.append(f"#{item['id']}")
+    if item.get("testid"):
+        candidates.append(f'[data-testid="{item["testid"]}"]')
+    role = item.get("role") or "option"
+    # The role engine resolves to the element carrying the role, with an exact
+    # accessible name: `:text-is` binds to the innermost text node -- the <p>
+    # inside Pie's option button -- and never matches the button. Visibility
+    # is required because a native <select>'s <option> elsewhere on the page
+    # carries the same role and name while drawn nowhere.
+    quoted = label.replace('"', '\\"')
+    candidates.append(f'role={role}[name="{quoted}"] >> visible=true')
+    for sel in candidates:
+        try:
+            if page.locator(sel).count() == 1:
+                return sel
+        except PlaywrightError:
+            continue
+    log.debug("no unique locator for option %r", label)
+    return None
+
+
+def _open_widget(page: Page, locator: str) -> None:
+    """Open a custom chooser so its options mount.
+
+    A click on the control is what opens Pie's; `mousedown` alone does not. The
+    denylist runs on the control as on any click.
+    """
+    write_tools.click(page, locator)
+    page.wait_for_timeout(_OPEN_SETTLE_MS)
+
+
+_OPEN_SETTLE_MS = 500
+"""How long a chooser is given to mount its options after the opening click."""
+
+
+def _read_appeared_options(page: Page, locator: str) -> list[dict[str, str | None]]:
+    """The options the widget mounted, each with the locator that addresses it.
+
+    Called with the widget open and the pre-open element set already stamped by
+    `_MARK_JS`. What is returned is what appeared, or what the control's own
+    `aria-controls` root holds; nothing else on the page qualifies.
     """
     element = write_tools.resolve(page, locator)
     try:
-        options = element.evaluate(_OPTION_JS)
+        items = element.evaluate(_APPEARED_OPTIONS_JS)
     except PlaywrightError as e:
         raise LocatorError(f"could not read the options at {locator!r}: {e}") from e
-    return [o for o in options if o]
+    return [
+        {"label": it["label"], "locator": _option_locator(page, it)}
+        for it in items if it.get("label")
+    ]
 
 
 def _close(page: Page, locator: str) -> None:

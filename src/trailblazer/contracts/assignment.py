@@ -145,11 +145,16 @@ class FillReport(BaseModel):
     retried: bool = False
     """Whether a validation error was cleared within this assignment."""
 
-    optionsRevealed: list[str] | None = None
-    """Choices read from a widget opened by `expand`.
+    optionsRevealed: list[dict[str, str | None]] | None = None
+    """Choices read from a widget opened by `expand`, as `{label, locator}`.
 
-    A `<div role="combobox">` mounts its listbox on click, so its options do not
-    exist in the DOM until then and the scraper reports `options: null`.
+    A custom listbox mounts its options on click, so they do not exist in the
+    DOM until then and the scraper reports `options: null`. Each option carries
+    the locator that addresses it while the widget is open -- Pie's are
+    `<button role="option">` in a popper with no id, so the address is the role
+    plus the option's own text -- because setting a custom listbox means
+    clicking the option, and a label alone cannot be clicked. `locator` is
+    `None` when no unique address exists.
     """
 
     blocked: dict[str, str] | None = None

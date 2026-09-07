@@ -98,6 +98,14 @@
   <a href="/start" class="nav-start" style="display:none">Get a Quote</a>
   <a href="/start" class="nav-start">Get a Quote</a>
 
+  <!-- A custom chooser shaped like Pie's Legal Entity Type: a read-only listbox
+       input with no aria-controls and no aria-expanded, whose click mounts a
+       popper of <button role="option"> at the end of the body -- no listbox
+       role, no ids. A page-wide search for "any visible list" finds the nav
+       below instead, which is the failure this exists to catch. -->
+  <label for="entityPicker2">Entity Kind</label>
+  <input type="text" id="entityPicker2" name="entityPicker2" readonly role="listbox" value="">
+
   <!-- Two visible copies: a real ambiguity, and still refused. -->
   <a href="/both" class="nav-both">Both Visible</a>
   <a href="/both" class="nav-both">Both Visible</a>
@@ -106,6 +114,10 @@
   <a href="/one" class="nav-differs" style="display:none">One</a>
   <a href="/two" class="nav-differs">Two</a>
 </form>
+
+<!-- The portal's nav: always visible, always a list. A reader that searches
+     the whole page for "any visible list" returns this as a field's options. -->
+<ul class="nav"><li>Dashboard</li><li>Appetite Checker</li></ul>
 
 <!-- A separate form, so the denylist's payment-context and card-relationship
      signals have somewhere real to fire. -->
@@ -149,6 +161,29 @@
     var ok = /^[0-9]{5}$/.test(e.target.value);
     document.getElementById('zipAlt-error').textContent = ok ? '' : 'Enter a 5-digit ZIP';
   });
+
+  // The Pie-shaped chooser: options mount into a body-level popper on click,
+  // an option click writes its text into the input and unmounts the popper.
+  (function () {
+    var picker = document.getElementById('entityPicker2');
+    var KINDS = ['Corporation', 'Partnership', 'Limited Liability Company'];
+    var popper = null;
+    function close() { if (popper) { popper.remove(); popper = null; } }
+    picker.addEventListener('click', function () {
+      if (popper) { close(); return; }
+      popper = document.createElement('div');
+      popper.className = 'popper';
+      KINDS.forEach(function (k) {
+        var b = document.createElement('button');
+        b.type = 'button'; b.setAttribute('role', 'option');
+        var p = document.createElement('p'); p.textContent = k; b.appendChild(p);
+        b.addEventListener('click', function (e) { e.stopPropagation(); picker.value = k; close(); });
+        popper.appendChild(b);
+      });
+      document.body.appendChild(popper);
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  })();
 
   // Rejects every value, to exercise the retry budget running out.
   document.getElementById('impossible').addEventListener('input', function (e) {

@@ -113,7 +113,13 @@ _CARD_AUTOCOMPLETE = (
 
 _CARD_JS = """
 (el, tokens) => {
-  const scope = el.closest('form, section, [role="form"], dialog') || el.ownerDocument.body;
+  // A card relationship is a shared form: the element would be submitted
+  // alongside the card field. With no enclosing form, section or dialog there
+  // is nothing it is submitted with, and scanning the whole page instead
+  // refused a body-level dropdown option because a payment form existed
+  // elsewhere on the same page.
+  const scope = el.closest('form, section, [role="form"], dialog');
+  if (!scope) return null;
   const fields = Array.from(scope.querySelectorAll('input, select'));
   const hit = fields.find((i) => {
     const auto = (i.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);

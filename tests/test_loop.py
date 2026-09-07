@@ -338,6 +338,42 @@ def test_fold_for_a_stage_never_described_is_a_defect(frontier: Frontier) -> Non
         )
 
 
+def test_an_owed_side_that_cannot_be_set_is_declared_not_restarted_for_again(
+    monkeypatch, frontier: Frontier
+) -> None:
+    """Three restarts on a live run went to a side the filler could not set.
+
+    The re-execution succeeded each time and the owed side failed each time;
+    nothing checked, so the gate stayed owed and the flow restarted for it until
+    the cap. A blocked owed side now declares the gate unexplored and moves on.
+    """
+    performed: list = []
+    controls = [_control("q_001"), _gate("q_002", ["Yes", "No"])]
+    result = _page(controls)
+
+    def refuse_the_no_side(tab, assignment, settings, ledger=None):
+        performed.append((assignment.fieldId, assignment.value))
+        refused = assignment.fieldId == "q_002" and assignment.value == "No"
+        return FillReport(
+            fieldId=assignment.fieldId,
+            intent=assignment.intent,
+            locator=assignment.locator,
+            ok=not refused,
+            valueUsed=None if refused else (assignment.value or "x"),
+            blocked={"control": assignment.locator, "whatYouTried": "no such option"} if refused else None,
+        )
+
+    monkeypatch.setattr(orchestrator, "fill", refuse_the_no_side)
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings())
+
+    assert performed.count(("q_002", "No")) == 1          # tried once, not to the cap
+    summary = frontier.summary()
+    assert "could not be set" in summary["unexplored"]["q_002"]
+    assert frontier.flow_done()
+
+
 def test_a_failed_re_execution_aborts_the_restart_and_marks_the_gate_unexplored(
     monkeypatch, frontier: Frontier
 ) -> None:

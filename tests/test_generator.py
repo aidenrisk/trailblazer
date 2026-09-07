@@ -251,7 +251,9 @@ def test_options_revealed_by_expand_outrank_a_null_option_list(gen: Generator) -
         [control("q_001", "Legal Entity Type", type_="other", options=None, locator="#entity")],
     )
     report = fill(
-        "q_001", "#entity", "LLC", intent="select", optionsRevealed=["LLC", "Sole Proprietor"]
+        "q_001", "#entity", "LLC", intent="select", optionsRevealed=[
+            {"label": "LLC", "locator": None}, {"label": "Sole Proprietor", "locator": None},
+        ]
     )
     gen.append(request(p, report))
 

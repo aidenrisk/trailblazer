@@ -674,6 +674,19 @@ def _restart_walk(
     owed = frontier.open_walk(restart.fieldId, restart.side, restart.stageId)
     report = fill(tab, owed, settings, ledger)
     log_contract(log, "FillReport", report)
+    if not report.ok:
+        # The side was owed and could not be set: the restart has bought
+        # nothing, and asking again would fail the same way until the cap.
+        # On a live run three restarts went to a listbox whose "options" were
+        # the portal's nav; declared here, the gate stops holding the flow.
+        frontier.abandon_gate(
+            restart.fieldId,
+            f"owed side {restart.side!r} could not be set on walk {walk}: "
+            f"{(report.blocked or {}).get('whatYouTried', 'blocked')[:120]}",
+            restart.stageId,
+        )
+        frontier.observe(result.page, report, result.addedControls)
+        return result, replayed, None
     replayed.append((result.page.stageId, owed))
 
     _generate(generator, job_id, result.page, report, walk, ledger)

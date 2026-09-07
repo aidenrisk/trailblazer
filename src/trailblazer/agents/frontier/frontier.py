@@ -240,7 +240,8 @@ class Frontier:
             # and is marked attempted: the control has no options either way, so
             # re-issuing would expand it forever.
             board.revealed_options[report.fieldId] = [
-                Option(label=label, locator=None) for label in report.optionsRevealed
+                Option(label=o["label"], locator=o.get("locator"))
+                for o in report.optionsRevealed
             ]
             return
 

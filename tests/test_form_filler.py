@@ -170,7 +170,9 @@ def test_expand_reads_the_options_and_leaves_the_widget_closed(page) -> None:
     report = fill_one(page, Assignment(intent="expand", locator="#agency", fieldId="q_007"), SETTINGS)
 
     assert report.ok
-    assert report.optionsRevealed == ["Direct", "Broker Network", "Affinity Partner", "Wholesale"]
+    assert [o["label"] for o in report.optionsRevealed] == [
+        "Direct", "Broker Network", "Affinity Partner", "Wholesale",
+    ]
     assert page.locator("#agency").get_attribute("aria-expanded") == "false"
     assert page.locator('#agencyList [role="option"]').count() == 0
 
@@ -198,7 +200,7 @@ def test_expand_reads_a_native_selects_own_options(page) -> None:
     report = fill_one(page, Assignment(intent="expand", locator="#entityType", fieldId="q_004"), SETTINGS)
 
     assert report.ok
-    assert "Limited Liability Company" in report.optionsRevealed
+    assert "Limited Liability Company" in [o["label"] for o in report.optionsRevealed]
     assert page.locator("#entityType").input_value() == ""
 
 
@@ -213,7 +215,7 @@ def test_expand_allows_a_formatter_rewriting_an_answered_field(page) -> None:
     report = fill_one(page, Assignment(intent="expand", locator="#formatter", fieldId="q_020"), SETTINGS)
 
     assert report.ok, report.blocked
-    assert report.optionsRevealed == ["Alpha", "Beta"]
+    assert [o["label"] for o in report.optionsRevealed] == ["Alpha", "Beta"]
     assert page.locator("#phone").input_value() == "(555) 123-4567"
 
 
@@ -316,6 +318,19 @@ def test_an_innocuous_button_inside_a_payment_form_is_refused(page) -> None:
 
     assert reason is not None
     assert "payment context" in reason or "card details" in reason
+
+
+def test_an_element_in_no_form_has_no_card_relationship(page) -> None:
+    """A custom dropdown mounts its options at body level, outside every form.
+
+    The page also holds a payment form. Widening the scan to the whole page
+    when nothing encloses the element refused every such option on any portal
+    with a payment widget anywhere; a card relationship is a shared form.
+    """
+    page.click("#entityPicker2")
+    page.wait_for_timeout(200)
+
+    assert denial_reason(page.locator('role=option[name="Corporation"] >> visible=true')) is None
 
 
 def test_an_ordinary_button_is_not_refused(page) -> None:
@@ -656,3 +671,49 @@ def test_a_reply_that_stays_empty_fails_naming_the_field(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="no value for field 'Business Zip Code' after 3 attempts"):
         values.choose_value("Business Zip Code", "#zip", "https://x", None, None, SETTINGS)
+
+
+# --------------------------------------------------------------------------- #
+# A chooser whose options mount into a popper with no listbox role
+# --------------------------------------------------------------------------- #
+
+
+def test_expand_reads_only_the_options_that_appeared_never_the_nav(page) -> None:
+    """Pie's Legal Entity Type. The earlier reader returned "Dashboard"."""
+    report = fill_one(page, Assignment(intent="expand", locator="#entityPicker2", fieldId="q_050"), SETTINGS)
+
+    assert report.ok
+    labels = [o["label"] for o in report.optionsRevealed]
+    assert labels == ["Corporation", "Partnership", "Limited Liability Company"]
+    assert "Dashboard" not in labels and "Appetite Checker" not in labels
+    # Each option is addressable by role and its own text, measured unique.
+    assert report.optionsRevealed[0]["locator"] == 'role=option[name="Corporation"] >> visible=true'
+    # The widget is closed again and the page holds no popper.
+    assert page.locator(".popper").count() == 0
+    assert page.locator("#entityPicker2").input_value() == ""
+
+
+def test_select_opens_a_closed_chooser_and_clicks_the_option(page) -> None:
+    """An option in a closed chooser is not in the DOM; the select mounts it first."""
+    report = fill_one(
+        page,
+        Assignment(
+            intent="select", locator="#entityPicker2", fieldId="q_050",
+            value="Partnership", optionLocator='role=option[name="Partnership"] >> visible=true',
+        ),
+        SETTINGS,
+    )
+
+    assert report.ok and report.valueUsed == "Partnership"
+    assert page.locator("#entityPicker2").input_value() == "Partnership"
+    assert page.locator(".popper").count() == 0
+
+
+def test_a_chooser_that_mounts_nothing_reveals_no_options(page) -> None:
+    """A read-only field with no list behind it is not given the nav as its options."""
+    report = fill_one(page, Assignment(intent="expand", locator="#agencyProgram", fieldId="q_051"), SETTINGS)
+
+    # Not a disclosure at all, or a disclosure that mounted nothing: either way
+    # the answer is no options, never someone else's list.
+    labels = [o["label"] for o in (report.optionsRevealed or [])]
+    assert "Dashboard" not in labels and "Appetite Checker" not in labels
