@@ -174,6 +174,37 @@ class Frontier:
         log_contract(log, "FrontierBoard", board.summary())
         self._record("observe", page.stageId, started)
 
+    def fold(self, stage_id: str, report: FillReport) -> None:
+        """Fold one report into the board for `stage_id`, with no fresh description.
+
+        For prefix re-execution. The pages being re-walked were described on
+        the route that first reached them, and `restart_for` keeps every
+        control, gate side and reveal across a restart -- so a look between
+        re-executed fills is a model call that re-describes a page the board
+        already holds. Measured on a live run: 25 of 27 such looks learned
+        nothing. The report carries everything the board needs from a fill --
+        the attempt, the gate side taken, the advance not to re-press.
+
+        What this does not refresh is `present`. No assignment is chosen against
+        a board during re-execution, so a stale `present` is never read; the one
+        look after the prefix re-establishes it before the owed side is taken.
+
+        A stage with no board is a defect, not a page to open: every stage in a
+        prefix was observed when the route first crossed it.
+        """
+        started = time.monotonic()
+        board = self.boards.get(stage_id)
+        if board is None:
+            raise RuntimeError(
+                f"fold for stage {stage_id!r} but no board exists; "
+                f"known stages: {self.stage_order}"
+            )
+        if self.board is not board:
+            log.info("board resumed for fold stage_id=%s walk=%d", stage_id, board.walk)
+            self.board = board
+        self._apply(board, report)
+        self._record("fold", stage_id, started)
+
     def _apply(self, board: Board, report: FillReport) -> None:
         """Mark what the filler did, including a gate side taken or options revealed."""
         if report.fieldId is None:

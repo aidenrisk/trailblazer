@@ -266,7 +266,79 @@ def test_the_prefix_is_replayed_in_order_before_the_owed_side(
     assert tab.visited == ["https://partner.example.com/start"]
 
 
-def test_a_failed_replay_aborts_the_restart_and_marks_the_gate_unexplored(
+def test_re_execution_types_the_pinned_values_and_never_re_asks(
+    monkeypatch, frontier: Frontier
+) -> None:
+    """A later walk must retrace the same route before branching.
+
+    The fake answers a judgment field with "x". On walk 1 the assignment
+    arrives with no value -- the filler was asked. On re-execution it must
+    arrive with the value walk 1 typed, so the model is never asked again and
+    the route is the same one.
+    """
+    performed: list = []
+    controls = [_control("q_001"), _control("q_002"), _gate("q_003", ["Yes", "No"])]
+    result = _page(controls)
+
+    monkeypatch.setattr(orchestrator, "fill", _recording_fill(performed))
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings())
+
+    walk_one, re_executed = performed[:3], performed[3:5]
+    assert walk_one[:2] == [("q_001", None), ("q_002", None)]
+    assert re_executed == [("q_001", "x"), ("q_002", "x")]
+
+
+def test_re_execution_looks_once_not_after_every_fill(monkeypatch, frontier: Frontier) -> None:
+    """The boards already hold the prefix pages; a look between fills learns nothing.
+
+    Walk 1 looks after each of its five fills. The restart looks three times:
+    at the entry page, once after the whole prefix, once after the owed side.
+    The earlier loop looked after every re-executed fill as well -- eleven in
+    total here, and 25 of 27 such looks on a live run learned nothing.
+    """
+    calls = {"n": 0}
+    controls = [_control(f"q_00{i}") for i in range(1, 5)] + [_gate("q_005", ["Yes", "No"])]
+    result = _page(controls)
+
+    def counting_perceive(*a, **k):
+        calls["n"] += 1
+        return result
+
+    monkeypatch.setattr(orchestrator, "fill", _recording_fill([]))
+    monkeypatch.setattr(orchestrator, "perceive", counting_perceive)
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings())
+
+    assert calls["n"] == 8
+
+
+def test_fold_marks_the_fill_on_its_board_without_a_description(frontier: Frontier) -> None:
+    """The report carries what a fill changes on a board: attempt and gate side."""
+    frontier.observe(_page([_gate("q_001", ["Yes", "No"])]).page)
+
+    frontier.fold(
+        "form_page_1_business_info",
+        FillReport(fieldId="q_001", intent="select", locator="#q_001", ok=True, valueUsed="Yes"),
+    )
+
+    summary = frontier.summary()
+    assert summary["attempted"] == ["q_001"]
+    assert summary["gates"]["q_001"]["walked"] == ["Yes"]
+    assert summary["gates"]["q_001"]["remaining"] == ["No"]
+
+
+def test_fold_for_a_stage_never_described_is_a_defect(frontier: Frontier) -> None:
+    """Every prefix stage was observed when the route first crossed it."""
+    with pytest.raises(RuntimeError, match="no board exists"):
+        frontier.fold(
+            "form_page_9_never_seen",
+            FillReport(fieldId="q_001", intent="fill", locator="#q_001", ok=True, valueUsed="x"),
+        )
+
+
+def test_a_failed_re_execution_aborts_the_restart_and_marks_the_gate_unexplored(
     monkeypatch, frontier: Frontier
 ) -> None:
     """Continuing would record answers against a page that never existed."""
@@ -300,7 +372,7 @@ def test_a_failed_replay_aborts_the_restart_and_marks_the_gate_unexplored(
 
     summary = frontier.summary()
     assert "q_002" in summary["unexplored"]
-    assert "prefix replay failed" in summary["unexplored"]["q_002"]
+    assert "prefix re-execution failed" in summary["unexplored"]["q_002"]
     # The owed side was never filled against the dirty page.
     assert ("q_002", "No") not in performed
     assert frontier.page_done()
@@ -377,39 +449,45 @@ def test_two_independent_gates_give_four_walks_not_a_product(
     assert frontier.page_done()
 
 
-def test_a_fill_on_walk_two_does_not_overwrite_walk_ones_answer(
+def test_each_walk_publishes_its_own_gate_side_and_the_same_pinned_prefix(
     monkeypatch, tmp_path, frontier: Frontier
 ) -> None:
-    """Answers assembled across walks are not a path the form ever rendered."""
+    """Answers are kept per walk, and a walk is a route the form actually rendered.
+
+    Two facts, one test. The gate differs between walks -- Yes on the first, the
+    owed No on the second -- and publishing a walk gives that walk's own side,
+    not the last one written. The text field before it does not differ: its
+    value is pinned when first typed and re-executed verbatim, so walk 2 is the
+    same route up to the branch point rather than one that happened to type a
+    different business name on the way.
+    """
     from trailblazer.agents.generator import Generator
 
     controls = [_control("q_001"), _gate("q_002", ["Yes", "No"])]
     result = _page(controls)
 
-    values = iter(["first", "second"])
-
-    def fill_with_distinct_values(tab, assignment, settings, ledger=None):
+    def fill_choosing_once(tab, assignment, settings, ledger=None):
         return FillReport(
             fieldId=assignment.fieldId,
             intent=assignment.intent,
             locator=assignment.locator,
             ok=True,
-            valueUsed=assignment.value or next(values),
+            # A judgment field is chosen on walk 1; on walk 2 the assignment
+            # already carries that choice and the filler is not asked.
+            valueUsed=assignment.value or "first",
         )
 
     generator = Generator(
         out_dir=tmp_path, carrier="pie", business_type="contractors",
         insurance_type="workers_comp",
     )
-    monkeypatch.setattr(orchestrator, "fill", fill_with_distinct_values)
+    monkeypatch.setattr(orchestrator, "fill", fill_choosing_once)
     monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
 
     orchestrator._walk_page(
         FakeTab(), result, frontier, "j1", "objective", Settings(), None, generator,
     )
 
-    # Both walks answered q_001, with different values. Publishing walk 1 gives
-    # the value that walk actually used, not the last one written.
     generator.publish_walk(1)
     by_id = {q.questionId: q.exampleValue for q in generator.questions_doc.questions}
     assert by_id["q_001"] == "first"
@@ -417,8 +495,8 @@ def test_a_fill_on_walk_two_does_not_overwrite_walk_ones_answer(
 
     generator.publish_walk(2)
     by_id = {q.questionId: q.exampleValue for q in generator.questions_doc.questions}
-    assert by_id["q_001"] == "second"
-    assert by_id["q_002"] == "No"
+    assert by_id["q_001"] == "first"   # pinned: the same route up to the gate
+    assert by_id["q_002"] == "No"      # the owed side this walk exists to take
 
 
 def test_publishing_a_walk_that_was_never_walked_raises(tmp_path) -> None:

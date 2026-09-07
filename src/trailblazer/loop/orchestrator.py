@@ -10,10 +10,18 @@ and only the carrier can say which DOM proves the session took.
 
 Loop also performs backtracking. Frontier answers a `Restart` rather than an
 assignment when a page is fully attempted and a gate still owes a side; Loop
-renavigates to the page's start URL and replays the fills already made, in
-order, up to the branch point, then takes the owed side. Replay goes through the
-same `fill()` as any other assignment, so the denylist and every safety check
-still apply.
+renavigates to the flow's entry URL and re-executes the fills already made, in
+order, up to the branch point, then takes the owed side. Re-execution goes
+through the same `fill()` as any other assignment, so the denylist and every
+safety check still apply.
+
+Re-execution is pinned and look-free. Each prefix entry carries the value that
+was actually typed, so the filler never re-asks the model and every walk
+retraces the same route before branching. And no page is described between
+re-executed fills: the boards already hold those pages, the report carries what
+a fill changes on a board, and one look after the prefix grades where the
+re-execution arrived. On a live run that was 25 looks of 27 spent learning
+nothing, at a model call each.
 """
 
 import json
@@ -407,16 +415,33 @@ def _walk_page(
     prefix: list[tuple[str, Assignment]] = []
     """(stageId, assignment) for every action on this route, in order.
 
-    A restart replays these from the flow's entry URL to put it back before the
-    branch point, crossing page boundaries when the gate is on a page the route
-    had already left. Each entry carries its stage so the replay knows where to
-    stop. Held here rather than read off disk because the artifacts are keyed by
+    A restart re-executes these from the flow's entry URL to put it back before
+    the branch point, crossing page boundaries when the gate is on a page the
+    route had already left. Each entry carries its stage so the re-execution
+    knows which board a fill belongs to and where to stop.
+
+    Each assignment is stored with the value that was actually typed. Frontier
+    leaves a judgment field's value to the filler, and re-executing that
+    instruction re-asks the model: on a live run six fields were chosen four
+    times over, and nothing pinned the answers, so a later walk could type a
+    different business name and no longer retrace the route it was meant to.
+
+    Held here rather than read off disk because the artifacts are keyed by
     questionId and reconciled across captures, so they no longer carry the
     route's order.
     """
 
+    pages: dict[str, PageDescription] = {}
+    """stageId -> the description last seen for it.
+
+    What a re-executed fill is filed against in the artifacts: the page was
+    described when the route first crossed it, and describing it again costs a
+    model call to learn nothing.
+    """
+
     report: FillReport | None = None
     for _ in range(MAX_ASSIGNMENTS):
+        pages[result.page.stageId] = result.page
         frontier.observe(result.page, report, result.addedControls)
 
         decision = frontier.next_assignment()
@@ -431,14 +456,14 @@ def _walk_page(
             _record_route_end(generator, frontier, result)
             result, prefix, report = _restart_walk(
                 tab, result, decision, prefix, entry_url, frontier,
-                job_id, objective, settings, ledger, generator,
+                job_id, objective, settings, ledger, generator, pages,
             )
             continue
 
         assignment = decision
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
-        prefix.append((result.page.stageId, assignment))
+        prefix.append((result.page.stageId, _pinned(assignment, report)))
 
         _generate(generator, job_id, result.page, report, frontier.walk, ledger)
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
@@ -455,6 +480,19 @@ def _walk_page(
         f"flow did not finish in {MAX_ASSIGNMENTS} actions; "
         f"stopped on {result.page.stageId} walk {frontier.walk}"
     )
+
+
+def _pinned(assignment: Assignment, report: FillReport) -> Assignment:
+    """The assignment with the value the filler actually typed.
+
+    A value Frontier named -- a gate side, a seed -- is already pinned. A value
+    the filler chose exists only on the report, and re-executing the original
+    instruction would ask the model again. A report with no value (an advance,
+    an expand, a blocked fill) leaves the assignment as it was.
+    """
+    if assignment.value is not None or report.valueUsed is None:
+        return assignment
+    return assignment.model_copy(update={"value": report.valueUsed})
 
 
 def _generate(
@@ -527,8 +565,9 @@ def _restart_walk(
     settings: Settings,
     ledger: RunLedger | None,
     generator: Generator | None,
+    pages: dict[str, PageDescription],
 ) -> tuple[ScraperResult, list[tuple[str, Assignment]], FillReport | None]:
-    """Re-enter the flow, replay the route up to the gate, and take its owed side.
+    """Re-enter the flow, re-execute the route up to the gate, take its owed side.
 
     Returns the page as it stands afterwards, the prefix of the route that has
     just opened, and the last report -- which Loop folds into the board on the
@@ -536,16 +575,29 @@ def _restart_walk(
 
     Navigation goes to the flow's entry URL, not the gate's page: a portal
     carries the application in server-side state, so a form page deep in the
-    flow does not render from its URL alone. The replay therefore crosses page
-    boundaries, including the `advance` actions that move between them, which is
-    what lets a gate on page 1 be re-set after page 4 has been seen.
+    flow does not render from its URL alone. The re-execution therefore crosses
+    page boundaries, including the `advance` actions that move between them,
+    which is what lets a gate on page 1 be re-set after page 4 has been seen.
 
-    What is replayed is everything performed before the gate; the gate is then
-    set to the side it owes rather than the side it already took. A replayed
-    fill coming back `ok: false` aborts the restart -- the page is not in the
-    state the route assumed, and continuing would record answers against a page
-    that never existed -- so the gate is declared unexplored and the walk
-    resumes from wherever the replay stopped.
+    No page is described between re-executed fills. The values are pinned, the
+    pages were described when the route first crossed them, and the report
+    carries everything a fill changes on a board. A look after each fill cost a
+    model call to re-describe a page the board already held -- 25 of 27 on a
+    live run learned nothing. One look after the prefix establishes where the
+    re-execution arrived, and that is checked against the gate's stage before
+    anything is set.
+
+    Two things this trades away, both bounded to coverage rather than
+    corruption. A control that mounts only mid-prefix on a second pass is not
+    seen until that page is next described. And a blocker appearing mid-prefix
+    is not dismissed; the next fill fails, which abandons the gate below.
+
+    What is re-executed is everything performed before the gate; the gate is
+    then set to the side it owes rather than the side it already took. A fill
+    coming back `ok: false` aborts the restart -- the page is not in the state
+    the route assumed, and continuing would record answers against a page that
+    never existed -- so the gate is declared unexplored and the walk resumes
+    from wherever the re-execution stopped.
     """
     _record_restart(ledger, restart)
     walk = frontier.open_restart(restart)
@@ -558,35 +610,56 @@ def _restart_walk(
         ledger,
     )
     log_contract(log, "ScraperResult", result)
-    # The re-entered page is what the replay runs against, and the board must
-    # hold its controls before anything is assigned against them.
+    # The re-entered page is what the re-execution starts from; its board is
+    # re-established with the controls as they stand now.
     frontier.observe(result.page, None, result.addedControls)
+    pages[result.page.stageId] = result.page
 
     replayed: list[tuple[str, Assignment]] = []
-    report: FillReport | None = None
-    for _, assignment in _prefix_before(prefix, restart.fieldId, restart.stageId):
+    for stage, assignment in _prefix_before(prefix, restart.fieldId, restart.stageId):
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
         if not report.ok:
             frontier.abandon_gate(
                 restart.fieldId,
-                f"prefix replay failed at {assignment.fieldId or assignment.locator} "
+                f"prefix re-execution failed at {assignment.fieldId or assignment.locator} "
                 f"on walk {walk}",
                 restart.stageId,
             )
-            frontier.observe(result.page, report, result.addedControls)
+            frontier.fold(stage, report)
             return result, replayed, None
 
-        # Recorded against the stage the page was on when the action ran, which
-        # an `advance` changes: the entry is what a later restart cuts on.
-        replayed.append((result.page.stageId, assignment))
-        _generate(generator, job_id, result.page, report, walk, ledger)
-        result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
-        # Folded in per fill, not once at the end: the new walk cleared the
-        # attempt record, so a replayed field the board never saw again would be
-        # assigned a second time.
-        frontier.observe(result.page, report, result.addedControls)
-        report = None
+        # The stage is the one recorded when the action first ran -- what an
+        # `advance` changes, and what a later restart cuts on. It also names
+        # the board the report belongs to, so a fill after an advance lands on
+        # the next page's board without a look to tell the two apart.
+        replayed.append((stage, assignment))
+        frontier.fold(stage, report)
+        known = pages.get(stage)
+        if known is None:
+            raise RuntimeError(
+                f"re-executing a fill on stage {stage!r} that was never described"
+            )
+        _generate(generator, job_id, known, report, walk, ledger)
+
+    # One look, where the answer is consumed: does the page stand where the
+    # gate is? The prior is the gate page as last seen, so the diff is against
+    # the page this should be rather than the entry page it started from.
+    result = perceive(
+        tab,
+        PerceiveRequest(
+            job_id=job_id,
+            page_index=1,
+            objective=objective,
+            prior=pages.get(restart.stageId),
+        ),
+        settings,
+        ledger,
+    )
+    log_contract(log, "ScraperResult", result)
+    frontier.observe(result.page, None, result.addedControls)
+    pages[result.page.stageId] = result.page
+    _note_divergence(frontier, result, restart.stageId, walk)
 
     if result.page.stageId != restart.stageId:
         # The replay did not arrive where the gate is, so setting it would act
@@ -605,7 +678,33 @@ def _restart_walk(
 
     _generate(generator, job_id, result.page, report, walk, ledger)
     result = _perceive_after(tab, result, owed, job_id, objective, settings, ledger)
+    pages[result.page.stageId] = result.page
     return result, replayed, report
+
+
+def _note_divergence(
+    frontier: Frontier, result: ScraperResult, expected_stage: str, walk: int
+) -> None:
+    """Make a silent mid-prefix change visible in the log.
+
+    Re-execution does not look between fills, so a control that mounted only
+    on this pass is not caught there. The one look after the prefix can at
+    least report that the page holds a different number of controls than the
+    board knew, which is the signal a reader needs to find a missed reveal.
+    """
+    board = frontier.boards.get(expected_stage)
+    if board is None or result.page.stageId != expected_stage:
+        return
+    seen, known = len(result.page.controls), len(board.controls)
+    if seen != known:
+        log.warning(
+            "re-execution arrived with %d controls on %s but the board knew %d "
+            "walk=%d; a control may have mounted only on this pass",
+            seen,
+            expected_stage,
+            known,
+            walk,
+        )
 
 
 def _prefix_before(
