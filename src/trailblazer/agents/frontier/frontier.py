@@ -256,9 +256,12 @@ class Frontier:
     def _apply(self, board: Board, report: FillReport) -> None:
         """Mark what the filler did, including a gate side taken or options revealed."""
         if report.fieldId is None:
-            # An `advance`: the action was clicked, so it is not re-issued.
-            board.advanced.add(report.locator)
-            board.dismissed_blockers.add(report.locator)
+            # An `advance` that was clicked is not re-issued. One that was
+            # refused was never tried: recording it would leave a dialog with
+            # no dismisser for the rest of the walk.
+            if report.ok:
+                board.advanced.add(report.locator)
+                board.dismissed_blockers.add(report.locator)
             return
 
         if report.intent == "expand" and report.ok and report.optionsRevealed:
@@ -470,7 +473,23 @@ class Frontier:
         page is a form with two fields and a submit, and needs no special case.
         """
         assert self.board is not None and self.page is not None
-        if not self.page.next or self.page.next in self.board.advanced:
+        if not self.page.next:
+            if (self.page.controls and not self.page.blockers and not self.board.stuck
+                    and not self.board.unattempted()):
+                # Only once every field is done: a forward control can appear as
+                # the form completes, and a missing one on first sight is not
+                # yet a wall.
+                # A form page with every field done and no way forward is not a
+                # page that is finished; it is a page the crawl cannot leave. On
+                # Pie's workforce page the scraper found no Next in fourteen
+                # looks, and the crawl restarted for a gate, exhausted it, and
+                # would have reported the flow done at page two.
+                self.mark_stuck(
+                    f"no forward control found on {self.board.stage_id} with "
+                    f"{len(self.page.controls)} fields attempted and no blocker"
+                )
+            return None
+        if self.page.next in self.board.advanced:
             return None
         self.board.advanced.add(self.page.next)
         log.info("advancing stage_id=%s locator=%r", self.board.stage_id, self.page.next)

@@ -168,7 +168,7 @@ class Board:
             )
         self.controls[control.fieldId] = control
 
-        sides = None if control.disabled else gate_sides(control)
+        sides = None if (control.disabled or control.additionalRow) else gate_sides(control)
         if sides is None:
             self.gates.pop(control.fieldId, None)
         elif control.fieldId not in self.gates:
@@ -189,6 +189,7 @@ class Board:
             if f not in self.attempted
             and f in self.present
             and not self.controls[f].disabled
+            and not self.controls[f].additionalRow
         ]
 
     def half_walked(self) -> list[str]:

@@ -118,6 +118,22 @@ def resolve_click_target(page: Page, locator: str):
             "control; it is not unique"
         )
     if len(visible) != 1:
+        # A dialog often offers the same dismissal twice: an icon-only x and a
+        # labelled "Close". Both are visible and both compute the same name, so
+        # they are equivalent -- but only one carries its own text, and that is
+        # the button a person would press. Pie's bureau notice stayed open on
+        # this tie, and the modal hid the page's buttons from the accessibility
+        # tree for the rest of the walk.
+        try:
+            with_text = [
+                i for i in visible
+                if (found.nth(i).evaluate("n => (n.textContent || '').trim()") or "")
+            ]
+        except PlaywrightError:
+            with_text = []
+        if len(with_text) == 1:
+            log.info("locator %r: %d visible copies, one labelled; clicking the labelled one", locator, len(visible))
+            return found.nth(with_text[0])
         raise LocatorError(
             f"locator {locator!r} matched {count} equivalent elements with "
             f"{len(visible)} visible; exactly one must be"

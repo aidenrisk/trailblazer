@@ -298,7 +298,33 @@
       };
     });
 
+  markAdditionalRows(controls);
   return { controls, actions };
+}
+
+// A repeated-row table -- class code, full-time, part-time, payroll, times
+// three -- names its cells by prefix and row index: classCode0, fte-1,
+// payroll-2. Row 0 is the record the form asks for; rows 1+ are "add another"
+// entries. Pie's Next moved with row 0 alone and rejected three identical rows
+// as "Duplicate class code", so filling the extra rows at all is wrong. A row
+// counts as additional only when at least two different prefixes share its
+// index and each has a row-0 sibling: "address2" beside "address1" is a second
+// field, not a second record.
+function markAdditionalRows(controls) {
+  const parse = (s) => { const m = /^(.*?)[-_]?(\d+)$/.exec(s || ''); return m && m[1] ? { prefix: m[1], index: Number(m[2]) } : null; };
+  const rows = new Map();
+  const seen = new Set();
+  for (const c of controls) {
+    const key = parse(c.id) || parse(c.name);
+    if (!key) continue;
+    seen.add(key.prefix + '|' + key.index);
+    if (!rows.has(key.index)) rows.set(key.index, new Set());
+    rows.get(key.index).add(key.prefix);
+  }
+  for (const c of controls) {
+    const key = parse(c.id) || parse(c.name);
+    c.additionalRow = !!(key && key.index > 0 && rows.get(key.index).size >= 2 && seen.has(key.prefix + '|0'));
+  }
 }
 
 // A control whose value is picked from a list rather than typed. Such an input

@@ -132,6 +132,11 @@ class Control(BaseModel):
     like `formatHint`, excluded from the serialized shape for the same reason.
     """
 
+    additionalRow: bool = Field(default=False, exclude=True)
+    """A cell of an "add another" row in a repeated table: row 1+ of classCode,
+    fte, pte, payroll. Never assigned and never a gate -- the form asks for one
+    record, and Pie rejected three identical ones. Measured, restored."""
+
     typeahead: bool = Field(default=False, exclude=True)
     """A chooser that is typed into: suggestions appear for the text and one is
     picked. Measured -- a writable input with a listbox or combobox role -- and

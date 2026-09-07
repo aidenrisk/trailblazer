@@ -508,8 +508,15 @@ _PAGE_PROBLEMS_JS = """
   const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const text = (n) => (n && (n.textContent || '').trim()) || '';
   const groups = new Map();
+  // Same rule as the extractor's markAdditionalRows: row 1+ of a repeated
+  // table is optional, and an empty one is not a problem to fix.
+  const parse = (s) => { const m = /^(.*?)[-_]?(\\d+)$/.exec(s || ''); return m && m[1] ? { prefix: m[1], index: Number(m[2]) } : null; };
+  const all = [...document.querySelectorAll('input, select, textarea')];
+  const rows = new Map(); const seen = new Set();
+  for (const el of all) { const k = parse(el.id) || parse(el.name); if (!k) continue; seen.add(k.prefix + '|' + k.index); if (!rows.has(k.index)) rows.set(k.index, new Set()); rows.get(k.index).add(k.prefix); }
+  const additional = (el) => { const k = parse(el.id) || parse(el.name); return !!(k && k.index > 0 && rows.get(k.index).size >= 2 && seen.has(k.prefix + '|0')); };
   document.querySelectorAll('input, select, textarea').forEach((el) => {
-    if (!vis(el) || el.disabled || el.readOnly && !/listbox|combobox/.test(el.getAttribute('role') || '')) return;
+    if (!vis(el) || el.disabled || additional(el) || el.readOnly && !/listbox|combobox/.test(el.getAttribute('role') || '')) return;
     const type = (el.getAttribute('type') || el.tagName).toLowerCase();
     if (type === 'hidden' || type === 'submit' || type === 'button') return;
     const id = el.id ? '#' + CSS.escape(el.id) : (el.name ? `[name="${el.name}"]` : '');
