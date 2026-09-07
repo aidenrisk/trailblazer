@@ -189,6 +189,39 @@ class Frontier:
         log_contract(log, "FrontierBoard", board.summary())
         self._record("observe", page.stageId, started)
 
+    def reopen(self, locators: list[str], forward: str | None) -> list[str]:
+        """Put fields back on the to-do list after a forward press changed nothing.
+
+        Pressing Next with every field attempted is not the same as every field
+        being right. The Loop reads the page for problems; the controls named
+        here lose their attempt so they are assigned again, and the forward
+        control is forgotten so it can be pressed again once they are. Returns
+        the fieldIds reopened.
+        """
+        assert self.board is not None
+        by_locator = {c.locator: f for f, c in self.board.controls.items()}
+        reopened = [by_locator[l] for l in locators if l in by_locator]
+        for field_id in reopened:
+            self.board.attempted.discard(field_id)
+        if forward:
+            self.board.advanced.discard(forward)
+        if reopened:
+            log.warning(
+                "reopening stage_id=%s fields=%s after a forward press changed nothing",
+                self.board.stage_id, reopened,
+            )
+        return reopened
+
+    def mark_stuck(self, reason: str) -> None:
+        """The page is complete as far as anything can tell, and it will not advance.
+
+        Not a completion. The flow is recorded as not done, with the reason, so
+        a crawl that pressed Next into a wall reports that rather than success.
+        """
+        assert self.board is not None
+        self.board.stuck = reason
+        log.error("stuck stage_id=%s: %s", self.board.stage_id, reason)
+
     def fold(self, stage_id: str, report: FillReport) -> None:
         """Fold one report into the board for `stage_id`, with no fresh description.
 
@@ -350,12 +383,18 @@ class Frontier:
         one under the walk: a gate owing a side is a route not yet taken, and a
         gate whose side was declared unexplored carries its reason instead.
         """
+        if any(self.boards[s].stuck for s in self.stage_order):
+            return False
         return not any(
             self.boards[stage_id].half_walked()
             or self.boards[stage_id].remaining_absent()
             for stage_id in self.stage_order
             if stage_id != self._start_stage
         )
+
+    def stuck_reason(self) -> str | None:
+        """Why the flow could not proceed, if a page would not advance."""
+        return next((self.boards[s].stuck for s in self.stage_order if self.boards[s].stuck), None)
 
     def summary(self) -> dict:
         """The current board's state, for logging."""
@@ -467,12 +506,25 @@ class Frontier:
         assert self.board is not None and self.page is not None
         if not self.page.blockers:
             return None
-        words = ("accept", "agree", "dismiss", "close", "got it", "ok", "continue", "allow")
-        for action in self.page.actions:
-            if action.locator in self.board.dismissed_blockers:
-                continue
-            if any(w in action.label.casefold() for w in words):
-                return action
+        # An affirmative dismisser first. Pie's multi-state notice offers
+        # "Cancel" and "I Understand"; the crawl's list knew neither, matched a
+        # "Close" it had already spent, and reported no way to clear a dialog
+        # whose affirmative button restores the page and keeps the answer.
+        # A negative dismisser is never chosen: it tends to revert the answer
+        # that raised the notice.
+        affirmative = ("understand", "acknowledge", "accept", "agree", "got it", "proceed", "allow", "ok")
+        generic = ("dismiss", "close", "continue")
+        negative = ("cancel", "decline", "back", "no thanks")
+        candidates = [
+            a for a in self.page.actions
+            if a.locator not in self.board.dismissed_blockers
+            and not any(n in a.label.casefold() for n in negative)
+        ]
+        for words in (affirmative, generic):
+            for action in candidates:
+                label = action.label.casefold()
+                if any(w in label for w in words):
+                    return action
         return None
 
     def _advance_to_target(self) -> Assignment | None:
@@ -518,7 +570,12 @@ class Frontier:
         if matched:
             return next((a for a in matched if a.unique), matched[0])
 
-        if self.page.controls:
+        # The unmatched fallback is for a landing page with nothing else on it.
+        # A page with fields is a form, and a page with a blocker is loading or
+        # covered by a dialog -- it has nothing to advance *through*. On Pie's
+        # workforce page the fallback clicked the "Business Info" step tab,
+        # backwards, against a spinner.
+        if self.page.controls or self.page.blockers:
             return None
         chosen = next((a for a in candidates if a.unique), candidates[0])
         log.warning(
@@ -835,10 +892,23 @@ class Frontier:
         it is left `None`, because picking a value is the filler's job.
         """
         if control.options is None:
-            if control.type in _EXPANDABLE_TYPES:
+            if control.type in _EXPANDABLE_TYPES and not control.typeahead:
                 # The choices are not in the DOM until the widget is opened.
                 return Assignment(
                     intent="expand", locator=control.locator, fieldId=control.fieldId
+                )
+            if control.typeahead:
+                # Opening a typeahead reveals nothing; its choices answer what is
+                # typed. Filled like a text field, and the filler picks the
+                # suggestion that matches.
+                return Assignment(
+                    intent="fill",
+                    locator=control.locator,
+                    fieldId=control.fieldId,
+                    value=self._seed_for(control),
+                    typeahead=True,
+                    constraintHint=control.formatHint or None,
+                    helpText=control.helpText or None,
                 )
             if control.type == "toggle":
                 # `value` is "true"/"false": the two sides of a checkbox have no

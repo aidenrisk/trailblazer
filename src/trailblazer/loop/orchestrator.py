@@ -34,7 +34,7 @@ from playwright.sync_api import Page
 
 from trailblazer.agents.browser import shared_session
 from trailblazer.agents.browser.session import AttachedSession, BrowserSession, devtools_running
-from trailblazer.agents.form_filler.form_filler import fill_one
+from trailblazer.agents.form_filler.form_filler import fill_one, page_problems
 from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.login import LoginError, resolve_login
 from trailblazer.agents.scraper.scraper import perceive
@@ -223,6 +223,9 @@ def run_crawl(
         if validate_script:
             _validate(generator, job_id, carrier_id, settings, headed, ledger)
 
+    if frontier.stuck_reason():
+        generator.metadata_doc.stoppedReason = frontier.stuck_reason()
+        generator.flush()
     state = generator.state()
     log.info(
         "crawl end job_id=%s stage_id=%s polarity=%s routes=%d flow_done=%s "
@@ -461,6 +464,16 @@ def _walk_page(
             continue
 
         assignment = decision
+        if assignment.intent == "advance" and assignment.locator == result.page.next:
+            # Every field attempted is not every field right. Read the page
+            # before moving on; anything wrong is re-filled first.
+            problems = page_problems(tab)
+            if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
+                log.info("page not complete before advance: %s", problems)
+                # The last fill's report has already been folded in; folding it
+                # again would mark the reopened field attempted before it is refilled.
+                report = None
+                continue
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
         if report.ok:
@@ -471,7 +484,30 @@ def _walk_page(
             prefix.append((result.page.stageId, _pinned(assignment, report)))
 
         _generate(generator, job_id, result.page, report, frontier.walk, ledger)
+        before_stage = result.page.stageId
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
+
+        if (
+            assignment.intent == "advance"
+            and result.page.stageId == before_stage
+            and assignment.locator == result.page.next
+            and result.polarity == "-ve"
+        ):
+            # Forward was pressed and nothing happened. That is a rejection to
+            # diagnose, not a page to declare done: on a live run the crawl
+            # pressed Next six times into a wall and reported the flow finished.
+            problems = page_problems(tab)
+            if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
+                log.warning("forward press changed nothing; problems=%s", problems)
+                report = None
+                continue
+            frontier.mark_stuck(
+                f"{assignment.locator!r} pressed on {before_stage} and the page did not "
+                "change; no invalid, empty or errored field found"
+            )
+            _record_route_end(generator, frontier, result)
+            _record_branch_exploration(generator, frontier)
+            return result
 
     log.error(
         "flow did not finish in %d actions job_id=%s stage_id=%s walk=%d board=%s",

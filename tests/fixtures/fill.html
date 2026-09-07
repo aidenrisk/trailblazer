@@ -44,6 +44,13 @@
   <input type="text" id="entityPicker" name="entityPicker" readonly role="listbox"
          aria-expanded="false" value="">
 
+  <!-- Commits only on blur, as a framework-controlled input does: the value
+       shows the moment it is typed, but the form does not have it until focus
+       leaves. Pie's fields behave this way, and a fill that never blurred left
+       Next with nothing to advance on. -->
+  <label for="committed">Website</label>
+  <input type="text" id="committed" name="committed" data-committed="">
+
   <!-- Genuinely locked: pre-filled and read-only, nothing to set. -->
   <label for="agencyProgram">Agency / Program</label>
   <input type="text" id="agencyProgram" name="agencyProgram" readonly value="Direct">
@@ -184,6 +191,11 @@
     });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
   })();
+
+  // Commits on blur only.
+  document.getElementById('committed').addEventListener('blur', function (e) {
+    e.target.setAttribute('data-committed', e.target.value);
+  });
 
   // Rejects every value, to exercise the retry budget running out.
   document.getElementById('impossible').addEventListener('input', function (e) {

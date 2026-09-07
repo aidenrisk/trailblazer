@@ -136,6 +136,11 @@ class Board:
     is never recognised as a gate.
     """
 
+    stuck: str | None = None
+    """Why this page would not advance, when pressing forward changed nothing
+    and the page showed no problem to fix. A stuck page means the flow is not
+    done, whatever the gates say."""
+
     unexplored: dict[str, str] = field(default_factory=dict)
     """fieldId -> why a gate's owed side was never walked.
 

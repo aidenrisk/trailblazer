@@ -743,3 +743,73 @@ def test_no_credentials_means_no_config_rather_than_an_empty_one(
     )
 
     assert orchestrator._write_replay_config("fixture", Settings(), tmp_path) is None
+
+
+# -- a forward press that changes nothing -----------------------------------------
+
+
+def _page_with_next(controls):
+    r = _page(controls)
+    r.page.next = 'button:has-text("Next")'
+    return r
+
+
+def test_a_next_that_changes_nothing_reopens_the_fields_the_page_flags(
+    monkeypatch, frontier: Frontier
+) -> None:
+    """Every field attempted is not every field right.
+
+    Next is pressed, the page stays, and it flags q_001. The field loses its
+    attempt and is filled again; then Next is pressed again.
+    """
+    performed: list = []
+    result = _page_with_next([_control("q_001"), _control("q_002")])
+    result.polarity = "-ve"
+    flags = iter([[], [{"locator": "#q_001", "problem": "empty"}], [], []])
+
+    monkeypatch.setattr(orchestrator, "fill", _recording_fill(performed))
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
+    monkeypatch.setattr(orchestrator, "page_problems", lambda tab: next(flags, []))
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings())
+
+    fields = [f for f, _ in performed]
+    assert fields.count("q_001") == 2                        # filled, reopened, filled again
+    assert fields.count(None) == 2                           # Next pressed twice
+    assert fields.index(None) < fields.index("q_001", 1) < len(fields) - 1
+
+
+def test_a_next_that_changes_nothing_with_no_problem_marks_the_flow_stuck(
+    monkeypatch, tmp_path, frontier: Frontier
+) -> None:
+    """Six presses into a wall were reported as a finished flow on a live run."""
+    from trailblazer.agents.generator import Generator
+
+    result = _page_with_next([_control("q_001")])
+    result.polarity = "-ve"
+    generator = Generator(out_dir=tmp_path, carrier="pie", business_type="c", insurance_type="wc")
+
+    monkeypatch.setattr(orchestrator, "fill", _recording_fill([]))
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
+    monkeypatch.setattr(orchestrator, "page_problems", lambda tab: [])
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings(), None, generator)
+
+    assert not frontier.flow_done()
+    assert "did not change" in frontier.stuck_reason()
+
+
+def test_problems_found_before_next_are_fixed_before_it_is_pressed(monkeypatch, frontier: Frontier) -> None:
+    performed: list = []
+    result = _page_with_next([_control("q_001")])
+    checks = iter([[{"locator": "#q_001", "problem": "marked invalid"}], [], []])
+
+    monkeypatch.setattr(orchestrator, "fill", _recording_fill(performed))
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
+    monkeypatch.setattr(orchestrator, "page_problems", lambda tab: next(checks, []))
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings())
+
+    fields = [f for f, _ in performed]
+    assert fields[:2] == ["q_001", "q_001"]                  # re-filled before any Next
+    assert None in fields                                    # and then Next

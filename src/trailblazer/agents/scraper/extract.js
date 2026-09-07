@@ -276,6 +276,11 @@
         ].filter(Boolean).join('; ').slice(0, 300),
         accessibleName: accName,
         helpTrigger,
+        // A chooser you can type into. Pie's class-code box carries the same
+        // listbox role as its entity picker but is writable: suggestions appear
+        // as you type and one must be picked. Opening it reads nothing, and the
+        // crawl left it empty on every row.
+        typeahead: isChooser(el) && tag === 'input' && !el.readOnly,
         required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
         // readonly is grouped with disabled -- both mean the value cannot be
         // typed -- unless the input is a chooser. A listbox or combobox renders

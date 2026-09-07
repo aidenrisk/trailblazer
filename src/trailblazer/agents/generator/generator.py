@@ -539,6 +539,10 @@ class Generator:
 
     # -- output -----------------------------------------------------------
 
+    def flush(self) -> None:
+        """Write the three files now. For a caller that set a document field directly."""
+        self._flush()
+
     def _flush(self) -> None:
         """Write all three files. Incremental, so a crash leaves inspectable work."""
         self.questions_path.write_text(

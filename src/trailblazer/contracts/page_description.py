@@ -132,6 +132,11 @@ class Control(BaseModel):
     like `formatHint`, excluded from the serialized shape for the same reason.
     """
 
+    typeahead: bool = Field(default=False, exclude=True)
+    """A chooser that is typed into: suggestions appear for the text and one is
+    picked. Measured -- a writable input with a listbox or combobox role -- and
+    restored like `locator`. Frontier fills it rather than opening it."""
+
     @field_validator("locator")
     @classmethod
     def _reject_snapshot_ref(cls, v: str) -> str:

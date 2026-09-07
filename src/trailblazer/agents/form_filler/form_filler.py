@@ -23,6 +23,7 @@ Two things it owns that nothing else can:
   says so rather than pretending.
 """
 
+import json
 import time
 
 from playwright.sync_api import Error as PlaywrightError
@@ -65,7 +66,11 @@ those as options once.
 _APPEARED_OPTIONS_JS = """
 (el) => {
   const doc = el.ownerDocument;
-  const text = (n) => (n.textContent || '').trim().replace(/\\s+/g, ' ');
+  // innerText, not textContent: an option laid out as two lines -- a name
+  // over a code -- has its lines glued by textContent and separated by the
+  // accessibility engine, so a name built from textContent addresses nothing
+  // and a label recorded from it is one no client answer could ever equal.
+  const text = (n) => ((n.innerText ?? n.textContent) || '').trim().replace(/\\s+/g, ' ');
   const isNew = (n) => !n.__tbSeen;
   const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const out = [];
@@ -302,6 +307,9 @@ def _do_fill(
             help_text=assignment.helpText,
         )
 
+    if assignment.typeahead:
+        return _type_and_pick(page, assignment, value, usd, unpriced)
+
     write_tools.fill(page, assignment.locator, value)
 
     retried = False
@@ -351,6 +359,92 @@ def _do_fill(
         usd,
         unpriced,
     )
+
+
+_SUGGESTION_BUDGET_MS = 5_000
+"""How long a typeahead is given to raise its suggestions after typing.
+
+Polled, not slept: Pie's class-code lookup answered in 0.4s when the field was
+clicked first and 2.4s when it was not, and a fixed 1.8-second wait saw nothing
+and refused to pick. The lookup is a network call; its latency is not ours to
+assume."""
+
+
+def _wait_for_suggestions(page: Page, locator: str) -> list[dict[str, str | None]]:
+    """The suggestions a typeahead raised, polled until some appear or the budget ends."""
+    deadline = time.monotonic() + _SUGGESTION_BUDGET_MS / 1000
+    while True:
+        options = _read_appeared_options(page, locator)
+        if options or time.monotonic() >= deadline:
+            return options
+        page.wait_for_timeout(200)
+
+
+def _type_and_pick(
+    page: Page, assignment: Assignment, value: str, usd: float, unpriced: bool
+) -> tuple[FillReport, float, bool]:
+    """Type into a typeahead and pick the suggestion that matches.
+
+    Pie's class-code box: type "5183" and three suggestions appear, each a
+    button reading "Plumbing - Low Wage / 5183"; clicking one sets the field to
+    the code. Typed text left unpicked is not a class, so the pick is the
+    commit. The match is the suggestion whose text contains what was typed;
+    with the class code as the seed that is the code itself, which is unique.
+    Several matches with none exact is a real ambiguity and is blocked rather
+    than guessed at.
+    """
+    page.evaluate(_MARK_JS)
+    # Clicked first: focus arms the lookup, and the suggestions then arrive in
+    # under half a second instead of two and a half.
+    write_tools.click(page, assignment.locator)
+    write_tools.type_text(page, assignment.locator, value)
+    options = _wait_for_suggestions(page, assignment.locator)
+    needle = " ".join(value.split()).casefold()
+    matches = [o for o in options if needle in " ".join(o["label"].split()).casefold()]
+    exact = [o for o in matches if o["label"].casefold().split()[-1:] == [needle]]
+    chosen = exact[0] if len(exact) == 1 else (matches[0] if len(matches) == 1 else None)
+    if chosen is None:
+        _close(page, assignment.locator)
+        return _blocked(
+            assignment,
+            f"typeahead offered {len(options)} suggestions for {value!r}, "
+            f"{len(matches)} matching; nothing unambiguous to pick",
+        ), usd, unpriced
+    target = chosen.get("locator") or _by_typed_text(page, value)
+    if target is None:
+        _close(page, assignment.locator)
+        return _blocked(
+            assignment,
+            f"typeahead matched {chosen['label']!r} for {value!r} but no unique address "
+            "could be measured for it",
+        ), usd, unpriced
+    write_tools.click(page, target)
+    page.wait_for_timeout(300)
+    committed = write_tools.resolve(page, assignment.locator).input_value() or chosen["label"]
+    log.info("typeahead %s: typed %r, picked %r, holds %r", assignment.locator, value, chosen["label"], committed)
+    stated = "; ".join(t for t in (assignment.constraintHint, assignment.helpText) if t)
+    constraint = _constraint_from(page, assignment.locator, stated, "")
+    return _report(assignment, ok=True, valueUsed=committed, constraint=constraint), usd, unpriced
+
+
+def _by_typed_text(page: Page, value: str) -> str | None:
+    """Address a suggestion by the text that was typed, when its full name will not.
+
+    A suggestion's accessible name is the role engine's to compute -- Pie's
+    class-code buttons split name and code across two lines and the computed
+    name did not equal the text as read -- so a name-based address can miss.
+    What was typed is unique among the suggestions it raised, by construction:
+    the lookup returned them for it. Measured unique like every other locator.
+    """
+    quoted = json.dumps(value)
+    for sel in (f'[role="option"]:has-text({quoted}) >> visible=true',
+                f'[role="menuitem"]:has-text({quoted}) >> visible=true'):
+        try:
+            if page.locator(sel).count() == 1:
+                return sel
+        except PlaywrightError:
+            continue
+    return None
 
 
 _LABEL_JS = """
@@ -406,6 +500,55 @@ _TYPE_JS = """
   return type && tag === 'input' ? `input[type=${type}]` : tag;
 }
 """
+
+
+_PAGE_PROBLEMS_JS = """
+() => {
+  const out = [];
+  const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const text = (n) => (n && (n.textContent || '').trim()) || '';
+  const groups = new Map();
+  document.querySelectorAll('input, select, textarea').forEach((el) => {
+    if (!vis(el) || el.disabled || el.readOnly && !/listbox|combobox/.test(el.getAttribute('role') || '')) return;
+    const type = (el.getAttribute('type') || el.tagName).toLowerCase();
+    if (type === 'hidden' || type === 'submit' || type === 'button') return;
+    const id = el.id ? '#' + CSS.escape(el.id) : (el.name ? `[name="${el.name}"]` : '');
+    if (type === 'radio' || type === 'checkbox') {
+      // A group is one control, identified by its name -- as the extractor keys
+      // it -- not by whichever member happens to come first.
+      const g = el.name || id; const cur = groups.get(g) || {any: false, id: el.name ? `[name="${el.name}"]` : id};
+      cur.any = cur.any || el.checked; groups.set(g, cur); return;
+    }
+    let message = '';
+    for (const sid of (el.getAttribute('aria-errormessage') || '').split(/\\s+/)) {
+      const t = sid && text(document.getElementById(sid)); if (t) { message = t; break; }
+    }
+    const invalid = (el.getAttribute('aria-invalid') || '').toLowerCase() === 'true';
+    const optional = /optional/i.test(text(el.closest('label')) + ' ' + text(document.querySelector(`label[for="${el.id}"]`)));
+    if (invalid || message) out.push({locator: id, problem: message || 'marked invalid'});
+    else if (!String(el.value || '').trim() && !optional) out.push({locator: id, problem: 'empty'});
+  });
+  for (const [g, cur] of groups) if (!cur.any) out.push({locator: cur.id, problem: 'no option chosen'});
+  return out;
+}
+"""
+
+
+def page_problems(page: Page) -> list[dict[str, str]]:
+    """What stops this page from being complete, read straight off the DOM.
+
+    No model. Every visible, settable control is checked for an invalid flag,
+    text in its named error slot, or an empty value when nothing marks it
+    optional; a radio or checkbox group counts as one control needing one
+    choice. Run before a forward control is pressed and again when pressing it
+    changed nothing, so an unfilled or rejected field is re-filled rather than
+    the page being declared done.
+    """
+    try:
+        return page.evaluate(_PAGE_PROBLEMS_JS)
+    except PlaywrightError as e:
+        log.warning("could not read the page for problems: %s", e)
+        return []
 
 
 def _rejection_text(page: Page, locator: str) -> str | None:
@@ -603,8 +746,13 @@ def _do_advance(page: Page, assignment: Assignment) -> FillReport:
     `write_tools.click` runs the denylist check before dispatch, so a "Purchase"
     or "Bind" button never reaches the page from here.
     """
+    before = page.url
     write_tools.click(page, assignment.locator)
-    write_tools.wait_settled(page)
+    moved = write_tools.wait_for_transition(page, before)
+    if moved:
+        # The new page may still be loading; a look now describes a spinner.
+        write_tools.wait_for_content(page)
+    log.info("advance %s -> %s", assignment.locator, "moved" if moved else "same url")
     return _report(assignment, ok=True)
 
 

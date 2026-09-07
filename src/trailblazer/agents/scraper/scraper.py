@@ -146,6 +146,7 @@ def restore_measured_locators(
             bool(source.get("disabled")),
             str(source.get("formatHints") or ""),
             str(source.get("helpText") or ""),
+            bool(source.get("typeahead")),
         )
 
     for control in described.controls:
@@ -196,6 +197,7 @@ def _set_measured(
     disabled: bool = False,
     format_hint: str = "",
     help_text: str = "",
+    typeahead: bool = False,
 ) -> None:
     """Assign the measured fields, bypassing nothing the contract checks.
 
@@ -210,11 +212,13 @@ def _set_measured(
         "disabled": disabled,
         "formatHint": format_hint,
         "helpText": help_text,
+        "typeahead": typeahead,
     }
     Control.model_validate({**fields, **measured})
     control.locator = locator
     control.unique = unique
     control.helpText = help_text
+    control.typeahead = typeahead
     control.disabled = disabled
     control.formatHint = format_hint
 

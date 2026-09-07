@@ -796,3 +796,27 @@ def test_a_pinned_select_with_a_value_but_no_locator_still_clicks_its_option(pag
 
     assert report.ok and report.valueUsed == "Limited Liability Company"
     assert page.locator("#entityPicker2").input_value() == "Limited Liability Company"
+
+
+def test_page_problems_reads_empty_invalid_and_unchosen_off_the_dom(page) -> None:
+    """The check before Next and after a Next that changed nothing. No model."""
+    from trailblazer.agents.form_filler.form_filler import page_problems
+
+    page.fill("#zipAlt", "123")           # rejects through its error slot
+    page.fill("#legalName", "Acme LLC")   # fine
+
+    found = {p["locator"]: p["problem"] for p in page_problems(page)}
+
+    assert found["#zipAlt"] == "Enter a 5-digit ZIP"
+    assert "#legalName" not in found
+    assert found["#fein"] == "empty"                               # required, untouched
+    assert found['[name="priorClaims"]'] == "no option chosen"      # radio group, none checked
+    assert "#agencyProgram" not in found                           # locked, not settable
+    assert found["#entityPicker2"] == "empty"                      # read-only chooser is settable
+
+
+def test_fill_leaves_the_field_so_a_blur_committed_value_is_committed(page) -> None:
+    """A framework input takes the value when focus leaves; fill alone never moved it."""
+    write_tools.fill(page, "#committed", "https://acme.example")
+
+    assert page.locator("#committed").get_attribute("data-committed") == "https://acme.example"

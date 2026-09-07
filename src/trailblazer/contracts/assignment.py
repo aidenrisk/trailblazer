@@ -66,6 +66,11 @@ class Assignment(BaseModel):
     which is set by label against the parent.
     """
 
+    typeahead: bool = False
+    """The control is typed into and then a suggestion is picked. The filler
+    types the value, waits for the suggestions it raises, and clicks the one
+    matching it; the committed value is what the control then holds."""
+
     constraintHint: str | None = None
     """What is known about the shape the field wants.
 

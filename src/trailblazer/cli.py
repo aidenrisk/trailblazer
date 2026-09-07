@@ -10,7 +10,7 @@ import typer
 from trailblazer.agents.browser import shared_session
 from trailblazer.agents.browser.launch import launch_persistent
 from trailblazer.agents.browser.session import AttachedSession
-from trailblazer.loop.orchestrator import perceive_once, run_crawl
+from trailblazer.loop.orchestrator import LOGIN_SEEDS, perceive_once, run_crawl
 from trailblazer.observability.logging import configure_logging
 from trailblazer.shared.config import get_settings
 from trailblazer.shared.dev_carrier_creds import resolve_carrier_creds
@@ -61,6 +61,12 @@ def crawl(
     validate: bool = typer.Option(
         False, "--validate", help="Replay the generated script against its own walk."
     ),
+    class_code: str | None = typer.Option(
+        None,
+        "--class-code",
+        help="The ISO/NAICS class code, typed verbatim into the carrier's class-code field. "
+        "It decides which eligibility questions render, so a guessed one crawls the wrong branch.",
+    ),
     start_text: str | None = typer.Option(
         None,
         "--start-text",
@@ -88,6 +94,7 @@ def crawl(
         out_dir=out,
         validate_script=validate,
         start_text=start_text,
+        seed_values={**LOGIN_SEEDS, **({"class code": class_code} if class_code else {})},
     )
     typer.echo(json.dumps(result.model_dump(mode="json"), indent=2))
 

@@ -17,6 +17,8 @@ dispatch path rather than in the caller so that no future caller can reach a
 click without it.
 """
 
+import time
+
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 
@@ -134,6 +136,27 @@ def fill(page: Page, locator: str, value: str) -> None:
     `Locator.fill` is used rather than `type`: it clears first and dispatches the
     input and change events frameworks listen for, which a keystroke simulation
     on a React-controlled input does not reliably do.
+
+    The field is blurred afterwards. A form commits and validates a value when
+    focus leaves it, and `fill` on its own never moves focus: on Pie every
+    field displayed its value, nothing was ever validated, Next did nothing and
+    reported nothing, and the crawl called the page finished. A person's typing
+    always ends with focus leaving the field; so does this.
+    """
+    element = resolve(page, locator)
+    try:
+        element.fill(value, timeout=_ACTION_TIMEOUT_MS)
+        element.blur(timeout=_ACTION_TIMEOUT_MS)
+    except PlaywrightError as e:
+        raise LocatorError(f"could not type into {locator!r}: {e}") from e
+
+
+def type_text(page: Page, locator: str, value: str) -> None:
+    """Type `value` and leave focus in the field.
+
+    For a typeahead: the suggestions it raises exist only while the field is
+    focused, so the blur that `fill` performs would dismiss them before one
+    could be picked. The pick is what commits the value.
     """
     element = resolve(page, locator)
     try:
@@ -196,6 +219,72 @@ def read_page_text(page: Page) -> str:
         return page.locator("body").inner_text()
     except PlaywrightError as e:
         raise LocatorError(f"could not read the page text: {e}") from e
+
+
+_TRANSITION_TIMEOUT_MS = 20_000
+"""How long a forward press is given to move the page.
+
+Pie's Next validates client-side first and navigates 4.6 seconds later on one
+branch and 7.5 on another, measured; network-idle is satisfied long before
+either, so idle alone read the old page and called the press a no-op. An
+8-second budget then called the 7.5-second branch stuck and ended a run. Too
+long costs seconds on a dialog dismissal that never navigates; too short ends
+a crawl that was about to advance.
+"""
+
+
+def wait_for_transition(page: Page, from_url: str, timeout_ms: int = _TRANSITION_TIMEOUT_MS) -> bool:
+    """Wait for the page to leave `from_url`, then settle. True if it moved.
+
+    A forward control on a single-page app often does its work in two phases:
+    validate in the browser, then navigate. Network-idle can be satisfied between
+    the two, so it is not evidence that the press did nothing. The URL is polled
+    until it changes or the budget runs out; either way the network is then
+    given its chance to go quiet, so the look that follows sees a settled page.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    moved = False
+    while time.monotonic() < deadline:
+        if page.url != from_url:
+            moved = True
+            break
+        page.wait_for_timeout(250)
+    wait_settled(page)
+    return moved
+
+
+_CONTENT_TIMEOUT_MS = 20_000
+_HAS_CONTENT_JS = """
+() => {
+  const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const controls = [...document.querySelectorAll('input, select, textarea')].filter((e) => e.type !== 'hidden' && vis(e)).length;
+  const dialog = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')].some(vis);
+  return controls > 0 || dialog;
+}
+"""
+
+
+def wait_for_content(page: Page, timeout_ms: int = _CONTENT_TIMEOUT_MS) -> bool:
+    """After a page change, wait until it has something to act on. True if it does.
+
+    A page that has just been reached may still be assembling itself: Pie's
+    workforce page runs a bureau lookup on arrival and shows a spinner with no
+    fields for two seconds, then a dialog over the form. A look taken at the
+    instant the URL changed saw zero controls, spent a model call describing
+    the spinner, and left Frontier with nothing to do but click a backwards
+    step tab. Polled cheaply on the DOM, no model, until a settable control or
+    a dialog is visible.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        try:
+            if page.evaluate(_HAS_CONTENT_JS):
+                return True
+        except PlaywrightError:
+            pass  # mid-navigation the document can be replaced under the call
+        page.wait_for_timeout(250)
+    log.warning("page showed no controls and no dialog within %dms: %s", timeout_ms, page.url)
+    return False
 
 
 def wait_settled(page: Page, timeout_ms: int = _SETTLE_TIMEOUT_MS) -> None:
