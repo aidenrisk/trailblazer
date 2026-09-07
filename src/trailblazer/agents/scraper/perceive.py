@@ -207,6 +207,64 @@ def _check_integrity(page: Page, controls: list[dict]) -> None:
         log.warning("controls with no accessible name: %s", ", ".join(map(str, unlabelled)))
 
 
+_TOOLTIP_SETTLE_MS = 400
+"""How long a hovered icon is given to mount its tooltip."""
+
+_TOOLTIP_SELECTOR = '[role="tooltip"], .MuiTooltip-tooltip, [data-tooltip-content]'
+
+
+def _read_help_tooltip(page: Page, key: str) -> str:
+    """Hover the help icon the extractor tagged for `key` and read what mounts.
+
+    The tooltip counterpart of opening a combobox to read its options: the text
+    exists in the DOM only while the icon is hovered, so a static extraction
+    never sees it, and Pie states the FEIN rule nowhere else. Read once per
+    control per perceive, then the mouse is parked so the tooltip unmounts.
+
+    A hover must not change the page. The URL is compared before and after; a
+    move that navigated means the tag landed on a link, and its text is not a
+    tooltip.
+    """
+    before = page.url
+    trigger = page.locator(f'[data-tb-help="{key}"]')
+    try:
+        trigger.first.hover(timeout=2_000)
+        page.wait_for_timeout(_TOOLTIP_SETTLE_MS)
+        tips = page.locator(_TOOLTIP_SELECTOR)
+        text = ""
+        for i in range(tips.count()):
+            t = tips.nth(i).inner_text().strip()
+            if t:
+                text = t
+                break
+    except PlaywrightError as e:
+        log.debug("help icon for %s could not be hovered: %s", key, e)
+        text = ""
+    finally:
+        try:
+            page.mouse.move(0, 0)
+            page.wait_for_timeout(150)
+        except PlaywrightError:
+            pass
+    if page.url != before:
+        log.warning("hovering the help icon for %s navigated the page; text discarded", key)
+        return ""
+    if text:
+        log.info("help tooltip read key=%s chars=%d", key, len(text))
+    return " ".join(text.split())[:400]
+
+
+def _untag_help_triggers(page: Page) -> None:
+    """Remove the extractor's `data-tb-help` marks so nothing leaks into later looks."""
+    try:
+        page.evaluate(
+            "() => document.querySelectorAll('[data-tb-help]')"
+            ".forEach((n) => n.removeAttribute('data-tb-help'))"
+        )
+    except PlaywrightError as e:
+        log.debug("could not remove help-trigger tags: %s", e)
+
+
 class DomSnapshotPerceiver:
     """DOM extraction for addressability, accessibility snapshot for semantics."""
 
@@ -221,9 +279,13 @@ class DomSnapshotPerceiver:
         controls = []
         for item in raw:
             locator, unique = _first_unique(page, item.get("candidates", []))
-            cleaned = {k: v for k, v in item.items() if k != "candidates"}
+            cleaned = {k: v for k, v in item.items() if k not in ("candidates", "helpTrigger")}
             cleaned["options"] = _measure_options(page, item.get("options"))
+            cleaned["helpText"] = (
+                _read_help_tooltip(page, item["key"]) if item.get("helpTrigger") else ""
+            )
             controls.append({**cleaned, "locator": locator, "unique": unique})
+        _untag_help_triggers(page)
 
         _check_integrity(page, controls)
 

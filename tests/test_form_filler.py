@@ -243,7 +243,9 @@ def test_a_rejected_fill_is_retried_and_the_constraint_is_reported(page, monkeyp
     assert report.constraint == {
         "unit": "",
         "format": "999999999",
-        "hint": "Please enter the FEIN",
+        # Prefixed so the script can tell what the page complained about from
+        # what it stated up front; both may be present in one hint.
+        "hint": "rejected with: Please enter the FEIN",
     }
     assert page.locator("#fein").get_attribute("aria-invalid") == "false"
 
@@ -257,14 +259,19 @@ def test_the_correction_call_is_given_the_pages_error_text(page, monkeypatch) ->
     assert calls[1]["error_text"] == "Please enter the FEIN"
 
 
-def test_an_accepted_fill_reports_no_constraint_and_no_retry(page, monkeypatch) -> None:
+def test_an_accepted_digit_fill_records_its_mask_with_no_retry(page, monkeypatch) -> None:
+    """No rejection, nothing stated up front -- the accepted shape is still a rule.
+
+    The earlier rule recorded nothing without a rejection, so a FEIN answered
+    correctly first time left the script unable to shape a different answer.
+    """
     _no_llm(monkeypatch, "123456789")
 
     report = fill_one(page, Assignment(intent="fill", locator="#fein", fieldId="q_002"), SETTINGS)
 
     assert report.ok
     assert report.retried is False
-    assert report.constraint is None
+    assert report.constraint == {"unit": "", "format": "999999999", "hint": ""}
 
 
 def test_a_field_still_rejected_after_two_retries_is_blocked(page, monkeypatch) -> None:
@@ -541,3 +548,67 @@ def test_the_control_type_reaches_the_chooser(page, monkeypatch) -> None:
     fill_one(page, Assignment(intent="fill", locator="#legalName", fieldId="q_001"), SETTINGS)
 
     assert calls[0]["control_type"] == "input[type=text]"
+
+
+# --------------------------------------------------------------------------- #
+# Rejection signals and the recorded constraint
+# --------------------------------------------------------------------------- #
+
+
+def test_a_rejection_through_the_error_slot_alone_is_detected_and_fixed(page, monkeypatch) -> None:
+    """The field never sets aria-invalid; only its named error slot fills.
+
+    One attribute was the earlier rule and this case was invisible to it.
+    """
+    calls = _no_llm(monkeypatch, lambda n: "123" if n == 1 else "94105")
+
+    report = fill_one(page, Assignment(intent="fill", locator="#zipAlt", fieldId="q_040"), SETTINGS)
+
+    assert report.ok and report.retried
+    assert calls[1]["error_text"] == "Enter a 5-digit ZIP"
+    assert report.constraint["format"] == "99999"
+    assert "rejected with: Enter a 5-digit ZIP" in report.constraint["hint"]
+
+
+def test_a_correct_first_fill_still_records_what_was_known(page, monkeypatch) -> None:
+    """No rejection happened, and the script still needs the rule."""
+    _no_llm(monkeypatch, "842673915")
+
+    report = fill_one(
+        page,
+        Assignment(
+            intent="fill", locator="#fein", fieldId="q_002",
+            constraintHint="at most 9 characters", helpText="Nine digits, no dashes",
+        ),
+        SETTINGS,
+    )
+
+    assert report.ok and not report.retried
+    assert report.constraint == {
+        "unit": "",
+        "format": "999999999",
+        "hint": "at most 9 characters; Nine digits, no dashes",
+    }
+
+
+def test_free_text_records_no_mask(page, monkeypatch) -> None:
+    """The shape of a business name is noise, not a rule."""
+    _no_llm(monkeypatch, "Acme LLC")
+
+    report = fill_one(page, Assignment(intent="fill", locator="#legalName", fieldId="q_001"), SETTINGS)
+
+    assert report.ok
+    assert report.constraint is None
+
+
+def test_the_help_text_reaches_the_value_chooser(page, monkeypatch) -> None:
+    """The tooltip is often the only place the rule is stated."""
+    calls = _no_llm(monkeypatch, "842673915")
+
+    fill_one(
+        page,
+        Assignment(intent="fill", locator="#fein", fieldId="q_002", helpText="Nine digits, no dashes"),
+        SETTINGS,
+    )
+
+    assert calls[0]["help_text"] == "Nine digits, no dashes"

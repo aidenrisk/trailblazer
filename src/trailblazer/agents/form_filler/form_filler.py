@@ -292,6 +292,7 @@ def _do_fill(
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
             control_type=_type_of(page, assignment.locator),
+            help_text=assignment.helpText,
         )
 
     write_tools.fill(page, assignment.locator, value)
@@ -314,6 +315,7 @@ def _do_fill(
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
             control_type=_type_of(page, assignment.locator),
+            help_text=assignment.helpText,
         )
         usd += call_usd
         unpriced = unpriced or call_unpriced
@@ -332,9 +334,11 @@ def _do_fill(
             unpriced,
         )
 
-    constraint = (
-        _constraint_from(page, assignment.locator, first_rejection or "") if retried else None
-    )
+    # Recorded whether or not a rejection happened: a field answered correctly
+    # first time still knows what the page and its tooltip stated, and that is
+    # what the replay script shapes a different client answer against.
+    stated = "; ".join(t for t in (assignment.constraintHint, assignment.helpText) if t)
+    constraint = _constraint_from(page, assignment.locator, stated, first_rejection or "")
     return (
         _report(assignment, ok=True, valueUsed=value, retried=retried, constraint=constraint),
         usd,
@@ -400,65 +404,78 @@ _TYPE_JS = """
 def _rejection_text(page: Page, locator: str) -> str | None:
     """The error the page is showing for this control, or None if it accepted it.
 
-    `aria-invalid="true"` is the signal, checked first and alone: on Pie it is
-    the only reliable one -- the inputs carry no `pattern`, no `maxlength` and no
-    `aria-describedby`, so absence of an error message proves nothing. The
-    message is then hunted for separately and may not exist, in which case the
-    rejection is still real and the returned text says only that.
-    """
-    element = write_tools.resolve(page, locator)
-    try:
-        invalid = (element.get_attribute("aria-invalid") or "").lower() == "true"
-    except PlaywrightError:
-        return None
-    if not invalid:
-        return None
+    Three signals, any one of which is a rejection: the field's `aria-invalid`
+    flag; text in the element the field names as its error slot; or error-styled
+    text beside the field. One attribute alone was the earlier rule and it
+    misses a portal that prints a red message without setting the flag.
 
-    message = _nearby_error_text(page, locator)
+    `aria-errormessage` is trusted unconditionally -- its purpose is errors.
+    `aria-describedby` is not: on Pie it points at "Maximum 250 characters",
+    which is help, so it counts only when the target is an alert or styled as
+    an error. A flag with no message is still a rejection; the returned text
+    then says only that.
+    """
+    try:
+        found = write_tools.resolve(page, locator).evaluate(_REJECTION_JS)
+    except (PlaywrightError, LocatorError):
+        return None
+    invalid, message = bool(found.get("invalid")), (found.get("message") or "").strip()
+    if not invalid and not message:
+        return None
     return message or "the field is marked aria-invalid and the page gave no message"
 
 
-_NEARBY_ERROR_JS = """
+_REJECTION_JS = """
 (el) => {
-  const described = el.getAttribute('aria-describedby') || el.getAttribute('aria-errormessage');
-  if (described) {
-    for (const id of described.split(/\\s+/)) {
-      const n = el.ownerDocument.getElementById(id);
-      const t = n && n.textContent.trim();
-      if (t) return t;
+  const doc = el.ownerDocument;
+  const isErrorish = (n) =>
+    n && ((n.getAttribute('role') || '') === 'alert' ||
+          /error|invalid|danger/i.test(n.getAttribute('class') || ''));
+  const textOf = (n) => (n && (n.textContent || '').trim()) || '';
+
+  let message = '';
+  for (const id of (el.getAttribute('aria-errormessage') || '').split(/\\s+/)) {
+    const t = id && textOf(doc.getElementById(id));
+    if (t) { message = t; break; }
+  }
+  if (!message) {
+    for (const id of (el.getAttribute('aria-describedby') || '').split(/\\s+/)) {
+      const n = id && doc.getElementById(id);
+      const t = isErrorish(n) ? textOf(n) : '';
+      if (t) { message = t; break; }
     }
   }
-  // No describedby is the common case, so the field's own container is swept
-  // for anything that reads as an error.
-  let scope = el.parentElement;
-  for (let i = 0; i < 3 && scope; i++, scope = scope.parentElement) {
-    const n = scope.querySelector('[role="alert"], [aria-live], .error, .invalid, .help-block');
-    const t = n && n.textContent.trim();
-    if (t) return t;
+  if (!message) {
+    let scope = el.parentElement;
+    for (let i = 0; i < 3 && scope && !message; i++, scope = scope.parentElement) {
+      const nodes = scope.querySelectorAll(
+        '[role="alert"], [aria-live], .error, .invalid, [class*="error" i], [class*="invalid" i]');
+      for (const n of nodes) {
+        if (n === el || n.contains(el)) continue;
+        const t = textOf(n);
+        if (t) { message = t; break; }
+      }
+    }
   }
-  return null;
+  return { invalid: (el.getAttribute('aria-invalid') || '').toLowerCase() === 'true', message };
 }
 """
 
 
-def _nearby_error_text(page: Page, locator: str) -> str | None:
-    """Error text associated with the control, or None when the page shows none."""
-    try:
-        return write_tools.resolve(page, locator).evaluate(_NEARBY_ERROR_JS)
-    except (PlaywrightError, LocatorError):
-        return None
+def _constraint_from(
+    page: Page, locator: str, stated: str, rejection: str
+) -> dict[str, str] | None:
+    """`{unit, format, hint}` for a field that has just been accepted, or None.
 
+    `stated` is what the page and its tooltip said before any attempt; `rejection`
+    is the page's complaint when one happened. Both reach `hint`, because the
+    rejection alone often states no rule -- "Please enter the FEIN" -- and the
+    tooltip alone does not say the field enforces it.
 
-def _constraint_from(page: Page, locator: str, hint: str) -> dict[str, str]:
-    """`{unit, format, hint}` for a field that rejected a value and then accepted one.
-
-    `hint` is the page's own words at the moment of rejection, passed in because
-    the message is gone by the time the field is accepted.
-
-    `format` is the shape the accepted value actually has, measured from the
-    control rather than parsed out of the message: an error reading "Please
-    enter the FEIN" states no format at all, so the value that cleared the
-    rejection is the only evidence of what the field wanted.
+    `format` is the shape of the accepted value, measured from the control, and
+    recorded only when the value is digit-shaped: `842673915` gives `999999999`
+    and `04/15/2027` gives `99/99/9999`, both real rules the replay script can
+    shape a different answer to. Free text has no shape worth recording.
     """
     try:
         element = write_tools.resolve(page, locator)
@@ -467,15 +484,24 @@ def _constraint_from(page: Page, locator: str, hint: str) -> dict[str, str]:
     except (PlaywrightError, LocatorError):
         accepted, unit = "", ""
 
-    return {"unit": unit, "format": _shape_of(accepted), "hint": hint}
+    fmt = _shape_of(accepted) if _is_digit_shaped(accepted) else ""
+    hint = "; ".join(t for t in (stated, f"rejected with: {rejection}" if rejection else "") if t)
+    if not (unit or fmt or hint):
+        return None
+    return {"unit": unit, "format": fmt, "hint": hint}
+
+
+def _is_digit_shaped(value: str) -> bool:
+    """True when `value` is digits with at most separators -- a FEIN, ZIP, phone, date."""
+    return any(c.isdigit() for c in value) and not any(c.isalpha() for c in value)
 
 
 def _shape_of(value: str) -> str:
     """A value's format as a mask: digits to `9`, letters to `A`, punctuation kept.
 
-    `123456789` becomes `999999999`, `12-3456789` becomes `99-9999999`. This is
-    what reaches the questions artifact, so a different answer at replay time
-    can be shaped the same way instead of failing the same validation.
+    `123456789` becomes `999999999`, `12-3456789` becomes `99-9999999`. Only a
+    digit-shaped value's mask is recorded (`_is_digit_shaped`); this reaches the
+    questions artifact and the replay script shapes a client's answer to it.
     """
     return "".join("9" if c.isdigit() else "A" if c.isalpha() else c for c in value)
 

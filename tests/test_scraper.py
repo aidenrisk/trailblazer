@@ -689,3 +689,45 @@ def test_goto_before_start_says_what_to_do() -> None:
     """The error names the fix rather than surfacing as an AttributeError later."""
     with pytest.raises(RuntimeError, match="session not started"):
         BrowserSession().goto("https://example.com")
+
+
+# --------------------------------------------------------------------------- #
+# Help tooltips
+# --------------------------------------------------------------------------- #
+
+FILL_FIXTURE_URL = (Path(__file__).parent / "fixtures" / "fill.html").resolve().as_uri()
+
+
+def test_a_help_tooltip_is_read_by_hovering_and_attributed_to_its_own_field() -> None:
+    """The rule a portal states only behind an icon: read on the first pass.
+
+    Attribution is the sharp edge. One icon on a flat page was once claimed by
+    every control and credited to the last, so a card-number field learned the
+    FEIN rule. Exactly one control may carry the text, and it is the one whose
+    label the icon sits beside.
+    """
+    with BrowserSession(cdp_port=9236) as session:
+        page = session.goto(FILL_FIXTURE_URL)
+        before = page.url
+        payload = DomSnapshotPerceiver().perceive(page)
+
+        with_help = {c["locator"]: c["helpText"] for c in payload["controls"] if c.get("helpText")}
+        assert with_help == {"#fein": "Nine digits, no dashes"}
+        # The page is left as it was found: no tags, no tooltip, no navigation.
+        assert page.locator("[data-tb-help]").count() == 0
+        assert page.locator('[role="tooltip"]').count() == 0
+        assert page.url == before
+
+
+def test_help_text_is_restored_from_the_measurement_after_the_model() -> None:
+    """Like `locator`: the model cannot author or drop it."""
+    from trailblazer.agents.scraper.scraper import _set_measured
+
+    control = Control(
+        fieldId="q_001", key="el_2", label="FEIN", type="text", required=True,
+        options=None, locator="#fein", unique=True, revealedBy=None,
+    )
+    _set_measured(control, "#fein", True, False, "at most 9 characters", "Nine digits, no dashes")
+
+    assert control.helpText == "Nine digits, no dashes"
+    assert "helpText" not in control.model_dump()

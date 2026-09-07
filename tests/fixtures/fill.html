@@ -17,10 +17,22 @@
   <!-- Validates on input, and the only reliable signal is aria-invalid: no
        pattern attribute, no maxlength, no aria-describedby. Mirrors Pie. -->
   <div id="feinRow">
-    <label for="fein">FEIN *</label>
+    <div class="label-row">
+      <label for="fein">FEIN *</label>
+      <!-- A bare icon with no name: the tooltip exists only while hovered, so
+           a static extraction never sees the rule it carries. Mirrors Pie. -->
+      <span class="help-icon" data-help="Nine digits, no dashes"
+            style="display:inline-block;width:16px;height:16px;cursor:pointer"></span>
+    </div>
     <input type="text" id="fein" name="fein">
     <span id="feinError" role="alert"></span>
   </div>
+
+  <!-- Rejects through its named error slot and never sets aria-invalid: the
+       case a single-attribute check misses. -->
+  <label for="zipAlt">Mailing Zip</label>
+  <input type="text" id="zipAlt" name="zipAlt" aria-errormessage="zipAlt-error">
+  <span id="zipAlt-error" class="text-status-error"></span>
 
   <!-- Rejects everything, so the retry budget is exhausted. -->
   <label for="impossible">Policy Number</label>
@@ -106,6 +118,26 @@
     const ok = /^[0-9]{9}$/.test(e.target.value);
     e.target.setAttribute('aria-invalid', ok ? 'false' : 'true');
     document.getElementById('feinError').textContent = ok ? '' : 'Please enter the FEIN';
+  });
+
+  // The help tooltip: mounted on hover, removed on leave, never in the DOM otherwise.
+  document.querySelectorAll('.help-icon').forEach(function (icon) {
+    var tip = null;
+    icon.addEventListener('mouseenter', function () {
+      tip = document.createElement('div');
+      tip.setAttribute('role', 'tooltip');
+      tip.textContent = icon.getAttribute('data-help');
+      document.body.appendChild(tip);
+    });
+    icon.addEventListener('mouseleave', function () {
+      if (tip) { tip.remove(); tip = null; }
+    });
+  });
+
+  // Mailing Zip: five digits. Signals only through the error slot.
+  document.getElementById('zipAlt').addEventListener('input', function (e) {
+    var ok = /^[0-9]{5}$/.test(e.target.value);
+    document.getElementById('zipAlt-error').textContent = ok ? '' : 'Enter a 5-digit ZIP';
   });
 
   // Rejects every value, to exercise the retry budget running out.

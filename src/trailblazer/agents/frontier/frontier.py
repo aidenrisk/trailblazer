@@ -800,6 +800,7 @@ class Frontier:
                 fieldId=control.fieldId,
                 value=self._seed_for(control),
                 constraintHint=control.formatHint or None,
+                helpText=control.helpText or None,
             )
 
         option_locator = None

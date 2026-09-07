@@ -613,6 +613,60 @@ def test_the_answers_file_holds_no_credential(gen: Generator) -> None:
     assert "$PASSWORD" not in written.values()
 
 
+def test_the_script_shapes_a_masked_answer_and_asserts_acceptance(gen: Generator) -> None:
+    """There is no model at replay time; the script carries the rule itself."""
+    p = page("form_page_1_business", [control("q_001", "FEIN", locator="#fein")])
+    gen.append(request(p, fill(
+        "q_001", "#fein", "842673915",
+        constraint={"unit": "", "format": "999999999", "hint": "Nine digits, no dashes"},
+    )))
+
+    script = gen.script_path.read_text()
+    assert 'shapeAnswer(v_q_001, "999999999", "q_001",' in script
+    assert 'await page.fill("#fein", String(v_q_001_shaped));' in script
+    assert 'assertAccepted(page, "#fein", "q_001",' in script
+    assert "// q_001: Nine digits, no dashes" in script
+
+
+def test_every_text_fill_asserts_acceptance_even_without_a_mask(gen: Generator) -> None:
+    """A value the page refused must fail the stage, never be walked past."""
+    p = page("form_page_1_business", [control("q_001", "Legal Business Name")])
+    gen.append(request(p, fill("q_001", "#legalName", "Acme LLC")))
+
+    script = gen.script_path.read_text()
+    assert "shapeAnswer(" not in script.split("// --- stage: form_page_1_business", 1)[1]
+    assert 'assertAccepted(page, "#legalName", "q_001",' in script
+
+
+def test_an_optional_field_is_guarded_as_a_block(gen: Generator) -> None:
+    """Several statements under one null-guard need braces, not a one-liner."""
+    p = page("form_page_1_business", [control("q_001", "DBA", required=False)])
+    gen.append(request(p, fill("q_001", "#legalName", "Acme")))
+
+    script = gen.script_path.read_text()
+    assert "if (v_q_001 !== null) {" in script
+
+
+def test_the_shaping_helper_coerces_or_fails_loudly() -> None:
+    """Run the emitted JavaScript itself, not a Python model of it."""
+    from trailblazer.agents.generator.script import SHAPE_HELPERS_JS
+
+    probe = SHAPE_HELPERS_JS + """
+const out = [];
+out.push(shapeAnswer("84-2673915", "999999999", "q_005", "ein"));
+out.push(shapeAnswer("04152027", "99/99/9999", "q_001", "effective_date"));
+try { shapeAnswer("12345", "999999999", "q_005", "ein"); out.push("no-throw"); }
+catch (e) { out.push(e.message); }
+process.stdout.write(JSON.stringify(out));
+"""
+    done = subprocess.run(["node", "-e", probe], capture_output=True, text=True, check=True)
+    shaped, dated, failure = json.loads(done.stdout)
+
+    assert shaped == "842673915"
+    assert dated == "04/15/2027"
+    assert failure == 'q_005 (ein): expected 9 digits, got 5 in "12345"'
+
+
 def test_the_script_carries_the_bind_denylist(gen: Generator) -> None:
     """On the script's first run there is no agent watching."""
     p = page("form_page_1_business", [control("q_001", "Legal Business Name")])

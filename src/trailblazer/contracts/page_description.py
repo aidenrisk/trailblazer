@@ -121,6 +121,17 @@ class Control(BaseModel):
     `exclude=True` keeps the serialized shape at the nine fields the spec fixes.
     """
 
+    helpText: str = Field(default="", exclude=True)
+    """What the field's help tooltip says, read by hovering its icon during the
+    scrape.
+
+    Pie states the FEIN rule -- "a unique 9-digit number" -- nowhere but a
+    tooltip behind a bare 16px icon beside the label; the rejection message says
+    only "Please enter the FEIN". So this is read on the first pass, before any
+    attempt, and it is what lets the first fill be right. Measured and restored
+    like `formatHint`, excluded from the serialized shape for the same reason.
+    """
+
     @field_validator("locator")
     @classmethod
     def _reject_snapshot_ref(cls, v: str) -> str:

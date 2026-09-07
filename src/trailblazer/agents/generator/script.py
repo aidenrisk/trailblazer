@@ -19,6 +19,7 @@ no script at all.
 """
 
 import json
+import re
 
 # Refused before any click, in the script as well as in the agents. On the
 # script's first run there is no agent watching, so the denylist has to travel
@@ -92,6 +93,54 @@ function requireCredential(value, placeholder) {{
 function optionalAnswer(answers, canonical) {{
   const value = answers[canonical];
   return value === undefined || value === null || value === '' ? null : value;
+}}
+
+// The crawl learned this field's shape -- from the page, its tooltip, or by
+// being rejected -- and recorded it as a mask: `999999999` for a FEIN,
+// `99/99/9999` for a date. A client's answer is shaped to the mask before it
+// is typed, so `84-2673915` becomes `842673915`. When the digits cannot fit
+// the mask there is no right thing to type, and the stage fails naming the
+// field rather than submitting a value the page will reject.
+function shapeAnswer(raw, mask, questionId, canonical) {{
+  const digits = String(raw).replace(/\\D/g, '');
+  const need = (mask.match(/9/g) || []).length;
+  if (digits.length !== need) {{
+    throw new Error(
+      `${{questionId}} (${{canonical}}): expected ${{need}} digits, got ${{digits.length}} in "${{raw}}"`);
+  }}
+  let out = '', d = 0;
+  for (const ch of mask) out += ch === '9' ? digits[d++] : ch;
+  return out;
+}}
+
+// A fill the page rejected must not be walked past. Blur first so on-blur
+// validators fire, then read the same three signals the crawl reads: the
+// invalid flag, the field's named error slot, and error-styled text beside it.
+async function assertAccepted(page, selector, questionId, canonical) {{
+  const el = page.locator(selector).first();
+  await el.blur().catch(() => {{}});
+  await page.waitForTimeout(150);
+  const invalid = (await el.getAttribute('aria-invalid')) === 'true';
+  let message = '';
+  const slot = (await el.getAttribute('aria-errormessage')) || '';
+  for (const id of slot.split(/\\s+/).filter(Boolean)) {{
+    message = (await page.locator('#' + id).innerText().catch(() => '')).trim();
+    if (message) break;
+  }}
+  if (!message) {{
+    message = await el.evaluate((n) => {{
+      let scope = n.parentElement;
+      for (let i = 0; i < 3 && scope; i++, scope = scope.parentElement) {{
+        const hit = scope.querySelector('[role="alert"], [class*="error" i], [class*="invalid" i]');
+        const t = hit && hit !== n && !hit.contains(n) ? (hit.textContent || '').trim() : '';
+        if (t) return t;
+      }}
+      return '';
+    }}).catch(() => '');
+  }}
+  if (invalid || message) {{
+    throw new Error(`${{questionId}} (${{canonical}}) rejected by the page: ${{message || 'aria-invalid'}}`);
+  }}
 }}
 
 function loadAnswers(file) {{
@@ -182,6 +231,58 @@ main().catch((err) => {
 """
 
 
+SHAPE_HELPERS_JS = r'''// The crawl learned this field's shape -- from the page, its tooltip, or by
+// being rejected -- and recorded it as a mask: `999999999` for a FEIN,
+// `99/99/9999` for a date. A client's answer is shaped to the mask before it
+// is typed, so `84-2673915` becomes `842673915`. When the digits cannot fit
+// the mask there is no right thing to type, and the stage fails naming the
+// field rather than submitting a value the page will reject.
+function shapeAnswer(raw, mask, questionId, canonical) {
+  const digits = String(raw).replace(/\D/g, '');
+  const need = (mask.match(/9/g) || []).length;
+  if (digits.length !== need) {
+    throw new Error(
+      `${questionId} (${canonical}): expected ${need} digits, got ${digits.length} in "${raw}"`);
+  }
+  let out = '', d = 0;
+  for (const ch of mask) out += ch === '9' ? digits[d++] : ch;
+  return out;
+}
+
+// A fill the page rejected must not be walked past. Blur first so on-blur
+// validators fire, then read the same three signals the crawl reads: the
+// invalid flag, the field's named error slot, and error-styled text beside it.
+async function assertAccepted(page, selector, questionId, canonical) {
+  const el = page.locator(selector).first();
+  await el.blur().catch(() => {});
+  await page.waitForTimeout(150);
+  const invalid = (await el.getAttribute('aria-invalid')) === 'true';
+  let message = '';
+  const slot = (await el.getAttribute('aria-errormessage')) || '';
+  for (const id of slot.split(/\s+/).filter(Boolean)) {
+    message = (await page.locator('#' + id).innerText().catch(() => '')).trim();
+    if (message) break;
+  }
+  if (!message) {
+    message = await el.evaluate((n) => {
+      let scope = n.parentElement;
+      for (let i = 0; i < 3 && scope; i++, scope = scope.parentElement) {
+        const hit = scope.querySelector('[role="alert"], [class*="error" i], [class*="invalid" i]');
+        const t = hit && hit !== n && !hit.contains(n) ? (hit.textContent || '').trim() : '';
+        if (t) return t;
+      }
+      return '';
+    }).catch(() => '');
+  }
+  if (invalid || message) {
+    throw new Error(`${questionId} (${canonical}) rejected by the page: ${message || 'aria-invalid'}`);
+  }
+}
+
+'''
+"""The shaping and acceptance helpers as plain JavaScript, for tests to execute."""
+
+
 def slug(carrier: str, business_type: str, insurance_type: str) -> str:
     """The flow's identity triple, as the `onboarding-<slug>` filename infix."""
     parts = [carrier, business_type, insurance_type]
@@ -232,6 +333,10 @@ def _guard(conditional: tuple[str, str] | None) -> tuple[str, str, str]:
     )
 
 
+_MASK = re.compile(r"^(?=.*9)[9\W_]+$")
+"""A recorded format the script can shape to: `9`s with separators only."""
+
+
 def fill_block(
     question_id: str,
     canonical: str,
@@ -239,11 +344,19 @@ def fill_block(
     required: bool,
     intent: str,
     conditional: tuple[str, str] | None = None,
+    fmt: str | None = None,
+    hint: str | None = None,
 ) -> str:
     """Set one control from the client's answer for `canonical`.
 
     The answer is read by canonical, not hardcoded: a hardcoded gate answer
     discards what the client actually said and quotes the wrong branch.
+
+    A text fill enforces what the crawl learned. With a digit mask in `fmt` the
+    answer is shaped to it first; every text fill is then checked for rejection,
+    because a value the page refused must fail the stage loudly rather than be
+    walked past. There is no model at replay time, so the script has to carry
+    the rule itself. `hint` is written as a comment so a reader sees why.
     """
     accessor = (
         f"requiredAnswer(answers, {json.dumps(canonical)}, {json.dumps(question_id)})"
@@ -251,19 +364,37 @@ def fill_block(
         else f"optionalAnswer(answers, {json.dumps(canonical)})"
     )
     var = f"v_{question_id}"
-    lines = [f"    const {var} = {accessor};"]
-    guard = "" if required else f"    if ({var} !== null) "
+    sel = json.dumps(selector)
+    args = f"{json.dumps(question_id)}, {json.dumps(canonical)}"
+
+    lines = []
+    if hint:
+        lines.append(f"    // {question_id}: {' '.join(hint.split())[:160]}")
+    lines.append(f"    const {var} = {accessor};")
 
     if intent == "select":
-        body = f"await page.selectOption({json.dumps(selector)}, String({var}));"
+        action = [f"await page.selectOption({sel}, String({var}));"]
     elif intent == "check":
-        body = f"await page.setChecked({json.dumps(selector)}, Boolean({var}));"
+        action = [f"await page.setChecked({sel}, Boolean({var}));"]
     elif intent == "advance":
-        body = f"await clickSafely(page, {json.dumps(selector)});"
+        action = [f"await clickSafely(page, {sel});"]
     else:
-        body = f"await page.fill({json.dumps(selector)}, String({var}));"
+        typed = var
+        action = []
+        if fmt and _MASK.match(fmt):
+            typed = f"{var}_shaped"
+            action.append(f"const {typed} = shapeAnswer({var}, {json.dumps(fmt)}, {args});")
+        action.append(f"await page.fill({sel}, String({typed}));")
+        action.append(f"await assertAccepted(page, {sel}, {args});")
 
-    lines.append(f"{guard}{'' if guard else '    '}{body}")
+    if required:
+        lines += [f"    {a}" for a in action]
+    else:
+        # Several statements under one guard need a block, not a one-liner.
+        lines.append(f"    if ({var} !== null) {{")
+        lines += [f"        {a}" for a in action]
+        lines.append("    }")
+
     open_, pad, close = _guard(conditional)
     return open_ + "".join(f"{pad}{line}\n" for line in lines) + close
 

@@ -49,8 +49,10 @@ retry.
 ## Input
 
 You are given the field's label, its control type, the page's URL, today's date, the
-state and business type the crawl is scoped to, any constraint the page has already
-enforced, and, when a previous attempt was rejected, the error text the page showed.
+state and business type the crawl is scoped to, what the page states about the format,
+what the field's help tooltip says, and, when a previous attempt was rejected, the error
+text the page showed. The tooltip is often the only place the rule is stated: a
+rejection may say just "Please enter the FEIN" while the tooltip says nine digits.
 
 ## Output
 

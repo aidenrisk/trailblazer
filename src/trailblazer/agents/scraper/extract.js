@@ -209,6 +209,11 @@
 
       const el = entry.el;
       const tag = el.tagName.toLowerCase();
+      // The help icon, if the field has one. Tagged so Python can hover it by
+      // selector: it is a bare 16px svg with no name, id or test-id -- Pie's
+      // are -- so nothing else can address it. The tooltip mounts only while
+      // hovered, which is why this cannot be read from here.
+      const helpTrigger = tagHelpTrigger(el, i);
       const name = el.getAttribute('name') || '';
       const testid = el.getAttribute('data-testid') || '';
       const ariaLabel = el.getAttribute('aria-label') || '';
@@ -270,6 +275,7 @@
             .join(' '),
         ].filter(Boolean).join('; ').slice(0, 300),
         accessibleName: accName,
+        helpTrigger,
         required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
         // readonly is grouped with disabled: both mean the value cannot be set,
         // and a click on either burns the filler's timeout before failing.
@@ -284,4 +290,60 @@
     });
 
   return { controls, actions };
+}
+
+function labelNodeOf(el) {
+  const labelledBy = el.getAttribute('aria-labelledby');
+  if (labelledBy) {
+    const n = el.ownerDocument.getElementById(labelledBy.split(/\s+/)[0]);
+    if (n) return n;
+  }
+  if (el.id) {
+    const n = el.ownerDocument.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+    if (n) return n;
+  }
+  return el.closest('label');
+}
+
+// True when `n` looks like a help affordance: a small icon-sized node in the
+// label's row that is neither the control, nor inside it, nor the error icon.
+function isHelpIcon(n, el) {
+  if (n === el || el.contains(n) || n.contains(el)) return false;
+  const r = n.getBoundingClientRect();
+  if (!r.width || !r.height || r.width > 28 || r.height > 28) return false;
+  const cls = (n.getAttribute('class') || '').toLowerCase();
+  if (/error|invalid|danger|chevron|arrow|caret/.test(cls)) return false;
+  const t = (n.textContent || '').trim();
+  return t === '' || t.length <= 2;
+}
+
+// Tag the help icon beside `el`'s label with data-tb-help="<key>" and return
+// true, or return false when the field has none.
+//
+// Scoped to the label's own container and no wider. The icon is a sibling of
+// the label -- Pie renders `<span>Label</span><svg/>` in one row -- and one
+// level further up reached the whole form on a flat layout, so every control
+// found the page's single icon and the last one to look claimed it. An icon
+// already claimed is never re-tagged, so no tooltip can be attributed twice.
+function tagHelpTrigger(el, i) {
+  const label = labelNodeOf(el);
+  if (!label || !label.parentElement) return false;
+  const row = label.parentElement;
+  // A field's row holds one label and one control. A container holding more
+  // is a section or the form itself, and searching it lets the first control
+  // in document order claim an icon that belongs to a later field.
+  if (row.querySelectorAll('label').length > 1) return false;
+  if (row.querySelectorAll('input, select, textarea').length > 1) return false;
+  // Any icon carrier qualifies -- svg, span, i, img, button -- because the
+  // affordance's tag is a styling choice. `isHelpIcon` does the filtering.
+  const cands = row.querySelectorAll(
+    'svg, span, i, img, button, [role="button"], [aria-haspopup], [tabindex]');
+  for (const n of cands) {
+    if (n.hasAttribute('data-tb-help')) continue;
+    if (isHelpIcon(n, el)) {
+      n.setAttribute('data-tb-help', 'el_' + i);
+      return true;
+    }
+  }
+  return false;
 }

@@ -504,6 +504,8 @@ class Generator:
             question.required,
             intent,
             conditional=conditional,
+            fmt=question.format,
+            hint=question.answerHint,
         )
 
     def _conditional_for(self, control: Control | None) -> Conditional | None:

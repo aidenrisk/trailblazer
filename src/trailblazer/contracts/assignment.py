@@ -65,6 +65,10 @@ class Assignment(BaseModel):
     actually complained about, which is the stronger evidence.
     """
 
+    helpText: str | None = None
+    """The field's tooltip text, from `Control.helpText`. The rule a portal
+    states only behind a help icon, available before the first attempt."""
+
 
 class Restart(BaseModel):
     """Frontier's request that Loop return the page to its pre-gate state.
@@ -124,11 +128,18 @@ class FillReport(BaseModel):
     """
 
     constraint: dict[str, str] | None = None
-    """A format requirement the page revealed, as `{unit, format, hint}`.
+    """What is known about the shape the field wants, as `{unit, format, hint}`.
+    Always present; `None` only when nothing at all is known.
 
-    Discovered only by being rejected: it is in neither the PageDescription nor
-    the assignment. It reaches the questions artifact so that a different answer
-    at replay time is shaped correctly rather than failing the same validation.
+    Populated on both paths. Up front, from what the page states about itself
+    and what its help tooltip says, so a field answered correctly first time
+    still records what was known. On rejection, with the page's complaint and
+    the shape of the value that was finally accepted. `format` is a mask
+    (`999999999`) recorded only for digit-shaped values, where a mask is a real
+    rule; the shape of free text is noise.
+
+    It reaches the questions artifact and from there the replay script, which
+    shapes a different client answer to the mask or fails naming the field.
     """
 
     retried: bool = False
