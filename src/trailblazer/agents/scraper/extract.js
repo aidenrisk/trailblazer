@@ -277,12 +277,16 @@
         accessibleName: accName,
         helpTrigger,
         required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
-        // readonly is grouped with disabled: both mean the value cannot be set,
-        // and a click on either burns the filler's timeout before failing.
+        // readonly is grouped with disabled -- both mean the value cannot be
+        // typed -- unless the input is a chooser. A listbox or combobox renders
+        // its text box read-only because the value is picked from a list, not
+        // because it is locked: Pie's Legal Entity Type is `readonly` with
+        // role="listbox", and the plain rule marked it disabled, so the one
+        // gate this pipeline exists to walk was never touched.
         disabled:
           el.disabled === true ||
           el.getAttribute('aria-disabled') === 'true' ||
-          el.hasAttribute('readonly'),
+          (el.hasAttribute('readonly') && !isChooser(el)),
         visible: isVisible(el),
         options,
         candidates: candidates(el, name, testid, role, accName),
@@ -290,6 +294,15 @@
     });
 
   return { controls, actions };
+}
+
+// A control whose value is picked from a list rather than typed. Such an input
+// is often read-only by construction and is still very much settable.
+function isChooser(el) {
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  return role === 'listbox' || role === 'combobox' ||
+    el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-expanded') ||
+    el.hasAttribute('aria-controls');
 }
 
 function labelNodeOf(el) {

@@ -465,6 +465,63 @@ def test_the_action_starting_the_journey_outranks_the_page_it_sits_on() -> None:
     assert assignment.locator == "#quote"
 
 
+def test_the_start_action_is_chrome_on_every_page_after_the_landing_page() -> None:
+    """The nav link that starts an application sits on the form too.
+
+    Honoured there, it reloaded the form empty after a restart remounted a
+    nested gate, and the crawl restarted for the same gate four times on a live
+    run. Once taken on the landing page, the same action is never taken again.
+    """
+    started = Frontier(
+        business_types=["contractors"], insurance_types=["workers_comp"],
+        start_text="Get a Quote",
+    )
+    quote = Action(label="Get a Quote", href="/work-comp/business-info", locator="#quote", unique=True)
+
+    # The landing page is its own stage, as Pie's dashboard is: the slug comes
+    # from the URL path, and /search is not /work-comp/business-info.
+    landing = page([control("q_001", label="Search")], actions=[quote], stage_id="form_page_1_search")
+    started.observe(landing)
+    assert started.next_assignment().intent == "advance"
+
+    form = PageDescription(
+        stageId="form_page_1_business_info", url="https://carrier/form",
+        controls=[control("q_001", label="FEIN")], actions=[quote],
+        next="#next", back=None, blockers=[],
+    )
+    started.observe(form)
+
+    assignment = started.next_assignment()
+
+    assert assignment.intent == "fill" and assignment.fieldId == "q_001"
+
+
+def test_a_gate_on_the_landing_page_never_holds_the_flow_open() -> None:
+    """A filter toggle on a dashboard is not a branch of the application."""
+    started = Frontier(
+        business_types=["contractors"], insurance_types=["workers_comp"],
+        start_text="Get a Quote",
+    )
+    quote = Action(label="Get a Quote", href="/work-comp/business-info", locator="#quote", unique=True)
+    toggle = Control(
+        fieldId="q_004", key="el_4", label="Submitted", type="toggle", required=False,
+        options=None, locator="#submitted", unique=True, revealedBy=None,
+    )
+    started.observe(page([toggle], actions=[quote], stage_id="form_page_1_search"))
+    assert started.next_assignment().intent == "advance"          # leaves via the start action
+
+    form = PageDescription(
+        stageId="form_page_1_business_info", url="https://carrier/form",
+        controls=[control("q_001", label="FEIN")], actions=[],
+        next=None, back=None, blockers=[],
+    )
+    started.observe(form)
+    started.observe(form, FillReport(fieldId="q_001", intent="fill", locator="#q_001", ok=True, valueUsed="x"))
+
+    assert started.next_assignment() is None       # not a Restart for the dashboard toggle
+    assert started.flow_done()
+
+
 def test_the_start_control_is_matched_on_its_own_text_not_the_job_types() -> None:
     """`workers_comp` is our identifier; Pie's href says "work comp"."""
     started = Frontier(

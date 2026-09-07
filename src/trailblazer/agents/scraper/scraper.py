@@ -24,7 +24,7 @@ from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings, get_settings
-from trailblazer.shared.models import get_model
+from trailblazer.shared.models import get_model, invoke_with_retry
 
 log = get_logger(__name__)
 
@@ -241,7 +241,7 @@ def perceive(
         settings.scraper_perceiver,
     )
 
-    payload = _run_perceiver(page, settings)
+    payload = _run_perceiver(page, settings, request.prior)
     payload_controls = payload["controls"]
     text = payload_to_text(payload)
     log.debug(
@@ -266,9 +266,12 @@ def perceive(
 
     objective = request.objective or "Describe this form page."
     tracker = CostTracker(step="perceive", job_id=request.job_id)
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": f"{objective}\n\nExtractor payload:\n{text}"}]},
-        config={"callbacks": [tracker]},
+    result = invoke_with_retry(
+        lambda: agent.invoke(
+            {"messages": [{"role": "user", "content": f"{objective}\n\nExtractor payload:\n{text}"}]},
+            config={"callbacks": [tracker]},
+        ),
+        step="perceive",
     )
 
     total = tracker.total_usd()
@@ -320,10 +323,15 @@ def perceive(
     return scraper_result
 
 
-def _run_perceiver(page: Page, settings: Settings) -> dict:
-    """Perceive, turning a failed in-page evaluate into a message that names the cause."""
+def _run_perceiver(page: Page, settings: Settings, prior: PageDescription | None = None) -> dict:
+    """Perceive, turning a failed in-page evaluate into a message that names the cause.
+
+    `prior` supplies the help text already read for this page's controls, keyed
+    by locator, so a re-look does not hover every icon again.
+    """
+    known_help = {c.locator: c.helpText for c in prior.controls if c.helpText} if prior else {}
     try:
-        return get_perceiver(settings.scraper_perceiver).perceive(page)
+        return get_perceiver(settings.scraper_perceiver).perceive(page, known_help)
     except PlaywrightError as e:
         raise RuntimeError(
             f"reading the page failed: {e}. The tab may have been closed or navigated "

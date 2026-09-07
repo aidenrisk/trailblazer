@@ -731,3 +731,44 @@ def test_help_text_is_restored_from_the_measurement_after_the_model() -> None:
 
     assert control.helpText == "Nine digits, no dashes"
     assert "helpText" not in control.model_dump()
+
+
+def test_a_read_only_chooser_is_not_disabled_but_a_locked_field_is() -> None:
+    """A listbox's text box is read-only because you pick from a list.
+
+    Pie's Legal Entity Type is `readonly` with role="listbox", and the plain
+    rule marked it disabled, so the one gate this pipeline exists to walk was
+    never attempted. A pre-filled read-only field with no list is still locked.
+    """
+    with BrowserSession(cdp_port=9238) as session:
+        page = session.goto(FILL_FIXTURE_URL)
+        payload = DomSnapshotPerceiver().perceive(page)
+
+    by_id = {c["id"]: c for c in payload["controls"] if c.get("id")}
+    assert by_id["entityPicker"]["disabled"] is False
+    assert by_id["agencyProgram"]["disabled"] is True
+
+
+def test_help_text_already_known_for_a_locator_is_not_hovered_again(monkeypatch) -> None:
+    """Help text does not change between fills; re-hovering was 38 reads in 17 looks."""
+    from trailblazer.agents.scraper import perceive as perceive_module
+
+    hovers = {"n": 0}
+    real = perceive_module._read_help_tooltip
+
+    def counting(page, key):
+        hovers["n"] += 1
+        return real(page, key)
+
+    monkeypatch.setattr(perceive_module, "_read_help_tooltip", counting)
+
+    with BrowserSession(cdp_port=9239) as session:
+        page = session.goto(FILL_FIXTURE_URL)
+        first = DomSnapshotPerceiver().perceive(page)
+        known = {c["locator"]: c["helpText"] for c in first["controls"] if c["helpText"]}
+        assert hovers["n"] == 1 and known == {"#fein": "Nine digits, no dashes"}
+
+        second = DomSnapshotPerceiver().perceive(page, known)
+
+    assert hovers["n"] == 1
+    assert {c["locator"]: c["helpText"] for c in second["controls"] if c["helpText"]} == known

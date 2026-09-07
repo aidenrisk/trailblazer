@@ -113,8 +113,12 @@ def _aria_snapshot(page: Page) -> str:
 class Perceiver(Protocol):
     """One look at a page, rendered as the payload handed to the model."""
 
-    def perceive(self, page: Page) -> dict[str, Any]:
-        """Return `{url, title, controls, a11y, next, back}`."""
+    def perceive(self, page: Page, known_help: dict[str, str] | None = None) -> dict[str, Any]:
+        """Return `{url, title, controls, a11y, next, back}`.
+
+        `known_help` maps a locator to help text already read on an earlier
+        look at this page, so the icon need not be hovered again.
+        """
         ...
 
 
@@ -268,8 +272,14 @@ def _untag_help_triggers(page: Page) -> None:
 class DomSnapshotPerceiver:
     """DOM extraction for addressability, accessibility snapshot for semantics."""
 
-    def perceive(self, page: Page) -> dict[str, Any]:
-        """Extract controls, verify each locator, and attach the a11y tree."""
+    def perceive(self, page: Page, known_help: dict[str, str] | None = None) -> dict[str, Any]:
+        """Extract controls, verify each locator, and attach the a11y tree.
+
+        A tooltip already read for a locator on an earlier look is reused
+        rather than hovered again: help text does not change between fills, and
+        on a live run three icons were re-hovered on every one of 17 looks.
+        """
+        known_help = known_help or {}
         payload: dict[str, Any] = page.evaluate(_EXTRACT_JS)
         raw = payload["controls"]
         log.debug(
@@ -281,9 +291,12 @@ class DomSnapshotPerceiver:
             locator, unique = _first_unique(page, item.get("candidates", []))
             cleaned = {k: v for k, v in item.items() if k not in ("candidates", "helpTrigger")}
             cleaned["options"] = _measure_options(page, item.get("options"))
-            cleaned["helpText"] = (
-                _read_help_tooltip(page, item["key"]) if item.get("helpTrigger") else ""
-            )
+            if known_help.get(locator):
+                cleaned["helpText"] = known_help[locator]
+            elif item.get("helpTrigger"):
+                cleaned["helpText"] = _read_help_tooltip(page, item["key"])
+            else:
+                cleaned["helpText"] = ""
             controls.append({**cleaned, "locator": locator, "unique": unique})
         _untag_help_triggers(page)
 
@@ -308,7 +321,7 @@ class A11yOnlyPerceiver:
     why this is not the default.
     """
 
-    def perceive(self, page: Page) -> dict[str, Any]:
+    def perceive(self, page: Page, known_help: dict[str, str] | None = None) -> dict[str, Any]:
         """Return the flattened a11y tree with an empty controls list."""
         log.warning(
             "a11y perceiver in use: no locator is measured, so the model must propose "

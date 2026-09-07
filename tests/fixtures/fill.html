@@ -38,6 +38,16 @@
   <label for="impossible">Policy Number</label>
   <input type="text" id="impossible" name="impossible">
 
+  <!-- A chooser whose text box is read-only because the value is picked from a
+       list. Pie's Legal Entity Type; settable, not locked. -->
+  <label for="entityPicker">Legal Entity Type</label>
+  <input type="text" id="entityPicker" name="entityPicker" readonly role="listbox"
+         aria-expanded="false" value="">
+
+  <!-- Genuinely locked: pre-filled and read-only, nothing to set. -->
+  <label for="agencyProgram">Agency / Program</label>
+  <input type="text" id="agencyProgram" name="agencyProgram" readonly value="Direct">
+
   <label for="entityType">Entity Type</label>
   <select id="entityType" name="entityType">
     <option value="">Select...</option>

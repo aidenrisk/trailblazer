@@ -105,6 +105,21 @@ class Frontier:
         """
 
         self.page: PageDescription | None = None
+        self._start_stage: str | None = None
+        """The stage the start action was taken on: the landing page.
+
+        The action that starts an application sits in the portal's nav on every
+        page. Honoured everywhere, it outranked the fields on the form itself:
+        after a restart remounted a nested gate, Frontier clicked "Get a Quote"
+        on the form, which reloaded it empty, pressed Next into a wall of
+        validation, and restarted for the same gate -- four identical cycles on
+        a live run. The start action is a step out of the landing page, taken
+        once per route, and chrome anywhere else.
+
+        The landing page's own controls are chrome too. Its gates are never
+        walked and never hold the flow open: a filter toggle on a dashboard is
+        not a branch of the application.
+        """
         self._pin_for: dict[str, str] = {}
         """Ancestor sides to pin when the next restart's walk opens.
 
@@ -338,6 +353,7 @@ class Frontier:
             self.boards[stage_id].half_walked()
             or self.boards[stage_id].remaining_absent()
             for stage_id in self.stage_order
+            if stage_id != self._start_stage
         )
 
     def summary(self) -> dict:
@@ -492,6 +508,12 @@ class Frontier:
             return None
 
         matched = [a for a in candidates if self._matches_target(a)]
+        if matched and self.start_text:
+            if self._start_stage is None:
+                self._start_stage = self.board.stage_id
+            elif self.board.stage_id != self._start_stage:
+                # The same nav link on a later page. Taking it leaves the form.
+                matched = []
         if matched:
             return next((a for a in matched if a.unique), matched[0])
 
@@ -565,6 +587,8 @@ class Frontier:
         reason rather than walked, which the completion assertion accepts.
         """
         assert self.board is not None
+        if self.board.stage_id == self._start_stage:
+            return None
         owed = self.board.half_walked()
         absent = self.board.remaining_absent()
         if not owed and not absent:
@@ -615,7 +639,7 @@ class Frontier:
         """
         assert self.board is not None
         for stage_id in self.stage_order:
-            if stage_id == self.board.stage_id:
+            if stage_id == self.board.stage_id or stage_id == self._start_stage:
                 continue
             board = self.boards[stage_id]
             if board.restarts >= MAX_RESTARTS:

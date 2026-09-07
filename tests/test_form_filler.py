@@ -612,3 +612,47 @@ def test_the_help_text_reaches_the_value_chooser(page, monkeypatch) -> None:
     )
 
     assert calls[0]["help_text"] == "Nine digits, no dashes"
+
+
+# --------------------------------------------------------------------------- #
+# The value chooser survives a provider hiccup
+# --------------------------------------------------------------------------- #
+
+
+class _Reply:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+def test_an_empty_model_reply_is_asked_again_before_it_fails_the_run(monkeypatch) -> None:
+    """One empty reply on the ZIP field ended a live run. Asked again, it answered."""
+    from trailblazer.agents.form_filler import values
+    from trailblazer.shared import models
+
+    replies = iter(["", "", "94105"])
+
+    class _Model:
+        def invoke(self, messages, config=None):
+            return _Reply(next(replies))
+
+    monkeypatch.setattr(values, "get_model", lambda settings: _Model())
+    monkeypatch.setattr(models.time, "sleep", lambda s: None)
+
+    value, _, _ = values.choose_value("Business Zip Code", "#zip", "https://x", None, None, SETTINGS)
+
+    assert value == "94105"
+
+
+def test_a_reply_that_stays_empty_fails_naming_the_field(monkeypatch) -> None:
+    from trailblazer.agents.form_filler import values
+    from trailblazer.shared import models
+
+    class _Model:
+        def invoke(self, messages, config=None):
+            return _Reply("")
+
+    monkeypatch.setattr(values, "get_model", lambda settings: _Model())
+    monkeypatch.setattr(models.time, "sleep", lambda s: None)
+
+    with pytest.raises(RuntimeError, match="no value for field 'Business Zip Code' after 3 attempts"):
+        values.choose_value("Business Zip Code", "#zip", "https://x", None, None, SETTINGS)

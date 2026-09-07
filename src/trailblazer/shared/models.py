@@ -5,9 +5,80 @@ No Claude Code OAuth token: the Messages API rejects `sk-ant-oat01-*` with
 Anthropic's own clients.
 """
 
+import re
+import time
+from collections.abc import Callable
+from typing import TypeVar
+
+import httpx
 from langchain_core.language_models import BaseChatModel
 
+from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings, get_settings
+
+log = get_logger(__name__)
+
+T = TypeVar("T")
+
+_ATTEMPTS = 3
+_BACKOFF_S = (1.0, 3.0)
+"""Waits before the second and third attempts. Short: a provider that is still
+failing after four seconds is not going to recover inside this call, and the
+crawl has a browser session open the whole time."""
+
+_TRANSIENT_STATUS = re.compile(r"\(code: (429|5\d\d)\)")
+"""The OpenRouter client reports a provider-side failure as a `ValueError` whose
+message ends in `(code: N)`. Rate limits and server errors are worth a retry; a
+400-class code is a malformed request and is not."""
+
+
+class TransientModelError(RuntimeError):
+    """A model call that returned nothing usable and is worth asking again.
+
+    Raised by a caller that got a response with no content: the request went
+    through, the provider answered, and the answer was empty. On a live run one
+    such reply killed a crawl five restarts deep.
+    """
+
+
+def _is_transient(error: BaseException) -> bool:
+    if isinstance(error, (httpx.HTTPError, TransientModelError)):
+        return True
+    return isinstance(error, ValueError) and bool(_TRANSIENT_STATUS.search(str(error)))
+
+
+def invoke_with_retry(call: Callable[[], T], *, step: str) -> T:
+    """Run `call`, retrying a transient failure up to `_ATTEMPTS` times.
+
+    A crawl makes dozens of model calls over ten minutes or more; at that length
+    one dropped connection or one empty reply is close to certain, and without
+    this a single one ended the run. Two live runs died that way.
+
+    Retried: an httpx transport error (a dropped connection, a timeout), the
+    OpenRouter client's `ValueError` for a 429 or 5xx, and a caller's
+    `TransientModelError`. Anything else is raised at once -- a 400-class error,
+    a schema failure, a bug -- because asking again cannot change the answer.
+    The last error is re-raised after the final attempt, so nothing is
+    swallowed and the failure still names its cause.
+    """
+    for attempt in range(1, _ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as error:  # noqa: BLE001 -- classified below, never swallowed
+            if not _is_transient(error) or attempt == _ATTEMPTS:
+                raise
+            wait = _BACKOFF_S[attempt - 1]
+            log.warning(
+                "model call failed step=%s attempt=%d/%d retry_in=%.0fs error=%s: %s",
+                step,
+                attempt,
+                _ATTEMPTS,
+                wait,
+                type(error).__name__,
+                str(error)[:160],
+            )
+            time.sleep(wait)
+    raise AssertionError("unreachable: the loop returns or raises")
 
 
 def get_model(settings: Settings | None = None) -> BaseChatModel:

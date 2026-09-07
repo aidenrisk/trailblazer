@@ -18,7 +18,7 @@ from pathlib import Path
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings
-from trailblazer.shared.models import get_model
+from trailblazer.shared.models import _ATTEMPTS, TransientModelError, get_model, invoke_with_retry
 
 log = get_logger(__name__)
 
@@ -77,20 +77,28 @@ def choose_value(
         lines.append(f"The page rejected the previous value with: {error_text}")
         lines.append("Return a corrected value that satisfies it.")
 
-    response = model.invoke(
-        [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": "\n".join(lines)},
-        ],
-        config={"callbacks": [tracker]},
-    )
-
-    value = _first_line(response.content)
-    if not value:
-        raise RuntimeError(
-            f"the model returned no value for field {label!r}; "
-            "the endpoint may have refused the request -- check OPENROUTER_MODEL"
+    def ask() -> str:
+        response = model.invoke(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": "\n".join(lines)},
+            ],
+            config={"callbacks": [tracker]},
         )
+        chosen = _first_line(response.content)
+        if not chosen:
+            # An empty reply is the provider's failure, not the field's: asked
+            # again it usually answers. Raised as transient so the retry sees it.
+            raise TransientModelError(f"the model returned no value for field {label!r}")
+        return chosen
+
+    try:
+        value = invoke_with_retry(ask, step="choose_value")
+    except TransientModelError as e:
+        raise RuntimeError(
+            f"{e} after {_ATTEMPTS} attempts; "
+            "the endpoint may be refusing the request -- check OPENROUTER_MODEL"
+        ) from e
 
     total = tracker.total_usd()
     log.info(
