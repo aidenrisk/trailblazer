@@ -42,7 +42,12 @@ retry.
    name, a real EIN, or a real policy number. A plausible-looking value is required; a
    value traceable to an actual business or person is not.
 
-8. **Never answer in a way designed to pass a knockout question.** If the field asks
+8. **When choices are listed, return one of them, verbatim.** A dropdown offers a
+   closed set; pick the one a real business of the given type would choose -- an LLC for
+   a small contractor, not "Select..." or the first entry -- and return its exact text,
+   character for character.
+
+9. **Never answer in a way designed to pass a knockout question.** If the field asks
    whether the business does something a carrier declines, answer as the described
    business honestly. A decline is a valid outcome of this crawl.
 

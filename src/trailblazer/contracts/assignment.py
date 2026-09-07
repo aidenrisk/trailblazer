@@ -56,6 +56,16 @@ class Assignment(BaseModel):
     a native `<select>`, whose choices are set by label against the parent.
     """
 
+    options: list[dict[str, str | None]] | None = None
+    """The choices of a select whose value is left to the filler, as `{label, locator}`.
+
+    Frontier names the value only for a gate side. A five-option dropdown --
+    Pie's Legal Entity Type -- is walked once with a value someone has to pick,
+    and that is the filler's judgment like any text field's. The locator is
+    what gets clicked once the label is chosen; `None` for a native select,
+    which is set by label against the parent.
+    """
+
     constraintHint: str | None = None
     """What is known about the shape the field wants.
 

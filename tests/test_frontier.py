@@ -522,6 +522,36 @@ def test_a_gate_on_the_landing_page_never_holds_the_flow_open() -> None:
     assert started.flow_done()
 
 
+def test_a_non_gate_choice_is_handed_to_the_filler_with_its_options(frontier: Frontier) -> None:
+    """Frontier names a value only for a gate side; five kinds are the filler's to pick from.
+
+    On a live run the select arrived with no value and no options, and the
+    filler could only block. The choices travel on the assignment: labels to
+    judge by, locators to click.
+    """
+    kinds = ["Corporation", "Partnership", "Limited Liability Company"]
+    entity = Control(
+        fieldId="q_006", key="el_6", label="Legal Entity Type", type="other", required=True,
+        options=None, locator="#entityType", unique=True, revealedBy=None,
+    )
+    frontier.observe(page([entity]))
+    assert frontier.next_assignment().intent == "expand"
+    frontier.observe(
+        page([entity]),
+        FillReport(
+            fieldId="q_006", intent="expand", locator="#entityType", ok=True,
+            optionsRevealed=[{"label": k, "locator": f'role=option[name="{k}"] >> visible=true'} for k in kinds],
+        ),
+    )
+
+    assignment = frontier.next_assignment()
+
+    assert assignment.intent == "select" and assignment.value is None
+    assert [o["label"] for o in assignment.options] == kinds
+    assert assignment.options[1]["locator"] == 'role=option[name="Partnership"] >> visible=true'
+    assert "q_006" not in frontier.summary()["gates"]   # five sides: walked once, not a gate
+
+
 def test_the_start_control_is_matched_on_its_own_text_not_the_job_types() -> None:
     """`workers_comp` is our identifier; Pie's href says "work comp"."""
     started = Frontier(

@@ -38,6 +38,7 @@ def choose_value(
     state: str = "",
     control_type: str = "",
     help_text: str | None = None,
+    options: list[str] | None = None,
 ) -> tuple[str, float, bool]:
     """Decide what to type into one field.
 
@@ -73,6 +74,9 @@ def choose_value(
         lines.append(f"What the page says about the format: {constraint_hint}")
     if help_text:
         lines.append(f"What the field's help tooltip says: {help_text}")
+    if options:
+        lines.append("The field offers exactly these choices; return one of them verbatim:")
+        lines.extend(f"  - {o}" for o in options)
     if error_text:
         lines.append(f"The page rejected the previous value with: {error_text}")
         lines.append("Return a corrected value that satisfies it.")

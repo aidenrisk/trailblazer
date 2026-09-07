@@ -165,7 +165,7 @@ def fill_one(
         if assignment.intent == "fill":
             report, usd, unpriced = _do_fill(page, assignment, settings)
         elif assignment.intent == "select":
-            report = _do_select(page, assignment)
+            report, usd, unpriced = _do_select(page, assignment, settings)
         elif assignment.intent == "check":
             report = _do_check(page, assignment)
         elif assignment.intent == "expand":
@@ -518,13 +518,48 @@ def _shape_of(value: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _do_select(page: Page, assignment: Assignment) -> FillReport:
+def _do_select(
+    page: Page, assignment: Assignment, settings: Settings | None = None
+) -> tuple[FillReport, float, bool]:
     """Set a choice: click the option's own locator, or set the parent by label.
 
     A radio's choices are separate clickable inputs and carry their own
     `optionLocator`; a native `<select>`'s do not, and are set by label against
     the parent.
+
+    A select with no value is a non-gate dropdown Frontier left to the filler:
+    the model picks one of the listed labels -- the plausible entity type for
+    the business, not the first option, which is often a placeholder -- and the
+    chosen label's locator is what gets clicked. Returns the report and the
+    call's cost, like `_do_fill`.
     """
+    usd, unpriced = 0.0, False
+    if assignment.value is None and assignment.options:
+        settings = settings or get_settings()
+        label = _label_of(page, assignment.locator) or assignment.fieldId or assignment.locator
+        labels = [o["label"] for o in assignment.options if o.get("label")]
+        chosen, usd, unpriced = choose_value(
+            label=label,
+            locator=assignment.locator,
+            url=page.url,
+            constraint_hint=assignment.constraintHint,
+            error_text=None,
+            settings=settings,
+            business_type=settings.crawl_business_type,
+            state=settings.crawl_state,
+            control_type=_type_of(page, assignment.locator),
+            help_text=assignment.helpText,
+            options=labels,
+        )
+        if chosen not in labels:
+            return _blocked(
+                assignment, f"the model chose {chosen!r}, which is not one of {labels}"
+            ), usd, unpriced
+        by_label = {o["label"]: o.get("locator") for o in assignment.options}
+        assignment = assignment.model_copy(
+            update={"value": chosen, "optionLocator": by_label.get(chosen)}
+        )
+
     if assignment.optionLocator:
         # A radio's option is always in the DOM. A custom listbox's is mounted
         # only while the widget is open, so if it does not resolve the widget
@@ -533,13 +568,13 @@ def _do_select(page: Page, assignment: Assignment) -> FillReport:
             _open_widget(page, assignment.locator)
         write_tools.click(page, assignment.optionLocator)
         page.wait_for_timeout(150)
-        return _report(assignment, ok=True, valueUsed=assignment.value)
+        return _report(assignment, ok=True, valueUsed=assignment.value), usd, unpriced
 
     if assignment.value is None:
-        return _blocked(assignment, "select with neither an optionLocator nor a value")
+        return _blocked(assignment, "select with neither an optionLocator nor a value"), usd, unpriced
 
     used = write_tools.select_option(page, assignment.locator, assignment.value)
-    return _report(assignment, ok=True, valueUsed=used)
+    return _report(assignment, ok=True, valueUsed=used), usd, unpriced
 
 
 def _do_check(page: Page, assignment: Assignment) -> FillReport:

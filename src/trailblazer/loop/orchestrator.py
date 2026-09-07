@@ -463,7 +463,12 @@ def _walk_page(
         assignment = decision
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
-        prefix.append((result.page.stageId, _pinned(assignment, report)))
+        if report.ok:
+            # Only what succeeded is part of the route. A blocked fill changed
+            # nothing on the page, and re-executing it can only block again: on
+            # a live run one such fill failed the whole re-execution and cost a
+            # real gate its second side.
+            prefix.append((result.page.stageId, _pinned(assignment, report)))
 
         _generate(generator, job_id, result.page, report, frontier.walk, ledger)
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
@@ -488,7 +493,8 @@ def _pinned(assignment: Assignment, report: FillReport) -> Assignment:
     A value Frontier named -- a gate side, a seed -- is already pinned. A value
     the filler chose exists only on the report, and re-executing the original
     instruction would ask the model again. A report with no value (an advance,
-    an expand, a blocked fill) leaves the assignment as it was.
+    an expand) leaves the assignment as it was; a blocked fill never reaches
+    here, because it is not part of the route.
     """
     if assignment.value is not None or report.valueUsed is None:
         return assignment

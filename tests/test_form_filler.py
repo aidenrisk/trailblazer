@@ -717,3 +717,58 @@ def test_a_chooser_that_mounts_nothing_reveals_no_options(page) -> None:
     # the answer is no options, never someone else's list.
     labels = [o["label"] for o in (report.optionsRevealed or [])]
     assert "Dashboard" not in labels and "Appetite Checker" not in labels
+
+
+# --------------------------------------------------------------------------- #
+# A non-gate dropdown: the filler chooses among the options
+# --------------------------------------------------------------------------- #
+
+
+def test_a_select_with_no_value_asks_the_model_to_pick_one_option_and_clicks_it(
+    page, monkeypatch
+) -> None:
+    """Five entity types is not a gate; someone still has to pick one."""
+    calls = _no_llm(monkeypatch, "Partnership")
+    options = [
+        {"label": k, "locator": f'role=option[name="{k}"] >> visible=true'}
+        for k in ("Corporation", "Partnership", "Limited Liability Company")
+    ]
+
+    report = fill_one(
+        page,
+        Assignment(intent="select", locator="#entityPicker2", fieldId="q_050", options=options),
+        SETTINGS,
+    )
+
+    assert report.ok and report.valueUsed == "Partnership"
+    assert calls[0]["options"] == ["Corporation", "Partnership", "Limited Liability Company"]
+    assert page.locator("#entityPicker2").input_value() == "Partnership"
+
+
+def test_a_native_select_with_no_value_is_set_by_the_chosen_label(page, monkeypatch) -> None:
+    _no_llm(monkeypatch, "Limited Liability Company")
+    options = [{"label": k, "locator": None} for k in ("Select...", "Sole Proprietor", "Limited Liability Company", "Corporation")]
+
+    report = fill_one(
+        page,
+        Assignment(intent="select", locator="#entityType", fieldId="q_004", options=options),
+        SETTINGS,
+    )
+
+    assert report.ok and report.valueUsed == "Limited Liability Company"
+    assert page.locator("#entityType").input_value() == "llc"
+
+
+def test_a_choice_outside_the_listed_options_is_refused_not_typed(page, monkeypatch) -> None:
+    """The model's answer must be one of the page's choices, character for character."""
+    _no_llm(monkeypatch, "LLC")
+    options = [{"label": k, "locator": None} for k in ("Sole Proprietor", "Limited Liability Company")]
+
+    report = fill_one(
+        page,
+        Assignment(intent="select", locator="#entityType", fieldId="q_004", options=options),
+        SETTINGS,
+    )
+
+    assert not report.ok
+    assert "not one of" in report.blocked["whatYouTried"]

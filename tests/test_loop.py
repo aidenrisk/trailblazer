@@ -374,6 +374,46 @@ def test_an_owed_side_that_cannot_be_set_is_declared_not_restarted_for_again(
     assert frontier.flow_done()
 
 
+def test_a_fill_blocked_on_the_first_pass_is_not_re_executed(monkeypatch, frontier: Frontier) -> None:
+    """A known failure can only fail again, and it is not part of the route.
+
+    On a live run a dropdown the filler could not set on walk 1 was pinned into
+    the prefix, blocked again on walk 2, and the re-execution abort declared a
+    genuine gate unexplored. The blocked fill must stay out of the prefix; the
+    gate's second side is then reached and taken.
+    """
+    performed: list = []
+    controls = [_control("q_001"), _gate("q_002", ["Yes", "No"])]
+    result = _page(controls)
+
+    def q1_always_blocks(tab, assignment, settings, ledger=None):
+        performed.append((assignment.fieldId, assignment.value))
+        blocked = assignment.fieldId == "q_001"
+        return FillReport(
+            fieldId=assignment.fieldId,
+            intent=assignment.intent,
+            locator=assignment.locator,
+            ok=not blocked,
+            valueUsed=None if blocked else (assignment.value or "x"),
+            blocked={"control": assignment.locator, "whatYouTried": "no chooser"} if blocked else None,
+        )
+
+    monkeypatch.setattr(orchestrator, "fill", q1_always_blocks)
+    monkeypatch.setattr(orchestrator, "perceive", lambda *a, **k: result)
+
+    orchestrator._walk_page(FakeTab(), result, frontier, "j1", "objective", Settings())
+
+    # The re-execution is everything between the first side and the owed one.
+    # The blocked fill must not be in it; it is re-attempted afresh afterwards,
+    # on the new walk's own pass, which is the `q_001` at the end.
+    yes, no = performed.index(("q_002", "Yes")), performed.index(("q_002", "No"))
+    assert yes < no
+    assert all(f != "q_001" for f, _ in performed[yes + 1 : no])
+    assert performed.count(("q_002", "Yes")) == 1 and performed.count(("q_002", "No")) == 1
+    assert frontier.summary()["unexplored"] == {}
+    assert frontier.flow_done()
+
+
 def test_a_failed_re_execution_aborts_the_restart_and_marks_the_gate_unexplored(
     monkeypatch, frontier: Frontier
 ) -> None:

@@ -870,6 +870,13 @@ class Frontier:
             fieldId=control.fieldId,
             value=value,
             optionLocator=option_locator,
+            # A value not named here is the filler's to choose, and it needs the
+            # choices to choose from: labels to judge by, locators to click.
+            options=(
+                [{"label": o.label, "locator": o.locator} for o in control.options]
+                if value is None else None
+            ),
+            helpText=control.helpText or None,
         )
 
     # ------------------------------------------------------------------ ledger
