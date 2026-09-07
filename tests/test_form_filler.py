@@ -772,3 +772,27 @@ def test_a_choice_outside_the_listed_options_is_refused_not_typed(page, monkeypa
 
     assert not report.ok
     assert "not one of" in report.blocked["whatYouTried"]
+
+
+def test_a_pinned_select_with_a_value_but_no_locator_still_clicks_its_option(page) -> None:
+    """Re-execution keeps the chosen value, not the locator the first pass found.
+
+    On a live run this fell through to the native-select method on a custom
+    listbox, blocked in 10ms, aborted the re-execution and cost a real gate its
+    second side. The options are still on the assignment; the locator is looked
+    up by label.
+    """
+    options = [
+        {"label": k, "locator": f'role=option[name="{k}"] >> visible=true'}
+        for k in ("Corporation", "Partnership", "Limited Liability Company")
+    ]
+
+    report = fill_one(
+        page,
+        Assignment(intent="select", locator="#entityPicker2", fieldId="q_050",
+                   value="Limited Liability Company", options=options),
+        SETTINGS,
+    )
+
+    assert report.ok and report.valueUsed == "Limited Liability Company"
+    assert page.locator("#entityPicker2").input_value() == "Limited Liability Company"

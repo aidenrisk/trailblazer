@@ -559,6 +559,13 @@ def _do_select(
         assignment = assignment.model_copy(
             update={"value": chosen, "optionLocator": by_label.get(chosen)}
         )
+    elif assignment.value is not None and not assignment.optionLocator and assignment.options:
+        # A pinned re-execution: the value was chosen on the first pass and kept,
+        # the locator that pass resolved was not. Looked up again by label, or a
+        # custom listbox falls through to the native-select path and blocks.
+        by_label = {o["label"]: o.get("locator") for o in assignment.options}
+        if by_label.get(assignment.value):
+            assignment = assignment.model_copy(update={"optionLocator": by_label[assignment.value]})
 
     if assignment.optionLocator:
         # A radio's option is always in the DOM. A custom listbox's is mounted
