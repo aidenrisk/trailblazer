@@ -798,8 +798,15 @@ def test_a_pinned_select_with_a_value_but_no_locator_still_clicks_its_option(pag
     assert page.locator("#entityPicker2").input_value() == "Limited Liability Company"
 
 
-def test_page_problems_reads_empty_invalid_and_unchosen_off_the_dom(page) -> None:
-    """The check before Next and after a Next that changed nothing. No model."""
+def test_page_problems_reads_only_what_the_page_marks_rejected(page) -> None:
+    """The check after a Next that changed nothing. No model, and no guessing.
+
+    Only a control the page itself flags -- `aria-invalid`, or text in its named
+    error slot -- is a problem. Whether an untouched field is required is the
+    page's judgment, made when Next is pressed: an "empty means problem" rule
+    flagged Pie's optional "Reason For Lapse" boxes and stopped a run before
+    Next was ever tried.
+    """
     from trailblazer.agents.form_filler.form_filler import page_problems
 
     page.fill("#zipAlt", "123")           # rejects through its error slot
@@ -809,10 +816,9 @@ def test_page_problems_reads_empty_invalid_and_unchosen_off_the_dom(page) -> Non
 
     assert found["#zipAlt"] == "Enter a 5-digit ZIP"
     assert "#legalName" not in found
-    assert found["#fein"] == "empty"                               # required, untouched
-    assert found['[name="priorClaims"]'] == "no option chosen"      # radio group, none checked
-    assert "#agencyProgram" not in found                           # locked, not settable
-    assert found["#entityPicker2"] == "empty"                      # read-only chooser is settable
+    assert "#fein" not in found                    # empty, but the page has not rejected it
+    assert '[name="priorClaims"]' not in found     # unchosen is not rejected
+    assert "#entityPicker2" not in found           # untouched chooser is not rejected
 
 
 def test_fill_leaves_the_field_so_a_blur_committed_value_is_committed(page) -> None:

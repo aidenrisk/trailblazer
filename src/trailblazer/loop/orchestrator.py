@@ -40,6 +40,7 @@ from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.login import LoginError, resolve_login
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.agents.validator import validate
+from trailblazer.agents.vision import read_page, resolve
 from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.generation import GenerationRequest
@@ -455,6 +456,9 @@ def _walk_page(
     same address, so page two arrived already advanced and was declared done
     with nine fields never assigned."""
 
+    seen: dict[str, int] = {}
+    """stageId -> screenshots vision has spent on it, capped per page."""
+
     for _ in range(MAX_ASSIGNMENTS):
         pages[result.page.stageId] = result.page
 
@@ -523,6 +527,14 @@ def _walk_page(
             problems = page_problems(tab)
             if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
                 log.warning("forward press changed nothing; problems=%s", problems)
+                report = None
+                report_stage = None
+                continue
+            # The page refused and named no field. Everything code can read has
+            # been read, so the last resort is to look at it: the message is on
+            # screen and so are the controls it means, and neither the markup
+            # nor the error slots connect the two.
+            if _see(tab, result, seen, job_id, settings):
                 report = None
                 report_stage = None
                 continue
@@ -887,6 +899,66 @@ def _record_route_end(
     generator.record_route_end(
         frontier.walk, result.page.stageId, result.polarity == "-ve"
     )
+
+
+_MAX_LOOKS_PER_STAGE = 2
+"""Screenshots one page may cost. A page whose controls vision could not address
+twice is not going to yield on the third, and the cap keeps a stuck page from
+photographing itself forever."""
+
+
+def _see(
+    tab,
+    result: ScraperResult,
+    seen: dict[str, int],
+    job_id: str,
+    settings: Settings,
+) -> bool:
+    """Look at the page for the addresses code could not measure. True if any was found.
+
+    The last resort, reached only where the deterministic path has nothing left:
+    every control was measured, the page's error slots were read, and the page
+    still refuses to move without naming a field. What is left is what a person
+    would do -- look at it.
+
+    Addresses proven against the badged element are written onto the controls in
+    place, so the caller loops round and Frontier assigns them on its next turn
+    with no further look. Returns False when nothing was proven, which leaves
+    the caller to stop as it would have.
+    """
+    stage = result.page.stageId
+    if seen.get(stage, 0) >= _MAX_LOOKS_PER_STAGE:
+        log.warning("vision already looked at %s %d times; not looking again", stage, seen[stage])
+        return False
+    seen[stage] = seen.get(stage, 0) + 1
+
+    unaddressed = [c for c in result.page.controls if not c.locator or not c.unique]
+    if not unaddressed:
+        log.info("nothing on %s lacks an address; vision has nothing to add", stage)
+        return False
+
+    reading = read_page(
+        tab,
+        unaddressed,
+        "The page refused to move forward and named no field. Which badged elements "
+        "does its message refer to, and what words identify each of them?",
+        settings,
+        job_id,
+    )
+    addresses = resolve(tab, unaddressed, reading)
+    if not addresses:
+        return False
+
+    for control in result.page.controls:
+        located = addresses.get(control.key)
+        if located:
+            control.locator = located
+            control.unique = True
+    log.warning(
+        "vision addressed %d control(s) on %s that code could not: %s",
+        len(addresses), stage, sorted(addresses.values()),
+    )
+    return True
 
 
 def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:

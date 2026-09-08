@@ -96,7 +96,10 @@ def choose_value(
             # 5 characters" produced content='' with reasoning_content='25126',
             # two output tokens both counted as reasoning. The answer is there;
             # dropping it failed a live run on a zip code.
-            chosen = _first_line((response.additional_kwargs or {}).get("reasoning_content", ""))
+            # `additional_kwargs` is absent on some response objects; a missing
+            # channel is the ordinary empty reply, handled just below.
+            extra = getattr(response, "additional_kwargs", None) or {}
+            chosen = _first_line(extra.get("reasoning_content", ""))
             if chosen:
                 log.warning(
                     "field %r: the model left content empty and answered in its "

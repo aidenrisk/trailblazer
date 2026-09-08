@@ -83,7 +83,7 @@ oversized reservation refuses a request the account could pay for: a run died
 on "you requested up to 65536 tokens, but can only afford 65283".
 
 Sized from measurement. Across 352 logged calls the longest reply was 3,230
-output tokens, a perceive of a 23-control page; the sight loop peaked at 1,439
+output tokens, a perceive of a 23-control page; a vision reading peaked at 1,439
 and the value chooser at 403. Five times the worst observed case, so a page
 description is not truncated mid-structure."""
 
@@ -120,6 +120,30 @@ def invoke_with_retry(call: Callable[[], T], *, step: str) -> T:
             )
             time.sleep(wait)
     raise AssertionError("unreachable: the loop returns or raises")
+
+
+def get_vision_model(settings: Settings | None = None) -> BaseChatModel:
+    """The model the vision fallback sends its screenshot to.
+
+    Separate from `get_model` because the crawl's model is chosen for structured
+    output over text and need not accept an image; `VISION_MODEL` names one that
+    does. Same provider and key, so nothing else is configured twice.
+    """
+    settings = settings or get_settings()
+    if settings.llm_provider != "openrouter":
+        return get_model(settings)
+    if not settings.openrouter_api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set; put it in .env")
+    from langchain_openrouter import ChatOpenRouter
+
+    return ChatOpenRouter(
+        model=settings.vision_model,
+        temperature=0,
+        openrouter_api_key=settings.openrouter_api_key,
+        openrouter_provider={"require_parameters": True},
+        request_timeout=_REQUEST_TIMEOUT_MS,
+        max_retries=0,
+    )
 
 
 def get_model(settings: Settings | None = None) -> BaseChatModel:

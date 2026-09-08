@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-5"
 
+    vision_model: str = "google/gemini-2.5-pro"
+    """The model the vision fallback sends its screenshot to. Separate from
+    `openrouter_model` because the crawl's model is chosen for structured output
+    on text and need not accept an image at all."""
+
     scraper_perceiver: Literal["dom_snapshot", "a11y"] = "dom_snapshot"
     """Which `Perceiver` implementation builds the payload handed to the model."""
 

@@ -81,65 +81,6 @@
   };
 
   /**
-   * A control with no id, name, test-id or label -- a bare checkbox in a table
-   * cell -- is named and addressed by its surroundings: the row it sits in and
-   * the column header over it. Two layouts are read. A CSS grid holds every
-   * cell as a direct child, so the row is arithmetic on the cell index and the
-   * grid's column count; a `<tr>` wraps its cells. The address is the cell
-   * that reads exactly the row label, then the k-th input of this type in the
-   * cells after it (grid) or under the row (tr). Measured for uniqueness like
-   * any other locator. Pie's coverage-lapse table is the grid case.
-   */
-  const cellText = (cell) => (cell.querySelector(SELECTOR) ? '' : (cell.innerText || '').trim().replace(/\s+/g, ' '));
-  const layoutOf = (el) => {
-    for (let n = el.parentElement, i = 0; n && n !== document.body && i < 8; n = n.parentElement, i++) {
-      if (n.tagName === 'TR') {
-        const cells = Array.from(n.children);
-        return { cells, cols: cells.length, idx: cells.findIndex((c) => c.contains(el)), wrapped: true, headerCells: n.closest('table') && n.closest('table').rows[0] !== n ? Array.from(n.closest('table').rows[0].children) : [] };
-      }
-      const style = getComputedStyle(n);
-      if (style.display === 'grid' || style.display === 'inline-grid') {
-        const cols = style.gridTemplateColumns.split(' ').filter(Boolean).length;
-        const cells = Array.from(n.children);
-        const idx = cells.findIndex((c) => c.contains(el));
-        if (cols >= 2 && idx >= 0) {
-          const first = cells.slice(0, cols);
-          return { cells, cols, idx, wrapped: false, headerCells: first.some((c) => c.querySelector(SELECTOR)) ? [] : first };
-        }
-      }
-    }
-    return null;
-  };
-  const surroundings = (el) => {
-    const lay = layoutOf(el);
-    if (!lay) return { name: '', anchor: '', candidates: [] };
-    const { cells, cols, idx, wrapped, headerCells } = lay;
-    const rowStart = wrapped ? 0 : Math.floor(idx / cols) * cols;
-    const row = wrapped ? cells : cells.slice(rowStart, rowStart + cols);
-    const col = wrapped ? idx : idx - rowStart;
-    const anchorCell = row.find((c) => cellText(c));
-    const anchor = anchorCell ? cellText(anchorCell).slice(0, 60) : '';
-    const header = headerCells[col] ? (headerCells[col].innerText || '').trim().slice(0, 40) : '';
-    const tag = el.tagName.toLowerCase();
-    const type = el.getAttribute('type') || '';
-    const typeX = type ? `[@type="${type}"]` : '';
-    const after = wrapped ? row : row.slice(row.indexOf(anchorCell) + 1);
-    const same = after.flatMap((c) => Array.from(c.querySelectorAll(type ? `${tag}[type="${type}"]` : tag)));
-    const k = same.indexOf(el);
-    const out = [];
-    // The anchor must be a real label, not a stray character or a number that
-    // could read the same elsewhere on the page: at least two characters, some
-    // of them letters or digits, and quote-free so it can sit in the xpath.
-    if (anchor && k >= 0 && anchor.length >= 2 && /[\p{L}\p{N}]/u.test(anchor) && !anchor.includes('"')) {
-      const anchorX = `//*[normalize-space(.)="${anchor}"][not(.//*[normalize-space(.)="${anchor}"])]`;
-      out.push(wrapped
-        ? `xpath=${anchorX}/ancestor::tr[1]//${tag}${typeX} >> nth=${k}`
-        : `xpath=${anchorX}/following-sibling::*[position()<=${cols - 1}]//${tag}${typeX} >> nth=${k}`);
-    }
-    return { name: [anchor, header].filter(Boolean).join(' '), anchor, candidates: out };
-  };
-
-  /**
    * The nearest ancestor holding every member of the group and nothing of any
    * other group. It is what the group's own locator addresses; without it the
    * only candidate is the shared `name`, which matches every member.
@@ -269,7 +210,7 @@
 
       const el = entry.el;
       const tag = el.tagName.toLowerCase();
-      // The key, stamped on the node. The sight pass finds a control by key to
+      // The key, stamped on the node. The vision pass finds a control by key to
       // badge it, and only the element itself can carry that join: `key` is an
       // index into this payload and nothing in the DOM records it otherwise.
       el.setAttribute('data-tb-key', `el_${i}`);
@@ -285,8 +226,7 @@
       const forLabel = labelText(el);
       const byLabelled = labelledByText(el);
       const direct = ariaLabel || byLabelled || forLabel || el.getAttribute('placeholder') || '';
-      const nearby = direct || el.id || name || testid ? { name: '', anchor: '', candidates: [] } : surroundings(el);
-      const accName = direct || nearby.name;
+      const accName = direct;
 
       // Only native <select> exposes its choices without interaction. A custom
       // widget mounts its listbox into a portal on open, so there is nothing to
@@ -360,10 +300,7 @@
           (el.hasAttribute('readonly') && !isChooser(el)),
         visible: isVisible(el),
         options,
-        candidates: candidates(el, name, testid, role, direct).concat(nearby.candidates),
-        // Set when the only address is the row's text: the reader must know a
-        // locator rests on words that may belong to something else.
-        addressedByText: nearby.candidates.length ? nearby.anchor : '',
+        candidates: candidates(el, name, testid, role, direct),
         error: '',
       };
     });

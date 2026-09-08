@@ -337,13 +337,7 @@ class DomSnapshotPerceiver:
         progress["phase"] = "measure locators and tooltips"
         for item in raw:
             locator, unique = _first_unique(page, item.get("candidates", []))
-            if item.get("addressedByText") and locator.startswith("xpath="):
-                log.warning(
-                    "control %s addressed by nearby text %r, not by its own identity; "
-                    "unique=%s -- verify the text is this control's row",
-                    item["key"], item["addressedByText"], unique,
-                )
-            cleaned = {k: v for k, v in item.items() if k not in ("candidates", "helpTrigger", "addressedByText")}
+            cleaned = {k: v for k, v in item.items() if k not in ("candidates", "helpTrigger")}
             cleaned["options"] = _measure_options(page, item.get("options"))
             if known_help.get(locator):
                 cleaned["helpText"] = known_help[locator]
