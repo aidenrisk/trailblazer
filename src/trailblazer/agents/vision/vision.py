@@ -183,61 +183,68 @@ def _candidates(anchor: Anchor, control: Control) -> list[str]:
     """Locators expressing "the control of this kind nearest these words".
 
     The text is the model's, quoted into the selector; the structure around it
-    is ours. An anchor cell is found by its exact text, then the search walks up
-    to the nearest ancestor holding a control of this kind and takes the one at
-    the position the DOM order gives. Where a heading is also given, the pairing
-    of row text and column text narrows a grid to one cell.
+    is ours. The label's cell is found by its exact text and the search runs
+    forward to the nearest control *of this control's kind*. Kind is what
+    separates two controls sharing a row: Pie's "2025-26" carries both a
+    checkbox and a `role="listbox"` dropdown, and each finds its own.
+
+    The heading is not part of any address. It reached the right element for
+    the wrong reason on a fixture -- position, not identity -- and a re-ordered
+    row would send the replay script to a different answer.
     """
     tag = "select" if control.type == "select" and control.options else "input"
     kind = _kind(control)
     out: list[str] = []
 
     label = anchor.label.strip()
-    heading = anchor.heading.strip()
 
     def usable(text: str) -> bool:
         return len(text) >= 2 and '"' not in text
 
-    if usable(label) and usable(heading):
-        # Row and column: the cell that reads the label, in the row that also
-        # holds the heading's column position. Expressed as an ancestor walk so
-        # it works for a table and for a grid of divs alike.
-        out.append(
-            f'xpath=//*[normalize-space(text())="{label}"]'
-            f'/ancestor::*[.//{tag}][1]//{tag}{kind}'
-        )
+    # `normalize-space(.)` with a childless guard, never `text()`: Pie renders a
+    # row label as `<p>2025-26</p>`, whose text is a child node, so a `text()`
+    # predicate matched nothing and every candidate for all eight controls was
+    # rejected on a live run. The guard keeps the match on the leaf that reads
+    # the words rather than every ancestor that contains them.
+    def leaf(text: str) -> str:
+        return f'//*[normalize-space(.)="{text}"][not(*)]'
+
     if usable(label):
-        out.append(
-            f'xpath=//*[normalize-space(text())="{label}"]'
-            f'/following::{tag}{kind}[1]'
-        )
-        out.append(
-            f'xpath=//*[normalize-space(text())="{label}"]'
-            f'/ancestor::*[.//{tag}][1]//{tag}{kind}'
-        )
+        # The control of this kind nearest the label, in document order: for a
+        # grid row and for a table row alike, the label's cell precedes its
+        # inputs.
+        out.append(f"xpath={leaf(label)}/following::{tag}{kind}[1]")
+        # Failing that, the nearest ancestor holding one -- a row wrapper that
+        # puts the label after its input, or a label element around both.
+        out.append(f"xpath={leaf(label)}/ancestor::*[.//{tag}{kind}][1]//{tag}{kind}")
         out.append(f'{tag}{_css_kind(control)} >> internal:label="{label}"i')
-    # A heading alone is never an address. "the first checkbox after the column
-    # header" names a position, not a field: on a fixture it resolved to the
-    # right element for the wrong reason, and one re-ordered row would send the
-    # replay script to a different answer. The heading qualifies a label; it
-    # does not stand in for one.
     return out
 
 
 def _kind(control: Control) -> str:
-    """The xpath predicate narrowing to this control's input type.
+    """The xpath predicate narrowing to this control's kind.
 
-    Only a toggle narrows: a checkbox sits beside other inputs in the same row,
-    and without the predicate "the input after this text" reaches a text box.
-    Every other type takes the nearest input of any kind, which is what the
-    model saw.
+    A row holds controls of different kinds -- Pie's lapse grid pairs a
+    checkbox with a `role="listbox"` dropdown -- so "the input after this text"
+    reaches whichever comes first and fails the identity check for the other.
+    The predicate is what lets each find its own.
     """
-    return '[@type="checkbox" or @type="radio"]' if control.type == "toggle" else ""
+    if control.type == "toggle":
+        return '[@type="checkbox" or @type="radio"]'
+    if control.typeahead or control.type in ("select", "other"):
+        # A custom chooser: a text box the page marks as a list, which is how
+        # Pie draws every dropdown that is not a native `<select>`.
+        return '[@role="listbox" or @role="combobox"]'
+    return '[not(@role="listbox") and not(@role="combobox") and not(@type="checkbox") and not(@type="radio")]'
 
 
 def _css_kind(control: Control) -> str:
     """The CSS equivalent of `_kind`, for the label-engine candidate."""
-    return '[type="checkbox"], input[type="radio"]' if control.type == "toggle" else ""
+    if control.type == "toggle":
+        return '[type="checkbox"], input[type="radio"]'
+    if control.typeahead or control.type in ("select", "other"):
+        return '[role="listbox"], input[role="combobox"]'
+    return ""
 
 
 def _unbadge(page: Page) -> None:
