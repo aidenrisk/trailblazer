@@ -13,6 +13,12 @@ previous board rather than extending it, because `fieldId` is a per-page counter
 from dataclasses import dataclass, field
 
 from trailblazer.contracts.page_description import Control, Option
+from trailblazer.observability.logging import get_logger
+
+log = get_logger(__name__)
+
+MAX_ERROR_REOPENS = 2
+"""Corrections a field gets on the page's own rejection before the page stops on it."""
 
 # The two sides of a gate that carries no options: a checkbox is either set or
 # not, and there is no option label to name either state.
@@ -86,10 +92,6 @@ class Board:
     revealed: dict[str, str] = field(default_factory=dict)
     """fieldId -> the fieldId of the assignment that made it appear."""
 
-    dismissed_blockers: set[str] = field(default_factory=set)
-    """Locators already targeted by a dismiss `advance`, so one that does not
-    clear is not re-issued forever."""
-
     advanced: set[str] = field(default_factory=set)
     """Locators of actions already clicked on this page."""
 
@@ -141,6 +143,19 @@ class Board:
     and the page showed no problem to fix. A stuck page means the flow is not
     done, whatever the gates say."""
 
+    errors: dict[str, str] = field(default_factory=dict)
+    """fieldId -> the rejection text the page shows against it right now.
+
+    Measured by the extractor and attributed to the control (its error slot,
+    or the nearest field above the message). A control carrying one loses its
+    attempt so it is assigned again with the text as its constraint hint: the
+    filler is what fixes a field, and it cannot fix what it is never told.
+    """
+
+    error_reopens: dict[str, int] = field(default_factory=dict)
+    """fieldId -> how many times an error has reopened it this walk. Capped by
+    `MAX_ERROR_REOPENS`, past which the error stays and the page stops on it."""
+
     unexplored: dict[str, str] = field(default_factory=dict)
     """fieldId -> why a gate's owed side was never walked.
 
@@ -168,7 +183,34 @@ class Board:
             )
         self.controls[control.fieldId] = control
 
-        sides = None if (control.disabled or control.additionalRow) else gate_sides(control)
+        if control.error:
+            self.errors[control.fieldId] = control.error
+            if control.fieldId in self.attempted and control.locator:
+                n = self.error_reopens.get(control.fieldId, 0)
+                if n < MAX_ERROR_REOPENS:
+                    self.error_reopens[control.fieldId] = n + 1
+                    self.attempted.discard(control.fieldId)
+                    log.warning(
+                        "reopening %s (%r) on its rejection: %s",
+                        control.fieldId, control.label[:40], control.error[:120],
+                    )
+                else:
+                    log.error(
+                        "%s (%r) still rejected after %d corrections: %s",
+                        control.fieldId, control.label[:40], n, control.error[:120],
+                    )
+        else:
+            self.errors.pop(control.fieldId, None)
+
+        unsettable = control.disabled or control.additionalRow or not control.locator
+        if not control.locator and new:
+            # No id, name, test-id or label the extractor could turn into an
+            # address. Playwright refuses an empty selector, and Frontier tried
+            # four such checkboxes on Pie's insurance-history page -- then would
+            # have restarted for each one's other side. Never assigned, never a
+            # gate; the gap is logged so it reaches the reader, not swallowed.
+            log.warning("control %s (%r) has no locator and cannot be set", control.fieldId, control.label[:40])
+        sides = None if unsettable else gate_sides(control)
         if sides is None:
             self.gates.pop(control.fieldId, None)
         elif control.fieldId not in self.gates:
@@ -190,6 +232,7 @@ class Board:
             and f in self.present
             and not self.controls[f].disabled
             and not self.controls[f].additionalRow
+            and self.controls[f].locator
         ]
 
     def half_walked(self) -> list[str]:
@@ -248,6 +291,7 @@ class Board:
         self.attempted.clear()
         self.advanced.clear()
         self.pinned.clear()
+        self.error_reopens.clear()
 
     def charge_restart(self) -> None:
         """Count one restart against this page's own budget."""

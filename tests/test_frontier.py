@@ -58,13 +58,14 @@ def page(
     actions: list[Action] | None = None,
     blockers: list[str] | None = None,
     stage_id: str = STAGE,
+    next: str | None = None,
 ) -> PageDescription:
-    """One page description."""
+    """One page description. `next` given makes it a page with somewhere to go."""
     return PageDescription(
         stageId=stage_id,
         url="https://partner.example.com/start",
         controls=controls,
-        next=None,
+        next=next,
         back=None,
         actions=actions or [],
         blockers=blockers or [],
@@ -571,33 +572,11 @@ def test_the_start_control_is_matched_on_its_own_text_not_the_job_types() -> Non
 # --------------------------------------------------------------------------- #
 
 
-def test_a_page_with_blockers_yields_the_dismiss_action_first(frontier: Frontier) -> None:
-    """An overlay is cleared before anything under it is touched."""
-    actions = [Action(label="Accept All Cookies", href="", locator="#accept", unique=True)]
-    frontier.observe(page([control("q_001")], actions=actions, blockers=["cookie banner shown"]))
-
-    assignment = frontier.next_assignment()
-
-    assert assignment.intent == "advance"
-    assert assignment.locator == "#accept"
-
-
 def test_a_blocker_with_no_dismissing_action_does_not_stall_the_page(frontier: Frontier) -> None:
     """Nothing on the page clears it, so the walk proceeds and the blocker is logged."""
     frontier.observe(page([control("q_001")], blockers=["This field is required"]))
 
     assert frontier.next_assignment().fieldId == "q_001"
-
-
-def test_a_dismiss_action_is_not_issued_twice(frontier: Frontier) -> None:
-    """A blocker that survives its dismissal stops the page rather than looping."""
-    actions = [Action(label="Accept", href="", locator="#accept", unique=True)]
-    description = page([], actions=actions, blockers=["cookie banner shown"])
-    frontier.observe(description)
-    first = frontier.next_assignment()
-    frontier.observe(description, report(first))
-
-    assert frontier.next_assignment() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -904,3 +883,78 @@ def test_the_walk_id_is_flow_wide_not_per_page(frontier: Frontier) -> None:
     )
     assert frontier.open_restart(restart) == 2
     assert frontier.walk == 2
+
+
+# --------------------------------------------------------------------------- #
+# One complete path before any branch
+# --------------------------------------------------------------------------- #
+
+
+def test_a_gate_is_not_restarted_for_while_the_flow_has_pages_ahead(
+    frontier: Frontier,
+) -> None:
+    """A gate's side decides what later pages render, so branching from the
+    middle leaves them described under whichever side was set last."""
+    gate = control("q_001", type="select", options=["Yes", "No"])
+
+    # A page with somewhere to go: every field done, and Next not yet pressed.
+    frontier.observe(page([gate], next='button:has-text("Next")'))
+    assignment = frontier.next_assignment()
+    frontier.observe(
+        page([gate], next='button:has-text("Next")'), report(assignment, "Yes")
+    )
+
+    decision = frontier.next_assignment()
+
+    assert frontier.reached_end is False
+    assert not isinstance(decision, Restart)
+    assert decision.intent == "advance"
+
+
+def test_the_owed_side_is_restarted_for_once_a_walk_reaches_the_end(
+    frontier: Frontier,
+) -> None:
+    """The flow's end is a completed page with no forward control: the crawl
+    stops before a form's submit, so no Next there means arrival."""
+    gate = control("q_001", type="select", options=["Yes", "No"])
+
+    frontier.observe(page([gate]))
+    assignment = frontier.next_assignment()
+    frontier.observe(page([gate]), report(assignment, "Yes"))
+    frontier.next_assignment()  # sees the completed page with no next
+
+    assert frontier.reached_end is True
+
+    decision = frontier.next_assignment()
+
+    assert isinstance(decision, Restart)
+    assert (decision.fieldId, decision.side) == ("q_001", "No")
+
+
+def test_an_earlier_gate_is_not_restarted_for_from_the_middle_of_the_flow(
+    frontier: Frontier,
+) -> None:
+    """The live failure: page two's assignable fields ran out while nine unnamed
+    controls sat unassigned, and the flow was re-entered for a page-one gate
+    with two pages never walked."""
+    gate = control("q_009", type="select", options=["Yes", "No"])
+    first = page([gate], stage_id="form_page_1_business_info", next='button:has-text("Next")')
+
+    frontier.observe(first)
+    taken = frontier.next_assignment()
+    frontier.observe(first, report(taken, "Yes"), None, "form_page_1_business_info")
+    forward = frontier.next_assignment()
+    frontier.observe(first, report(forward), None, "form_page_1_business_info")
+
+    # Page two as Pie renders it: controls the extractor could not address, so
+    # none is assignable, and no forward control until its real fields are set.
+    second = page(
+        [control(f"q_{i:03d}", locator="") for i in range(1, 10)],
+        stage_id="form_page_1_workforce_details",
+    )
+    frontier.observe(second, None, None, None)
+
+    decision = frontier.next_assignment()
+
+    assert frontier.reached_end is False
+    assert not isinstance(decision, Restart)

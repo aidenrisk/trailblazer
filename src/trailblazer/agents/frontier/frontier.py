@@ -105,6 +105,11 @@ class Frontier:
         """
 
         self.page: PageDescription | None = None
+        self._reached_end = False
+        """Whether a walk has run the flow to the page it stops on. See
+        `reached_end`: gate coverage waits for it, so the first walk is a
+        complete path rather than a branch taken from the middle."""
+
         self._start_stage: str | None = None
         """The stage the start action was taken on: the landing page.
 
@@ -135,12 +140,20 @@ class Frontier:
         page: PageDescription,
         report: FillReport | None = None,
         added: list[str] | None = None,
+        report_stage: str | None = None,
     ) -> None:
         """Fold a new description and the last report into the board.
 
         `added` is `ScraperResult.addedControls`: the fieldIds new since the
         previous perceive. They are attributed to the assignment the report
         names, which is what makes `revealed` answerable.
+
+        `report_stage` is the stage the report's action ran on. An advance
+        lands the crawl on the next page, and its report used to be folded
+        into that page's board -- so page two arrived with its own Next already
+        recorded as pressed, because every Pie page's forward button is "Next"
+        at the same address, and the crawl silently restarted instead of
+        leaving. A report belongs to the page it was performed on.
         """
         started = time.monotonic()
         if self.board is None or self.board.stage_id != page.stageId:
@@ -173,10 +186,13 @@ class Frontier:
         self.page = page
 
         if report is not None:
-            self._apply(board, report)
+            owner = self.boards.get(report_stage) if report_stage else None
+            self._apply(owner if owner is not None else board, report)
 
         newly_added = set(added or [])
-        revealed_by = report.fieldId if report is not None else None
+        # A reveal is attributed only to an action on this same page.
+        same_page = report is not None and (report_stage is None or report_stage == page.stageId)
+        revealed_by = report.fieldId if same_page else None
         for control in page.controls:
             board.add(control, revealed_by if control.fieldId in newly_added else None)
 
@@ -199,8 +215,12 @@ class Frontier:
         the fieldIds reopened.
         """
         assert self.board is not None
-        by_locator = {c.locator: f for f, c in self.board.controls.items()}
-        reopened = [by_locator[l] for l in locators if l in by_locator]
+        # A problem with no address names nothing; a control with no address
+        # cannot be refilled. Reopening either put the page in a loop: Next
+        # pressed, the same unaddressable checkbox "reopened", Next pressed --
+        # 372 times in one run before the action cap ended it.
+        by_locator = {c.locator: f for f, c in self.board.controls.items() if c.locator}
+        reopened = [by_locator[l] for l in locators if l and l in by_locator]
         for field_id in reopened:
             self.board.attempted.discard(field_id)
         if forward:
@@ -258,10 +278,9 @@ class Frontier:
         if report.fieldId is None:
             # An `advance` that was clicked is not re-issued. One that was
             # refused was never tried: recording it would leave a dialog with
-            # no dismisser for the rest of the walk.
+            # nothing pressable for the rest of the walk.
             if report.ok:
                 board.advanced.add(report.locator)
-                board.dismissed_blockers.add(report.locator)
             return
 
         if report.intent == "expand" and report.ok and report.optionsRevealed:
@@ -303,9 +322,10 @@ class Frontier:
     def next_assignment(self) -> Assignment | Restart | None:
         """The next thing to do, or None when the page is done.
 
-        Priority, highest first: clear a blocker, advance a page with nothing
-        fillable, act on an unattempted field, advance a page whose fields are
-        all done, restart the flow for a gate still owing a side.
+        Priority, highest first: advance a page with nothing fillable, act on
+        an unattempted field, advance a page whose fields are all done, restart
+        the flow for a gate still owing a side. A dialog over the page is not
+        Frontier's to clear: Loop clears it before the page is described here.
 
         Advancing outranks restarting so a route runs to the end of the flow
         before any branch is revisited. A gate's side decides what the *later*
@@ -322,8 +342,7 @@ class Frontier:
             raise RuntimeError("next_assignment called before observe")
 
         decision = (
-            self._dismiss_blocker()
-            or self._advance_to_target()
+            self._advance_to_target()
             or self._first_unattempted()
             or self._advance_when_filled()
             or self._restart_for_gate()
@@ -373,11 +392,7 @@ class Frontier:
         """
         if self.board is None or self.page is None:
             return False
-        return not (
-            self._blocking_action()
-            or self._target_action()
-            or self.board.unattempted()
-        )
+        return not (self._target_action() or self.board.unattempted())
 
     def flow_done(self) -> bool:
         """True when no page owes a gate side that has not been declared.
@@ -449,22 +464,6 @@ class Frontier:
 
     # -------------------------------------------------------------- priorities
 
-    def _dismiss_blocker(self) -> Assignment | None:
-        """A cookie banner or modal is in the way: click the action that clears it."""
-        assert self.board is not None and self.page is not None
-        action = self._blocking_action()
-        if action is None:
-            if self.page.blockers:
-                log.warning(
-                    "blockers with no dismissing action stage_id=%s blockers=%s",
-                    self.board.stage_id,
-                    "; ".join(self.page.blockers),
-                )
-            return None
-
-        self.board.dismissed_blockers.add(action.locator)
-        return Assignment(intent="advance", locator=action.locator)
-
     def _advance_when_filled(self) -> Assignment | None:
         """Press the page's forward control once every field has been acted on.
 
@@ -474,19 +473,28 @@ class Frontier:
         """
         assert self.board is not None and self.page is not None
         if not self.page.next:
-            if (self.page.controls and not self.page.blockers and not self.board.stuck
-                    and not self.board.unattempted()):
-                # Only once every field is done: a forward control can appear as
-                # the form completes, and a missing one on first sight is not
-                # yet a wall.
-                # A form page with every field done and no way forward is not a
-                # page that is finished; it is a page the crawl cannot leave. On
-                # Pie's workforce page the scraper found no Next in fourteen
-                # looks, and the crawl restarted for a gate, exhausted it, and
-                # would have reported the flow done at page two.
-                self.mark_stuck(
-                    f"no forward control found on {self.board.stage_id} with "
-                    f"{len(self.page.controls)} fields attempted and no blocker"
+            # A forward control can appear as the form completes, so a missing
+            # one is judged only once every field has been acted on.
+            if self.page.blockers or self.board.stuck or self.board.unattempted():
+                return None
+            if not self.page.controls:
+                return None
+            # Every field done, nothing blocking, and no way forward. The crawl
+            # stops before a form's submit (`_NEXT_PATTERNS` omits it), so this
+            # is the flow's end, and the route that reached it is one complete
+            # path from entry to terminal. Gate coverage starts from here.
+            #
+            # Logged loudly because the same shape is also the failure it used
+            # to be reported as: if this fires on a middle page the scraper
+            # missed that page's Next, and every page after it goes unwalked.
+            if not self._reached_end:
+                self._reached_end = True
+                log.info(
+                    "flow end reached stage_id=%s walk=%d fields=%d; "
+                    "gate coverage starts now",
+                    self.board.stage_id,
+                    self.walk_seq,
+                    len(self.page.controls),
                 )
             return None
         if self.page.next in self.board.advanced:
@@ -512,38 +520,6 @@ class Frontier:
                     value if value.startswith("$") else "<supplied>",
                 )
                 return value
-        return None
-
-    def _blocking_action(self) -> Action | None:
-        """The first un-clicked action that would clear a blocker, if the page has one.
-
-        The blocker text carries no locator of its own -- `blockers` is a list of
-        strings -- so the dismissing element is found among the page's actions by
-        its label. An action already clicked is never re-offered, so a blocker
-        that does not clear stops the page rather than looping on it.
-        """
-        assert self.board is not None and self.page is not None
-        if not self.page.blockers:
-            return None
-        # An affirmative dismisser first. Pie's multi-state notice offers
-        # "Cancel" and "I Understand"; the crawl's list knew neither, matched a
-        # "Close" it had already spent, and reported no way to clear a dialog
-        # whose affirmative button restores the page and keeps the answer.
-        # A negative dismisser is never chosen: it tends to revert the answer
-        # that raised the notice.
-        affirmative = ("understand", "acknowledge", "accept", "agree", "got it", "proceed", "allow", "ok")
-        generic = ("dismiss", "close", "continue")
-        negative = ("cancel", "decline", "back", "no thanks")
-        candidates = [
-            a for a in self.page.actions
-            if a.locator not in self.board.dismissed_blockers
-            and not any(n in a.label.casefold() for n in negative)
-        ]
-        for words in (affirmative, generic):
-            for action in candidates:
-                label = action.label.casefold()
-                if any(w in label for w in words):
-                    return action
         return None
 
     def _advance_to_target(self) -> Assignment | None:
@@ -654,6 +630,14 @@ class Frontier:
     def _restart_for_gate(self) -> Restart | None:
         """Ask Loop to reset the page so a gate's owed side can be taken cleanly.
 
+        Nothing is restarted before one walk has run the flow to its end. A
+        gate's side decides what the *later* pages render, so branching from
+        page three leaves pages four and five described under whichever side
+        the last restart happened to set, and no walk is a path from entry to
+        the terminal. On Pie the crawl branched from workforce-details and
+        insurance-history was reached only after three restarts had already
+        spent the gate budget.
+
         Setting the gate back is not the same as never having set it: the
         abandoned branch's fields stay mounted and anything filled underneath
         them stays filled (spec §4, "Backtracking"). So the owed side is not
@@ -689,6 +673,8 @@ class Frontier:
         # mounts the nested gate again, and its own owed side is assigned once
         # the board sees it.
         if owed:
+            if not self.reached_end:
+                return None
             field_id = owed[0]
             side = self.board.gates[field_id].remaining[0]
             self.board.charge_restart()
@@ -701,20 +687,41 @@ class Frontier:
 
         return self._restart_for_absent(absent[0])
 
+    @property
+    def reached_end(self) -> bool:
+        """Whether any walk has run the flow to the page it stops on.
+
+        Set when a page has every field attempted and no forward control: the
+        crawl stops before a form's submit (see `_NEXT_PATTERNS`), so the
+        absence of a Next on a completed page is arrival, not a wall. Gate
+        coverage begins only once this is true, so the first walk is a path
+        from entry to the terminal.
+        """
+        return self._reached_end
+
     def _restart_for_earlier_page(self) -> Restart | None:
         """Restart the flow for a gate on a page already left behind.
 
-        Reached only when the current page has nothing left to do and cannot be
-        advanced -- the end of a route. An earlier page's gate still owing a
-        side is what makes the next route different: the side it was not set to
-        may render a different set of later pages, so the flow is re-entered
-        rather than the crawl ending here.
+        An earlier page's gate still owing a side is what makes the next route
+        different: the side it was not set to may render a different set of
+        later pages, so the flow is re-entered rather than the crawl ending
+        here.
+
+        Not before one walk has reached the flow's end. This is reached
+        whenever the *current* page yields no assignment, which is not the same
+        as the route being over: on Pie's workforce page the assignable fields
+        ran out while nine unnamed controls sat unassigned, and the flow was
+        re-entered for a business-info gate with two pages never walked. A
+        gate's side decides what the later pages render, so branching before
+        the end leaves them described under whichever side was set last.
 
         Pages are taken in the order they were entered, so the earliest
         undecided branch is resolved first and the routes come out in a stable
         order.
         """
         assert self.board is not None
+        if not self.reached_end:
+            return None
         for stage_id in self.stage_order:
             if stage_id == self.board.stage_id or stage_id == self._start_stage:
                 continue
@@ -765,6 +772,12 @@ class Frontier:
                 field_id,
                 reason,
             )
+            return None
+
+        # The declaration above is bookkeeping and always runs; issuing the
+        # restart waits until one walk has reached the flow's end, so the gate
+        # budget is not spent branching from the middle of the form.
+        if not self.reached_end:
             return None
 
         log.info(
@@ -926,7 +939,7 @@ class Frontier:
                     fieldId=control.fieldId,
                     value=self._seed_for(control),
                     typeahead=True,
-                    constraintHint=control.formatHint or None,
+                    constraintHint=self._hint_for(control),
                     helpText=control.helpText or None,
                 )
             if control.type == "toggle":
@@ -938,13 +951,14 @@ class Frontier:
                     locator=control.locator,
                     fieldId=control.fieldId,
                     value=value,
+                    constraintHint=self._hint_for(control),
                 )
             return Assignment(
                 intent="fill",
                 locator=control.locator,
                 fieldId=control.fieldId,
                 value=self._seed_for(control),
-                constraintHint=control.formatHint or None,
+                constraintHint=self._hint_for(control),
                 helpText=control.helpText or None,
             )
 
@@ -965,8 +979,18 @@ class Frontier:
                 [{"label": o.label, "locator": o.locator} for o in control.options]
                 if value is None else None
             ),
+            constraintHint=self._hint_for(control),
             helpText=control.helpText or None,
         )
+
+    def _hint_for(self, control: Control) -> str | None:
+        """What the page has said about this field: its stated format, and the
+        rejection it is showing now. The filler corrects against both."""
+        parts = [control.formatHint]
+        if control.error:
+            parts.append(f"the page rejected the last answer: {control.error}")
+        hint = "; ".join(p for p in parts if p)
+        return hint or None
 
     # ------------------------------------------------------------------ ledger
 
