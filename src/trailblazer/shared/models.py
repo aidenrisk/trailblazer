@@ -44,7 +44,48 @@ class TransientModelError(RuntimeError):
 def _is_transient(error: BaseException) -> bool:
     if isinstance(error, (httpx.HTTPError, TransientModelError)):
         return True
+    if _is_malformed_structured_output(error):
+        return True
     return isinstance(error, ValueError) and bool(_TRANSIENT_STATUS.search(str(error)))
+
+
+def _is_malformed_structured_output(error: BaseException) -> bool:
+    """A structured reply that arrived truncated or otherwise unparseable.
+
+    The request went through, the provider answered, and the answer was cut off
+    mid-JSON -- the same class of failure as `TransientModelError`'s empty
+    reply, and asking again usually gets a whole one. A live run died on
+    "Unterminated string starting at: line 1 column 350" while describing a
+    23-control page, having spent nine minutes and four pages of walking.
+
+    Matched by class name rather than by import: the exception lives in
+    `langchain.agents.structured_output`, which is a private-ish path that has
+    moved between versions, and a failed import here would silently stop every
+    retry this function grants.
+    """
+    return any(
+        c.__name__ in ("StructuredOutputValidationError", "StructuredOutputError")
+        for c in type(error).__mro__
+    )
+
+
+_REQUEST_TIMEOUT_MS = 90_000
+"""Per-request budget for one model call, on the transport. `ChatOpenRouter`
+takes milliseconds (its `timeout_ms`), not seconds."""
+
+_MAX_OUTPUT_TOKENS = 16_384
+"""Ceiling on one reply's length.
+
+Declared rather than left to the client, which sends the model's own maximum --
+65,536 for grok-4.5. Tokens are billed on what is generated, but OpenRouter
+checks affordability against input plus this ceiling *before* forwarding, so an
+oversized reservation refuses a request the account could pay for: a run died
+on "you requested up to 65536 tokens, but can only afford 65283".
+
+Sized from measurement. Across 352 logged calls the longest reply was 3,230
+output tokens, a perceive of a 23-control page; the sight loop peaked at 1,439
+and the value chooser at 403. Five times the worst observed case, so a page
+description is not truncated mid-structure."""
 
 
 def invoke_with_retry(call: Callable[[], T], *, step: str) -> T:
@@ -100,6 +141,12 @@ def get_model(settings: Settings | None = None) -> BaseChatModel:
             temperature=0,
             openrouter_api_key=settings.openrouter_api_key,
             openrouter_provider={"require_parameters": True},
+            # A look answers in 10-25 s. Without this the client waits its
+            # library default of ten minutes on a dropped connection before
+            # `invoke_with_retry` ever sees an error; one run froze that way.
+            request_timeout=_REQUEST_TIMEOUT_MS,
+            max_tokens=_MAX_OUTPUT_TOKENS,
+            max_retries=0,  # retries belong to `invoke_with_retry`, which logs them
         )
 
     if not settings.anthropic_api_key:
@@ -113,4 +160,5 @@ def get_model(settings: Settings | None = None) -> BaseChatModel:
         model=settings.anthropic_model,
         temperature=0,
         api_key=settings.anthropic_api_key,
+        max_tokens=_MAX_OUTPUT_TOKENS,
     )

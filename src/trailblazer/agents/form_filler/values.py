@@ -91,6 +91,19 @@ def choose_value(
         )
         chosen = _first_line(response.content)
         if not chosen:
+            # A reasoning model can put a one-token answer in its reasoning
+            # channel and leave `content` empty: measured on grok-4.5, "at most
+            # 5 characters" produced content='' with reasoning_content='25126',
+            # two output tokens both counted as reasoning. The answer is there;
+            # dropping it failed a live run on a zip code.
+            chosen = _first_line((response.additional_kwargs or {}).get("reasoning_content", ""))
+            if chosen:
+                log.warning(
+                    "field %r: the model left content empty and answered in its "
+                    "reasoning channel; using %r",
+                    label, chosen,
+                )
+        if not chosen:
             # An empty reply is the provider's failure, not the field's: asked
             # again it usually answers. Raised as transient so the retry sees it.
             raise TransientModelError(f"the model returned no value for field {label!r}")
