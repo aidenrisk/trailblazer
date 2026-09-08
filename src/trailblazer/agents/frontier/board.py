@@ -152,6 +152,11 @@ class Board:
     filler is what fixes a field, and it cannot fix what it is never told.
     """
 
+    exhausted: set[str] = field(default_factory=set)
+    """fieldIds whose correction budget is spent. Reported once, never re-armed:
+    the page keeps rendering the same rejection, and each observe would
+    otherwise reopen the field again."""
+
     error_reopens: dict[str, int] = field(default_factory=dict)
     """fieldId -> how many times an error has reopened it this walk. Capped by
     `MAX_ERROR_REOPENS`, past which the error stays and the page stops on it."""
@@ -194,9 +199,15 @@ class Board:
                         "reopening %s (%r) on its rejection: %s",
                         control.fieldId, control.label[:40], control.error[:120],
                     )
-                else:
+                elif control.fieldId not in self.exhausted:
+                    # Spent, and reported once. Every later observe sees the
+                    # same rejection, and re-arming on each cost one live run
+                    # three more refills of a field the page had already
+                    # refused nine times -- while eight controls vision had
+                    # just addressed sat unfilled beside it.
+                    self.exhausted.add(control.fieldId)
                     log.error(
-                        "%s (%r) still rejected after %d corrections: %s",
+                        "%s (%r) still rejected after %d corrections; not retried: %s",
                         control.fieldId, control.label[:40], n, control.error[:120],
                     )
         else:
@@ -292,6 +303,7 @@ class Board:
         self.advanced.clear()
         self.pinned.clear()
         self.error_reopens.clear()
+        self.exhausted.clear()
 
     def charge_restart(self) -> None:
         """Count one restart against this page's own budget."""

@@ -610,9 +610,16 @@ class Frontier:
         A gate is assigned its first side by name rather than left to the
         filler: the board has to know which side was taken to know which one is
         still owed, and a value Frontier did not choose cannot be accounted for.
+
+        A control never acted on comes before one reopened on its rejection.
+        Board order alone put a reopened field first because it sat higher on
+        the page, so a run spent its corrections re-filling a claims box the
+        page kept refusing while eight controls the vision fallback had just
+        addressed were never touched at all.
         """
         assert self.board is not None
-        for field_id in self.board.unattempted():
+        pending = self.board.unattempted()
+        for field_id in sorted(pending, key=lambda f: f in self.board.error_reopens):
             control = self.board.controls[field_id]
             gate = self.board.gates.get(field_id)
             pinned = self.board.pinned.get(field_id)
