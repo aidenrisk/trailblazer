@@ -7,6 +7,7 @@ rule applies more reliably in code than in a prompt.
 """
 
 import re
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,7 +19,13 @@ from playwright.sync_api import Page
 from trailblazer.agents.browser.tools import read_only_tools
 from trailblazer.agents.scraper.diff import diff_pages
 from trailblazer.agents.scraper.perceive import get_perceiver, payload_to_text
-from trailblazer.contracts.page_description import Action, Control, PageDescription
+from trailblazer.contracts.page_description import (
+    Action,
+    Control,
+    Overlay,
+    OverlayClickable,
+    PageDescription,
+)
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.ledger import RunLedger
@@ -148,12 +155,51 @@ def restore_measured_locators(
             str(source.get("helpText") or ""),
             bool(source.get("typeahead")),
             bool(source.get("additionalRow")),
+            str(source.get("error") or ""),
         )
 
     for control in described.controls:
         if not control.unique:
             log.warning("locator is not unique: %r (%r)", control.locator, control.label)
 
+    return described
+
+
+def restore_measured_overlays(
+    described: PageDescription, payload_overlays: list[dict]
+) -> PageDescription:
+    """Rebuild `overlays` from the measurement, keeping only the model's judgment.
+
+    The model contributes `kind` and `dismissKey`; title, text, locator and the
+    clickables are the extractor's. A `dismissKey` naming no measured clickable
+    is dropped, so Loop never presses an address the model composed. A dialog
+    the model left out is kept as `unknown`: it is still over the page.
+    """
+    judged = {o.key: o for o in described.overlays if o.key}
+    rebuilt = []
+    for source in payload_overlays:
+        clickables = [OverlayClickable(**c) for c in source.get("clickables", [])]
+        keys = {c.key for c in clickables if c.locator}
+        verdict = judged.get(source["key"])
+        kind = verdict.kind if verdict is not None else "unknown"
+        dismiss = verdict.dismissKey if verdict is not None else None
+        if dismiss is not None and dismiss not in keys:
+            log.warning(
+                "model named dismissKey=%r for dialog %r but no measured clickable has it; dropped",
+                dismiss, source.get("title"),
+            )
+            dismiss = None
+        if verdict is None:
+            log.warning("model did not judge dialog %r; kept as unknown", source.get("title"))
+        rebuilt.append(Overlay(
+            key=source["key"], title=source.get("title", ""), text=source.get("text", ""),
+            hasControls=bool(source.get("hasControls")), locator=source.get("locator", ""),
+            clickables=clickables, kind=kind, dismissKey=dismiss,
+        ))
+    extra = set(judged) - {o["key"] for o in payload_overlays}
+    if extra:
+        log.warning("model returned dialogs the extractor did not see: %s; dropped", sorted(extra))
+    described.overlays = rebuilt
     return described
 
 
@@ -200,6 +246,7 @@ def _set_measured(
     help_text: str = "",
     typeahead: bool = False,
     additional_row: bool = False,
+    error: str = "",
 ) -> None:
     """Assign the measured fields, bypassing nothing the contract checks.
 
@@ -216,6 +263,7 @@ def _set_measured(
         "helpText": help_text,
         "typeahead": typeahead,
         "additionalRow": additional_row,
+        "error": error,
     }
     Control.model_validate({**fields, **measured})
     control.locator = locator
@@ -225,6 +273,7 @@ def _set_measured(
     control.additionalRow = additional_row
     control.disabled = disabled
     control.formatHint = format_hint
+    control.error = error
 
 
 def perceive(
@@ -249,56 +298,22 @@ def perceive(
         settings.scraper_perceiver,
     )
 
-    payload = _run_perceiver(page, settings, request.prior)
+    progress = {"phase": "dom"}
+    stop = threading.Event()
+    threading.Thread(
+        target=_watch_hang, args=(stop, progress, request.job_id, page), daemon=True
+    ).start()
+    try:
+        payload = _run_perceiver(page, settings, request.prior, progress)
+        progress["phase"] = "model"
+        described = _describe(page, payload, request, settings)
+    finally:
+        stop.set()
     payload_controls = payload["controls"]
-    text = payload_to_text(payload)
-    log.debug(
-        "extractor payload job_id=%s controls=%d bytes=%d",
-        request.job_id,
-        len(payload_controls),
-        len(text),
-    )
-    if not payload_controls:
-        log.warning(
-            "extractor found no controls on %s; the page may not have rendered yet, "
-            "or its inputs may live in a cross-origin iframe",
-            payload["url"],
-        )
-
-    agent = create_agent(
-        model=get_model(settings),
-        tools=read_only_tools(page),
-        system_prompt=_SYSTEM_PROMPT,
-        response_format=PageDescription,
-    )
-
-    objective = request.objective or "Describe this form page."
-    tracker = CostTracker(step="perceive", job_id=request.job_id)
-    result = invoke_with_retry(
-        lambda: agent.invoke(
-            {"messages": [{"role": "user", "content": f"{objective}\n\nExtractor payload:\n{text}"}]},
-            config={"callbacks": [tracker]},
-        ),
-        step="perceive",
-    )
-
-    total = tracker.total_usd()
-    log.info(
-        "perceive llm total job_id=%s calls=%d usd=%s",
-        request.job_id,
-        len(tracker.calls),
-        "unknown" if total is None else f"{total:.6f}",
-    )
-
-    described = result.get("structured_response")
-    if not isinstance(described, PageDescription):
-        raise RuntimeError(
-            "the model did not return a parseable PageDescription "
-            f"(got {type(described).__name__}); the endpoint it routed to may not "
-            "support structured output -- check OPENROUTER_MODEL"
-        )
+    described, total = described
 
     restore_measured_locators(described, payload_controls)
+    restore_measured_overlays(described, payload.get("overlays", []))
     described.next = payload["next"]
     described.back = payload["back"]
     finalize(
@@ -308,6 +323,11 @@ def perceive(
         payload["title"],
         payload.get("actions"),
     )
+    # Rejection text the extractor could tie to no field is a page blocker,
+    # measured; the model's own list is kept alongside.
+    for text in payload.get("pageErrors", []):
+        if text not in described.blockers:
+            described.blockers.append(text)
 
     scraper_result = diff_pages(described, request.prior, request.assignment)
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -331,7 +351,76 @@ def perceive(
     return scraper_result
 
 
-def _run_perceiver(page: Page, settings: Settings, prior: PageDescription | None = None) -> dict:
+_HANG_WARN_S = 60
+"""Seconds a look may run before the watchdog names the phase it is in."""
+
+
+def _watch_hang(stop: threading.Event, progress: dict[str, str], job_id: str, page: Page) -> None:
+    """Log, every `_HANG_WARN_S`, which phase a still-running look is in.
+
+    A look froze for sixteen minutes on a run with a failing connection and
+    the log showed only its start line. This says where it is -- the DOM
+    extraction, the tooltip hovers, the a11y snapshot or the model call -- so
+    the freeze is diagnosable while it happens.
+    """
+    while not stop.wait(_HANG_WARN_S):
+        log.error(
+            "look still running after %ds job_id=%s phase=%s url=%s",
+            _HANG_WARN_S, job_id, progress.get("phase"), page.url,
+        )
+
+
+def _describe(
+    page: Page, payload: dict, request: PerceiveRequest, settings: Settings
+) -> tuple[PageDescription, float | None]:
+    """Ask the model for its judgment on the payload. Returns the description and its cost."""
+    text = payload_to_text(payload)
+    log.debug(
+        "extractor payload job_id=%s controls=%d bytes=%d",
+        request.job_id, len(payload["controls"]), len(text),
+    )
+    if not payload["controls"]:
+        log.warning(
+            "extractor found no controls on %s; the page may not have rendered yet, "
+            "or its inputs may live in a cross-origin iframe",
+            payload["url"],
+        )
+    agent = create_agent(
+        model=get_model(settings),
+        tools=read_only_tools(page),
+        system_prompt=_SYSTEM_PROMPT,
+        response_format=PageDescription,
+    )
+    objective = request.objective or "Describe this form page."
+    tracker = CostTracker(step="perceive", job_id=request.job_id)
+    result = invoke_with_retry(
+        lambda: agent.invoke(
+            {"messages": [{"role": "user", "content": f"{objective}\n\nExtractor payload:\n{text}"}]},
+            config={"callbacks": [tracker]},
+        ),
+        step="perceive",
+    )
+    total = tracker.total_usd()
+    log.info(
+        "perceive llm total job_id=%s calls=%d usd=%s",
+        request.job_id, len(tracker.calls), "unknown" if total is None else f"{total:.6f}",
+    )
+    described = result.get("structured_response")
+    if not isinstance(described, PageDescription):
+        raise RuntimeError(
+            "the model did not return a parseable PageDescription "
+            f"(got {type(described).__name__}); the endpoint it routed to may not "
+            "support structured output -- check OPENROUTER_MODEL"
+        )
+    return described, total
+
+
+def _run_perceiver(
+    page: Page,
+    settings: Settings,
+    prior: PageDescription | None = None,
+    progress: dict[str, str] | None = None,
+) -> dict:
     """Perceive, turning a failed in-page evaluate into a message that names the cause.
 
     `prior` supplies the help text already read for this page's controls, keyed
@@ -339,7 +428,7 @@ def _run_perceiver(page: Page, settings: Settings, prior: PageDescription | None
     """
     known_help = {c.locator: c.helpText for c in prior.controls if c.helpText} if prior else {}
     try:
-        return get_perceiver(settings.scraper_perceiver).perceive(page, known_help)
+        return get_perceiver(settings.scraper_perceiver).perceive(page, known_help, progress)
     except PlaywrightError as e:
         raise RuntimeError(
             f"reading the page failed: {e}. The tab may have been closed or navigated "

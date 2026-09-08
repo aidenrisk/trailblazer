@@ -142,6 +142,16 @@ class Control(BaseModel):
     picked. Measured -- a writable input with a listbox or combobox role -- and
     restored like `locator`. Frontier fills it rather than opening it."""
 
+    error: str = Field(default="", exclude=True)
+    """The rejection the page shows against this field right now, measured.
+
+    From the field's own error slot (`aria-errormessage`, `aria-describedby`),
+    or from error-styled text the extractor attributed to the nearest field
+    above it -- a table's "select at least one term" lands on the table's last
+    control. Frontier reopens a control carrying one and hands the text to the
+    filler as its constraint; the filler is what fixes a field.
+    """
+
     @field_validator("locator")
     @classmethod
     def _reject_snapshot_ref(cls, v: str) -> str:
@@ -178,6 +188,54 @@ class Action(BaseModel):
     unique: bool
 
 
+class OverlayClickable(BaseModel):
+    """One clickable inside a dialog, addressed relative to the dialog."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    key: str
+    label: str = ""
+    locator: str = ""
+    """Measured: `<dialog locator> >> <relative selector>`, so a "Close" inside
+    the dialog is never the page's own."""
+
+
+class Overlay(BaseModel):
+    """A dialog over the page: a notice to clear, or a question in a modal.
+
+    Found by the role the page gives it (`dialog`, `alertdialog`, `aria-modal`),
+    never by reading its text. The model decides only `kind` and `dismissKey`;
+    every other field is measured and restored from the extractor payload.
+    A dialog is not a control: it is never on a Frontier board, never a route
+    step. Loop clears a `notice` before the page is described to Frontier and
+    records how, so a restart and the replay script clear it the same way with
+    no model in the loop.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    key: str
+    title: str = ""
+    """The dialog's heading, or its first line. The fingerprint a later
+    appearance is recognised by."""
+
+    text: str = ""
+    hasControls: bool = False
+    """Fillable inputs inside: the dialog is part of the form, not a notice."""
+
+    locator: str = ""
+    clickables: list[OverlayClickable] = []
+
+    kind: Literal["notice", "question", "terminal", "unknown"] = "unknown"
+    """`notice`: informational, clear it and carry on. `question`: it asks
+    something; its controls are on the page. `terminal`: a decline or an end
+    state; nothing past it. `unknown`: the model could not tell."""
+
+    dismissKey: str | None = None
+    """`key` of the clickable that clears a `notice` and keeps the answers
+    already given. Never a negative action. `None` when no clickable does."""
+
+
 class PageDescription(BaseModel):
     """Everything the downstream pipeline needs to know about one form page."""
 
@@ -198,7 +256,10 @@ class PageDescription(BaseModel):
     """Clickable elements, for a page whose only move is to advance."""
 
     blockers: list[str]
-    """Validation text, overlays, decline chrome."""
+    """Validation text and decline chrome. Dialogs are `overlays`."""
+
+    overlays: list[Overlay] = []
+    """Dialogs over the page, measured. Cleared by Loop, not by Frontier."""
 
     @field_validator("next", "back")
     @classmethod

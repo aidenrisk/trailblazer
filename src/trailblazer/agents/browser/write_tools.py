@@ -237,15 +237,16 @@ def read_page_text(page: Page) -> str:
         raise LocatorError(f"could not read the page text: {e}") from e
 
 
-_TRANSITION_TIMEOUT_MS = 20_000
+_TRANSITION_TIMEOUT_MS = 45_000
 """How long a forward press is given to move the page.
 
 Pie's Next validates client-side first and navigates 4.6 seconds later on one
 branch and 7.5 on another, measured; network-idle is satisfied long before
 either, so idle alone read the old page and called the press a no-op. An
-8-second budget then called the 7.5-second branch stuck and ended a run. Too
-long costs seconds on a dialog dismissal that never navigates; too short ends
-a crawl that was about to advance.
+8-second budget then called the 7.5-second branch stuck and ended a run; a
+20-second budget did the same on a run where the same page and values moved in
+11.1 seconds when probed. Dialog dismissals no longer pass through here, so the
+budget is spent only on a press that was genuinely refused.
 """
 
 

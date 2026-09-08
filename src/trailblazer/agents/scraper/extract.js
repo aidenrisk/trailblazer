@@ -81,6 +81,65 @@
   };
 
   /**
+   * A control with no id, name, test-id or label -- a bare checkbox in a table
+   * cell -- is named and addressed by its surroundings: the row it sits in and
+   * the column header over it. Two layouts are read. A CSS grid holds every
+   * cell as a direct child, so the row is arithmetic on the cell index and the
+   * grid's column count; a `<tr>` wraps its cells. The address is the cell
+   * that reads exactly the row label, then the k-th input of this type in the
+   * cells after it (grid) or under the row (tr). Measured for uniqueness like
+   * any other locator. Pie's coverage-lapse table is the grid case.
+   */
+  const cellText = (cell) => (cell.querySelector(SELECTOR) ? '' : (cell.innerText || '').trim().replace(/\s+/g, ' '));
+  const layoutOf = (el) => {
+    for (let n = el.parentElement, i = 0; n && n !== document.body && i < 8; n = n.parentElement, i++) {
+      if (n.tagName === 'TR') {
+        const cells = Array.from(n.children);
+        return { cells, cols: cells.length, idx: cells.findIndex((c) => c.contains(el)), wrapped: true, headerCells: n.closest('table') && n.closest('table').rows[0] !== n ? Array.from(n.closest('table').rows[0].children) : [] };
+      }
+      const style = getComputedStyle(n);
+      if (style.display === 'grid' || style.display === 'inline-grid') {
+        const cols = style.gridTemplateColumns.split(' ').filter(Boolean).length;
+        const cells = Array.from(n.children);
+        const idx = cells.findIndex((c) => c.contains(el));
+        if (cols >= 2 && idx >= 0) {
+          const first = cells.slice(0, cols);
+          return { cells, cols, idx, wrapped: false, headerCells: first.some((c) => c.querySelector(SELECTOR)) ? [] : first };
+        }
+      }
+    }
+    return null;
+  };
+  const surroundings = (el) => {
+    const lay = layoutOf(el);
+    if (!lay) return { name: '', anchor: '', candidates: [] };
+    const { cells, cols, idx, wrapped, headerCells } = lay;
+    const rowStart = wrapped ? 0 : Math.floor(idx / cols) * cols;
+    const row = wrapped ? cells : cells.slice(rowStart, rowStart + cols);
+    const col = wrapped ? idx : idx - rowStart;
+    const anchorCell = row.find((c) => cellText(c));
+    const anchor = anchorCell ? cellText(anchorCell).slice(0, 60) : '';
+    const header = headerCells[col] ? (headerCells[col].innerText || '').trim().slice(0, 40) : '';
+    const tag = el.tagName.toLowerCase();
+    const type = el.getAttribute('type') || '';
+    const typeX = type ? `[@type="${type}"]` : '';
+    const after = wrapped ? row : row.slice(row.indexOf(anchorCell) + 1);
+    const same = after.flatMap((c) => Array.from(c.querySelectorAll(type ? `${tag}[type="${type}"]` : tag)));
+    const k = same.indexOf(el);
+    const out = [];
+    // The anchor must be a real label, not a stray character or a number that
+    // could read the same elsewhere on the page: at least two characters, some
+    // of them letters or digits, and quote-free so it can sit in the xpath.
+    if (anchor && k >= 0 && anchor.length >= 2 && /[\p{L}\p{N}]/u.test(anchor) && !anchor.includes('"')) {
+      const anchorX = `//*[normalize-space(.)="${anchor}"][not(.//*[normalize-space(.)="${anchor}"])]`;
+      out.push(wrapped
+        ? `xpath=${anchorX}/ancestor::tr[1]//${tag}${typeX} >> nth=${k}`
+        : `xpath=${anchorX}/following-sibling::*[position()<=${cols - 1}]//${tag}${typeX} >> nth=${k}`);
+    }
+    return { name: [anchor, header].filter(Boolean).join(' '), anchor, candidates: out };
+  };
+
+  /**
    * The nearest ancestor holding every member of the group and nothing of any
    * other group. It is what the group's own locator addresses; without it the
    * only candidate is the shared `name`, which matches every member.
@@ -157,6 +216,7 @@
       if (entry.radioGroup) {
         const { lead, members } = groups.get(entry.radioGroup);
         const name = entry.radioGroup;
+        lead.setAttribute('data-tb-key', `el_${i}`);
         // The group's question is the text above the choices, not any choice's
         // own label, so the fieldset legend and aria-labelledby come first.
         const fieldset = lead.closest('fieldset');
@@ -209,6 +269,10 @@
 
       const el = entry.el;
       const tag = el.tagName.toLowerCase();
+      // The key, stamped on the node. The sight pass finds a control by key to
+      // badge it, and only the element itself can carry that join: `key` is an
+      // index into this payload and nothing in the DOM records it otherwise.
+      el.setAttribute('data-tb-key', `el_${i}`);
       // The help icon, if the field has one. Tagged so Python can hover it by
       // selector: it is a bare 16px svg with no name, id or test-id -- Pie's
       // are -- so nothing else can address it. The tooltip mounts only while
@@ -220,7 +284,9 @@
       const role = el.getAttribute('role') || '';
       const forLabel = labelText(el);
       const byLabelled = labelledByText(el);
-      const accName = ariaLabel || byLabelled || forLabel || el.getAttribute('placeholder') || '';
+      const direct = ariaLabel || byLabelled || forLabel || el.getAttribute('placeholder') || '';
+      const nearby = direct || el.id || name || testid ? { name: '', anchor: '', candidates: [] } : surroundings(el);
+      const accName = direct || nearby.name;
 
       // Only native <select> exposes its choices without interaction. A custom
       // widget mounts its listbox into a portal on open, so there is nothing to
@@ -294,12 +360,112 @@
           (el.hasAttribute('readonly') && !isChooser(el)),
         visible: isVisible(el),
         options,
-        candidates: candidates(el, name, testid, role, accName),
+        candidates: candidates(el, name, testid, role, direct).concat(nearby.candidates),
+        // Set when the only address is the row's text: the reader must know a
+        // locator rests on words that may belong to something else.
+        addressedByText: nearby.candidates.length ? nearby.anchor : '',
+        error: '',
       };
     });
 
   markAdditionalRows(controls);
-  return { controls, actions };
+
+  /**
+   * What the page is rejecting right now, tied to the field it is about.
+   * Three sources, in order of certainty: the slot a control names in its own
+   * aria-errormessage / aria-describedby; an error-styled or alert node inside
+   * the control's own label or field wrapper; and, for a message that belongs to
+   * no field -- a table's "select at least one term" -- the last control above
+   * it inside the nearest ancestor that holds controls. What still matches
+   * nothing is reported as a page error. Attribution is what lets Frontier
+   * reopen the right field and hand the filler the text.
+   */
+  const controlEls = all.filter((el) => isVisible(el));
+  const errorNodes = Array.from(document.querySelectorAll(
+    '[role="alert"], [aria-live="assertive"], [aria-live="polite"], [class*="error" i], [class*="invalid" i], [id$="-error"], [id*="error" i]',
+  )).filter((n) => isVisible(n) && !n.matches(SELECTOR) && !n.querySelector(SELECTOR));
+  const messageOf = (n) => (n.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  const byEl = new Map(); // control element -> message
+  const pageErrors = [];
+  const controlOfEntry = (entry) => (entry.radioGroup ? groups.get(entry.radioGroup).lead : entry.el);
+  const referencing = (id) => controlEls.find((c) => {
+    const refs = `${c.getAttribute('aria-errormessage') || ''} ${c.getAttribute('aria-describedby') || ''}`;
+    return id && refs.split(/\s+/).includes(id);
+  });
+  for (const node of errorNodes) {
+    const text = messageOf(node);
+    if (!text) continue;
+    let owner = referencing(node.id);
+    if (!owner) {
+      const wrapper = node.closest('label, [class*="field" i], [class*="form-group" i], [class*="input" i]');
+      const inside = wrapper ? Array.from(wrapper.querySelectorAll(SELECTOR)).filter(isVisible) : [];
+      if (inside.length === 1) owner = inside[0];
+    }
+    if (!owner) {
+      let scope = node.parentElement;
+      for (let i = 0; i < 6 && scope && scope !== document.body; i++, scope = scope.parentElement) {
+        const inScope = controlEls.filter((c) => scope.contains(c) && !c.contains(node));
+        if (inScope.length) {
+          const before = inScope.filter((c) => c.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+          owner = (before.length ? before : inScope)[before.length ? before.length - 1 : 0];
+          break;
+        }
+      }
+    }
+    if (owner) {
+      const prev = byEl.get(owner);
+      byEl.set(owner, prev && prev !== text ? `${prev}; ${text}` : text);
+    } else {
+      pageErrors.push(text);
+    }
+  }
+  entries.forEach((entry, i) => {
+    const el = controlOfEntry(entry);
+    const hit = byEl.get(el) || (entry.radioGroup
+      ? groups.get(entry.radioGroup).members.map((m) => byEl.get(m)).find(Boolean)
+      : undefined);
+    if (hit) controls[i].error = hit;
+  });
+
+  /**
+   * Dialogs over the page, by the role the page gives them -- the same three
+   * attributes `wait_for_content` keys on. Each carries its clickables with
+   * addresses *relative* to the dialog: Python prefixes the dialog's own
+   * locator, so a "Close" inside it is never the page's own. A nameless icon
+   * button still gets a positional address inside the dialog. `title` is the
+   * fingerprint a later appearance is recognised by: heading, else first line.
+   */
+  const DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+  const overlays = Array.from(document.querySelectorAll(DIALOG_SELECTOR))
+    .filter(isVisible)
+    .map((d, i) => {
+      const heading = d.querySelector('h1, h2, h3, h4, h5, [role="heading"]');
+      const lines = (d.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const title = ((heading && heading.innerText.trim()) || lines[0] || '').slice(0, 80);
+      const dialogCands = [];
+      if (d.id && !/[«»]/.test(d.id)) dialogCands.push(`#${esc(d.id)}`);
+      if (title) dialogCands.push(`[role="dialog"]:has-text(${JSON.stringify(title)})`);
+      dialogCands.push('[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]');
+      const hasControls = Array.from(d.querySelectorAll('input, select, textarea')).some(
+        (e) => e.type !== 'hidden' && isVisible(e),
+      );
+      const clickables = Array.from(d.querySelectorAll('button, [role="button"], a[href]'))
+        .filter((el) => isVisible(el) && !el.disabled)
+        .map((el, j) => {
+          const label = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '')
+            .trim().replace(/\s+/g, ' ').slice(0, 60);
+          const cands = [];
+          if (el.id && !/[«»]/.test(el.id)) cands.push(`#${esc(el.id)}`);
+          const testid = el.getAttribute('data-testid') || '';
+          if (testid) cands.push(`[data-testid="${testid}"]`);
+          if (label) cands.push(`role=button[name=${JSON.stringify(label)}]`);
+          cands.push(`button, [role="button"], a[href] >> nth=${j}`);
+          return { key: `ov_${i}_${j}`, label, candidates: cands };
+        });
+      return { key: `ov_${i}`, title, text: lines.join(' ').slice(0, 300), hasControls, candidates: dialogCands, clickables };
+    });
+
+  return { controls, actions, overlays, pageErrors };
 }
 
 // A repeated-row table -- class code, full-time, part-time, payroll, times

@@ -30,6 +30,7 @@ import time
 import uuid
 from pathlib import Path
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 
 from trailblazer.agents.browser import shared_session
@@ -43,6 +44,7 @@ from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.generation import GenerationRequest
 from trailblazer.contracts.page_description import PageDescription
+from trailblazer.loop.overlays import OverlayTable, dismiss
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.contracts.validation import ValidationRequest
 from trailblazer.observability.ledger import RunLedger
@@ -416,6 +418,9 @@ def _walk_page(
     """
     entry_url = result.page.url
     prefix: list[tuple[str, Assignment]] = []
+    overlays = OverlayTable()
+    """How each dialog met on this crawl was cleared. Written to the metadata so
+    a restart and the replay script clear it from the record, with no model."""
     """(stageId, assignment) for every action on this route, in order.
 
     A restart re-executes these from the flow's entry URL to put it back before
@@ -443,9 +448,26 @@ def _walk_page(
     """
 
     report: FillReport | None = None
+    report_stage: str | None = None
+    """The stage the report's action ran on. An advance lands the crawl on the
+    next page, so without this its report folds into that page's board and
+    marks its Next pressed -- every Pie page's forward button is "Next" at the
+    same address, so page two arrived already advanced and was declared done
+    with nine fields never assigned."""
+
     for _ in range(MAX_ASSIGNMENTS):
         pages[result.page.stageId] = result.page
-        frontier.observe(result.page, report, result.addedControls)
+
+        # A dialog over the page is cleared before Frontier is shown it. A
+        # notice is not a control and not a route step, and leaving it up hides
+        # the page's own buttons: Pie's "Locations in Multiple States" modal hid
+        # Next, Frontier found no forward control, and a completed page was
+        # thrown away for a full route restart.
+        result = _clear_overlays(
+            tab, result, overlays, job_id, objective, settings, ledger, generator
+        )
+
+        frontier.observe(result.page, report, result.addedControls, report_stage)
 
         decision = frontier.next_assignment()
         if decision is None:
@@ -473,6 +495,7 @@ def _walk_page(
                 # The last fill's report has already been folded in; folding it
                 # again would mark the reopened field attempted before it is refilled.
                 report = None
+                report_stage = None
                 continue
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
@@ -485,6 +508,7 @@ def _walk_page(
 
         _generate(generator, job_id, result.page, report, frontier.walk, ledger)
         before_stage = result.page.stageId
+        report_stage = before_stage
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
 
         if (
@@ -500,6 +524,7 @@ def _walk_page(
             if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
                 log.warning("forward press changed nothing; problems=%s", problems)
                 report = None
+                report_stage = None
                 continue
             frontier.mark_stuck(
                 f"{assignment.locator!r} pressed on {before_stage} and the page did not "
@@ -727,7 +752,7 @@ def _restart_walk(
             f"{(report.blocked or {}).get('whatYouTried', 'blocked')[:120]}",
             restart.stageId,
         )
-        frontier.observe(result.page, report, result.addedControls)
+        frontier.observe(result.page, report, result.addedControls, restart.stageId)
         return result, replayed, None
     replayed.append((result.page.stageId, owed))
 
@@ -786,6 +811,66 @@ def _prefix_before(
         len(prefix),
     )
     return prefix[:cut]
+
+
+def _clear_overlays(
+    tab,
+    result: ScraperResult,
+    overlays: OverlayTable,
+    job_id: str,
+    objective: str,
+    settings: Settings,
+    ledger: RunLedger | None,
+    generator: Generator | None,
+) -> ScraperResult:
+    """Press the dismisser the scraper named for each notice, then re-describe.
+
+    Only a dialog holding no fillable control is touched: one with fields is
+    part of the form and Frontier answers it. How it was cleared is recorded so
+    a restart and the replay script clear it from the record, with no model.
+
+    A dialog the model could not classify, or gave no dismisser for, is left
+    alone and logged. It reaches Frontier as it stands, which is the honest
+    outcome -- guessing at which button keeps the applicant's answers is how a
+    "Cancel" gets pressed on a completed page.
+    """
+    notices = [o for o in result.page.overlays if not o.hasControls]
+    if not notices:
+        return result
+
+    cleared = 0
+    for overlay in notices:
+        if overlay.kind != "notice" or not overlay.dismissKey:
+            log.error(
+                "dialog %r not cleared: kind=%s dismissKey=%r clickables=%s",
+                overlay.title, overlay.kind, overlay.dismissKey,
+                [c.label for c in overlay.clickables],
+            )
+            continue
+        started = time.monotonic()
+        try:
+            locator = dismiss(tab, overlay)
+        except (RuntimeError, PlaywrightError) as e:
+            log.error("could not clear dialog %r: %s", overlay.title, e)
+            continue
+        overlays.add(overlay.title, locator)
+        if generator is not None:
+            generator.record_overlay(overlay.title, locator, result.page.stageId)
+        if ledger is not None:
+            ledger.record(agent="loop", action="dismiss", detail=overlay.title,
+                          ms=int((time.monotonic() - started) * 1000))
+        cleared += 1
+
+    if not cleared:
+        return result
+    # The page is a different page with the dialog gone: Next is addressable
+    # again, and the controls it covered are visible.
+    return perceive(
+        tab,
+        PerceiveRequest(job_id=job_id, page_index=1, objective=objective, prior=result.page),
+        settings,
+        ledger,
+    )
 
 
 def _record_route_end(

@@ -61,9 +61,24 @@ You never change it.
   truly-optional field wrongly called required costs one filled-in value. Wrong in the cheap
   direction.
 
-- **`blockers`** — visible validation messages, error text, modal overlays, and decline or
-  ineligibility notices. Inference, not extraction: report what would stop a person from
-  completing this page. Empty list when there is nothing.
+- **`blockers`** — visible validation messages, error text, and decline or ineligibility
+  notices written on the page itself. Inference, not extraction: report what would stop a
+  person from completing this page. Dialogs go in `overlays`, not here. Empty list when there
+  is nothing.
+
+- **`overlays`** — one entry per payload `overlays` entry, `key` copied verbatim. You decide
+  two things and nothing else; every other field is restored from the payload after you return.
+  - **`kind`**: `notice` — informational, the applicant reads it and carries on (a bureau
+    lookup found nothing, a state-coverage note, a cookie banner); `question` — it asks for
+    an answer, and its inputs are in `controls`; `terminal` — a decline, an ineligibility
+    verdict, a "we cannot quote"; `unknown` — you cannot tell.
+  - **`dismissKey`**: for a `notice`, the `key` of the clickable inside it that closes the
+    dialog **and keeps what the applicant already entered** — "I Understand", "OK", "Close",
+    "Got it", an icon-only x. Never "Cancel", "Back", "Undo" or anything that reverts an
+    answer. `null` for every other kind, and for a notice with no such clickable. Choose only
+    among the payload's `clickables` keys.
+  A dialog is not a control and its buttons are not `actions`; do not list them there.
+  Do not put a `notice` in `blockers` — `blockers` is for validation text on the page itself.
 
 - **`next` / `back`** — copy the locators from the payload. Use `null` when the payload gives
   `null`. Do not invent a button that is not there.

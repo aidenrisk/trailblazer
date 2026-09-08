@@ -30,6 +30,7 @@ from trailblazer.agents.generator.artifacts import (
     MetadataDoc,
     MetadataField,
     MetadataOption,
+    OverlayRecord,
     Question,
     QuestionsDoc,
     Stage,
@@ -646,6 +647,20 @@ class Generator:
         else:
             log.warning("login recorded with no authenticated selector; the script cannot "
                         "tell a completed sign-in from a rejected one")
+        self._flush()
+
+    def record_overlay(self, title: str, dismiss: str, stage_id: str) -> None:
+        """Write one dialog and its dismisser into the metadata, once per title.
+
+        Not a stage step: a dialog is data-dependent (the multi-state notice
+        shows only when states=Yes) and a hard `click Close` in the script
+        failed every run where it did not appear. The script reads this table
+        and clears whatever is showing before each action.
+        """
+        if any(o.title == title for o in self.metadata_doc.overlays):
+            return
+        self.metadata_doc.overlays.append(OverlayRecord(title=title, dismiss=dismiss, seenOn=stage_id))
+        log.info("overlay recorded title=%r dismiss=%s seen_on=%s", title, dismiss, stage_id)
         self._flush()
 
     def record_route_end(self, walk: int, stage_id: str, settled: bool) -> None:

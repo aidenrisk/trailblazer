@@ -178,6 +178,20 @@ class Blocked(BaseModel):
     whatYouTried: str
 
 
+class OverlayRecord(BaseModel):
+    """One dialog the crawl met and how it cleared it. The script's only knowledge of dialogs."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    title: str
+    """Heading or first line: the fingerprint a showing dialog is matched by."""
+
+    dismiss: str
+    """Measured locator of the clickable that closed it and kept the answers."""
+
+    seenOn: str = ""
+
+
 class MetadataDoc(BaseModel):
     """The metadata artifact. `carrier_questions_metadata.doc`."""
 
@@ -201,6 +215,7 @@ class MetadataDoc(BaseModel):
     eligibilityRules: list[EligibilityRule] = []
     branchExploration: BranchExploration = Field(default_factory=BranchExploration)
     blocked: list[Blocked] = []
+    overlays: list[OverlayRecord] = []
 
 
 class QuestionsDoc(BaseModel):

@@ -113,11 +113,17 @@ def _aria_snapshot(page: Page) -> str:
 class Perceiver(Protocol):
     """One look at a page, rendered as the payload handed to the model."""
 
-    def perceive(self, page: Page, known_help: dict[str, str] | None = None) -> dict[str, Any]:
+    def perceive(
+        self,
+        page: Page,
+        known_help: dict[str, str] | None = None,
+        progress: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Return `{url, title, controls, a11y, next, back}`.
 
         `known_help` maps a locator to help text already read on an earlier
-        look at this page, so the icon need not be hovered again.
+        look at this page, so the icon need not be hovered again. `progress`
+        is kept at the phase under way, for the caller's hang watchdog.
         """
         ...
 
@@ -140,6 +146,37 @@ def _measure_options(page: Page, options: list[dict] | None) -> list[dict] | Non
         else:
             measured.append({"label": opt.get("label", ""), "locator": opt.get("locator")})
     return measured
+
+
+def _measure_overlays(page: Page, overlays: list[dict]) -> list[dict]:
+    """Verify each dialog's locator, then each clickable's, scoped inside it.
+
+    A clickable's candidates come relative to the dialog; the dialog's measured
+    locator is prefixed so the count is taken inside the dialog only. The last
+    candidate is positional, so an icon-only button with no name is still
+    addressable -- a bare `<svg>` in a `<button>` is how most dialogs draw
+    their x.
+    """
+    out = []
+    for o in overlays:
+        locator, unique = _first_unique(page, o.get("candidates", []))
+        if not locator:
+            log.warning("dialog %r has no measurable locator", o.get("title"))
+        clickables = []
+        for c in o.get("clickables", []):
+            scoped = [f"{locator} >> {cand}" for cand in c.get("candidates", [])] if locator else []
+            c_loc, _ = _first_unique(page, scoped)
+            clickables.append({"key": c["key"], "label": c.get("label", ""), "locator": c_loc})
+        out.append({
+            "key": o["key"], "title": o.get("title", ""), "text": o.get("text", ""),
+            "hasControls": bool(o.get("hasControls")), "locator": locator, "unique": unique,
+            "clickables": clickables,
+        })
+        log.info(
+            "dialog seen title=%r controls_inside=%s clickables=%s",
+            o.get("title"), bool(o.get("hasControls")), [c["label"] for c in clickables],
+        )
+    return out
 
 
 def _measure_actions(page: Page, actions: list[dict]) -> list[dict]:
@@ -272,14 +309,24 @@ def _untag_help_triggers(page: Page) -> None:
 class DomSnapshotPerceiver:
     """DOM extraction for addressability, accessibility snapshot for semantics."""
 
-    def perceive(self, page: Page, known_help: dict[str, str] | None = None) -> dict[str, Any]:
+    def perceive(
+        self,
+        page: Page,
+        known_help: dict[str, str] | None = None,
+        progress: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Extract controls, verify each locator, and attach the a11y tree.
+
+        `progress`, when given, is kept at the phase under way so a look that
+        never returns can be reported with the step it froze in.
 
         A tooltip already read for a locator on an earlier look is reused
         rather than hovered again: help text does not change between fills, and
         on a live run three icons were re-hovered on every one of 17 looks.
         """
         known_help = known_help or {}
+        progress = progress if progress is not None else {}
+        progress["phase"] = "extract"
         payload: dict[str, Any] = page.evaluate(_EXTRACT_JS)
         raw = payload["controls"]
         log.debug(
@@ -287,9 +334,16 @@ class DomSnapshotPerceiver:
         )
 
         controls = []
+        progress["phase"] = "measure locators and tooltips"
         for item in raw:
             locator, unique = _first_unique(page, item.get("candidates", []))
-            cleaned = {k: v for k, v in item.items() if k not in ("candidates", "helpTrigger")}
+            if item.get("addressedByText") and locator.startswith("xpath="):
+                log.warning(
+                    "control %s addressed by nearby text %r, not by its own identity; "
+                    "unique=%s -- verify the text is this control's row",
+                    item["key"], item["addressedByText"], unique,
+                )
+            cleaned = {k: v for k, v in item.items() if k not in ("candidates", "helpTrigger", "addressedByText")}
             cleaned["options"] = _measure_options(page, item.get("options"))
             if known_help.get(locator):
                 cleaned["helpText"] = known_help[locator]
@@ -302,11 +356,14 @@ class DomSnapshotPerceiver:
 
         _check_integrity(page, controls)
 
+        progress["phase"] = "actions, dialogs and a11y snapshot"
         return {
             "url": page.url,
             "title": page.title(),
             "controls": controls,
             "actions": _measure_actions(page, payload["actions"]),
+            "overlays": _measure_overlays(page, payload.get("overlays", [])),
+            "pageErrors": payload.get("pageErrors", []),
             "a11y": _aria_snapshot(page),
             "next": _find_button(page, _NEXT_PATTERNS),
             "back": _find_button(page, _BACK_PATTERNS),
@@ -321,7 +378,12 @@ class A11yOnlyPerceiver:
     why this is not the default.
     """
 
-    def perceive(self, page: Page, known_help: dict[str, str] | None = None) -> dict[str, Any]:
+    def perceive(
+        self,
+        page: Page,
+        known_help: dict[str, str] | None = None,
+        progress: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Return the flattened a11y tree with an empty controls list."""
         log.warning(
             "a11y perceiver in use: no locator is measured, so the model must propose "
@@ -332,6 +394,7 @@ class A11yOnlyPerceiver:
             "title": page.title(),
             "controls": [],
             "actions": [],
+            "overlays": [],
             "a11y": _aria_snapshot(page),
             "next": _find_button(page, _NEXT_PATTERNS),
             "back": _find_button(page, _BACK_PATTERNS),

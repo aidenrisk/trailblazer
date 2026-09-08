@@ -65,10 +65,13 @@ function assertClickable(name) {{
 }}
 
 async function clickSafely(page, selector) {{
+  await clearOverlays(page);
   const el = page.locator(selector).first();
   assertClickable(await el.getAttribute('aria-label') || await el.innerText().catch(() => ''));
   await el.click();
 }}
+
+{overlay_helpers}
 
 // A required answer the client did not give fails the stage. A `||` fallback
 // here would invent a value and quote on a fact nobody supplied.
@@ -283,6 +286,60 @@ async function assertAccepted(page, selector, questionId, canonical) {
 """The shaping and acceptance helpers as plain JavaScript, for tests to execute."""
 
 
+OVERLAY_HELPERS_JS = r"""// A dialog over the form is not a question. The crawl recorded every one it
+// met -- its heading and the button that cleared it -- in metadata.overlays.
+// Before any action the page is checked: a recorded dialog is cleared with its
+// recorded button; one the crawl never saw fails the run naming it, because
+// without an agent there is no way to know which button keeps the applicant's
+// answers. A dialog holding fields is part of the form and is left alone.
+const DIALOGS_JS = `() => {
+  const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  return [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
+    .filter(vis)
+    .map((d) => {
+      const h = d.querySelector('h1, h2, h3, h4, h5, [role="heading"]');
+      const lines = (d.innerText || '').split('\\n').map((s) => s.trim()).filter(Boolean);
+      return {
+        title: ((h && h.innerText.trim()) || lines[0] || '').slice(0, 80),
+        text: lines.join(' ').slice(0, 300),
+        hasControls: [...d.querySelectorAll('input, select, textarea')].some((e) => e.type !== 'hidden' && vis(e)),
+      };
+    });
+}`;
+
+async function clearOverlays(page) {
+  for (let round = 0; round < 3; round++) {
+    const dialogs = (await page.evaluate(DIALOGS_JS).catch(() => [])).filter((d) => !d.hasControls);
+    if (dialogs.length === 0) return;
+    const d = dialogs[0];
+    const known = (metadata.overlays || []).find((o) => o.title && (d.title === o.title || d.text.includes(o.title)));
+    if (!known) throw new Error(`dialog the crawl never met: "${d.title}" -- ${d.text.slice(0, 160)}`);
+    const btn = page.locator(known.dismiss).first();
+    assertClickable((await btn.getAttribute('aria-label')) || (await btn.innerText().catch(() => '')));
+    await btn.click();
+    await page.waitForTimeout(500);
+  }
+  throw new Error('a dialog stayed open after three recorded dismissals');
+}
+
+// A page just reached may still be assembling itself (a lookup, a spinner);
+// a dialog or the first field is what says it is ready to be acted on.
+async function waitForContent(page, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ready = await page.evaluate(() => {
+      const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      return [...document.querySelectorAll('input, select, textarea')].some((e) => e.type !== 'hidden' && vis(e))
+        || [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')].some(vis);
+    }).catch(() => false);
+    if (ready) return;
+    await page.waitForTimeout(250);
+  }
+}
+"""
+"""Dialog clearing for the script: recorded dismissals only, fail loud on a new one."""
+
+
 def slug(carrier: str, business_type: str, insurance_type: str) -> str:
     """The flow's identity triple, as the `onboarding-<slug>` filename infix."""
     parts = [carrier, business_type, insurance_type]
@@ -300,6 +357,7 @@ def header(carrier: str, business_type: str, insurance_type: str, script_name: s
         script_name=script_name,
         slug=slug(carrier, business_type, insurance_type),
         denylist=json.dumps(_DENYLIST),
+        overlay_helpers=OVERLAY_HELPERS_JS,
     )
 
 
@@ -308,6 +366,8 @@ def stage_block(stage_name: str, url: str) -> str:
     lines = [f"    // --- stage: {stage_name} ---", f"    console.log('stage {stage_name}');"]
     if url:
         lines.append(f"    await page.goto({json.dumps(url)}, {{ waitUntil: 'domcontentloaded' }});")
+        lines.append("    await waitForContent(page);")
+    lines.append("    await clearOverlays(page);")
     return "\n".join(lines) + "\n"
 
 
@@ -372,15 +432,16 @@ def fill_block(
         lines.append(f"    // {question_id}: {' '.join(hint.split())[:160]}")
     lines.append(f"    const {var} = {accessor};")
 
+    # A dialog raised by the previous answer is cleared before this one is typed.
     if intent == "select":
-        action = [f"await page.selectOption({sel}, String({var}));"]
+        action = ["await clearOverlays(page);", f"await page.selectOption({sel}, String({var}));"]
     elif intent == "check":
-        action = [f"await page.setChecked({sel}, Boolean({var}));"]
+        action = ["await clearOverlays(page);", f"await page.setChecked({sel}, Boolean({var}));"]
     elif intent == "advance":
         action = [f"await clickSafely(page, {sel});"]
     else:
         typed = var
-        action = []
+        action = ["await clearOverlays(page);"]
         if fmt and _MASK.match(fmt):
             typed = f"{var}_shaped"
             action.append(f"const {typed} = shapeAnswer({var}, {json.dumps(fmt)}, {args});")
