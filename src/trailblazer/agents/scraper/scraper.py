@@ -314,10 +314,6 @@ def perceive(
     described, total = described
 
     restore_measured_locators(described, payload_controls)
-    # An address the vision fallback proved for this page, put back before the
-    # diff runs: the extractor cannot measure these controls, so a fresh
-    # description carries them empty and would undo work already done.
-    vision_restore(page, described)
     restore_measured_overlays(described, payload.get("overlays", []))
     described.next = payload["next"]
     described.back = payload["back"]
@@ -328,6 +324,11 @@ def perceive(
         payload["title"],
         payload.get("actions"),
     )
+    # After `finalize`, which is what assigns `stageId`: the addresses are held
+    # per stage, and restoring before it looked them up under the empty string
+    # the model returns, so every proven address was silently lost on the next
+    # look. Before the diff, so a restored control is not reported as changed.
+    vision_restore(page, described)
     # Rejection text the extractor could tie to no field is a page blocker,
     # measured; the model's own list is kept alongside.
     for text in payload.get("pageErrors", []):
