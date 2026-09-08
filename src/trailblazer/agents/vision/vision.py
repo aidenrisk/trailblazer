@@ -47,6 +47,17 @@ _UNBADGE_JS = """
 }
 """
 
+_ADDRESSED: dict[str, dict[str, str]] = {}
+"""stageId -> key -> the locator vision proved for it.
+
+Kept for the run. The extractor re-measures every control on every look and
+these have nothing to measure, so without this the next look overwrites a
+proven address with the empty string it found -- on a live run vision addressed
+eight controls, one was filled, and the following perceive discarded all eight.
+Keyed on `Control.key`, the extractor's per-element id, which is stable for as
+long as the page's markup is.
+"""
+
 _MAX_BADGES = 25
 """Elements one screenshot may carry. Past this the picture is unreadable and
 the numbers overlap; the caller's page has a different problem than addressing."""
@@ -103,7 +114,12 @@ def read_page(
     return reading
 
 
-def resolve(page: Page, controls: list[Control], reading: VisionReading) -> dict[str, str]:
+def resolve(
+    page: Page,
+    controls: list[Control],
+    reading: VisionReading,
+    stage_id: str = "",
+) -> dict[str, str]:
     """Turn each anchor's words into a locator, and keep only the ones that hit.
 
     Returns `key -> locator` for the elements whose address was proven. A
@@ -145,7 +161,46 @@ def resolve(page: Page, controls: list[Control], reading: VisionReading) -> dict
             )
     finally:
         _unbadge(page)
+    if resolved and stage_id:
+        _ADDRESSED.setdefault(stage_id, {}).update(resolved)
     return resolved
+
+
+def restore(page: Page, page_description) -> int:
+    """Put back the addresses vision proved for this page. Returns how many.
+
+    Called after every look. The extractor cannot measure these controls -- that
+    is why vision ran -- so each fresh description carries them empty again and
+    would undo the work. An address is only restored while it still resolves to
+    exactly one node: a page that re-rendered differently gets no stale locator,
+    it gets another look.
+    """
+    known = _ADDRESSED.get(page_description.stageId)
+    if not known:
+        return 0
+    restored = 0
+    for control in page_description.controls:
+        locator = known.get(control.key)
+        if not locator or control.locator:
+            continue
+        try:
+            if page.locator(locator).count() != 1:
+                log.warning(
+                    "vision address for %s no longer resolves to one node; dropped: %s",
+                    control.fieldId, locator,
+                )
+                continue
+        except PlaywrightError as e:
+            log.warning("vision address for %s rejected: %s", control.fieldId, e)
+            continue
+        control.locator = locator
+        control.unique = True
+        restored += 1
+    if restored:
+        log.info(
+            "restored %d vision address(es) on %s", restored, page_description.stageId
+        )
+    return restored
 
 
 def _restamp(page: Page, controls: list[Control], reading: VisionReading) -> dict[int, str]:

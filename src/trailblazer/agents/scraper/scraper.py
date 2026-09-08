@@ -19,6 +19,7 @@ from playwright.sync_api import Page
 from trailblazer.agents.browser.tools import read_only_tools
 from trailblazer.agents.scraper.diff import diff_pages
 from trailblazer.agents.scraper.perceive import get_perceiver, payload_to_text
+from trailblazer.agents.vision.vision import restore as vision_restore
 from trailblazer.contracts.page_description import (
     Action,
     Control,
@@ -313,6 +314,10 @@ def perceive(
     described, total = described
 
     restore_measured_locators(described, payload_controls)
+    # An address the vision fallback proved for this page, put back before the
+    # diff runs: the extractor cannot measure these controls, so a fresh
+    # description carries them empty and would undo work already done.
+    vision_restore(page, described)
     restore_measured_overlays(described, payload.get("overlays", []))
     described.next = payload["next"]
     described.back = payload["back"]

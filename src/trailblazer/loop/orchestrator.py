@@ -954,7 +954,7 @@ def _see(
         settings,
         job_id,
     )
-    addresses = resolve(tab, unaddressed, reading)
+    addresses = resolve(tab, unaddressed, reading, stage)
     if not addresses:
         return False
 
