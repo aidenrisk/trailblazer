@@ -519,22 +519,31 @@ def _walk_page(
             assignment.intent == "advance"
             and result.page.stageId == before_stage
             and assignment.locator == result.page.next
-            and result.polarity == "-ve"
         ):
-            # Forward was pressed and nothing happened. That is a rejection to
+            # Forward was pressed and the page stayed. That is a rejection to
             # diagnose, not a page to declare done: on a live run the crawl
             # pressed Next six times into a wall and reported the flow finished.
+            #
+            # Not gated on an unchanged page. A refusal usually *does* change
+            # something -- the error text it renders -- so a `-ve` polarity
+            # requirement skipped the diagnosis on exactly the pages that
+            # needed it, and page three ended its route with eight controls
+            # never addressed and Next never re-pressed.
+
+            # A control the page renders but code cannot address is the first
+            # thing to settle: it can never be filled, so no amount of
+            # re-filling what *is* addressable will satisfy the page. On page
+            # three the reopen path spent both its corrections on one claims
+            # field while eight lapse controls sat unaddressed beside it.
+            if any(not c.locator or not c.unique for c in result.page.controls):
+                if _see(tab, result, seen, job_id, settings):
+                    report = None
+                    report_stage = None
+                    continue
+
             problems = page_problems(tab)
             if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
                 log.warning("forward press changed nothing; problems=%s", problems)
-                report = None
-                report_stage = None
-                continue
-            # The page refused and named no field. Everything code can read has
-            # been read, so the last resort is to look at it: the message is on
-            # screen and so are the controls it means, and neither the markup
-            # nor the error slots connect the two.
-            if _see(tab, result, seen, job_id, settings):
                 report = None
                 report_stage = None
                 continue
