@@ -77,6 +77,43 @@
     /^[:«][^:»]*[:»]$/.test(id) ||
     /^(mui|radix|headlessui|react-aria)[-_:]/i.test(id);
 
+  /**
+   * The question printed beside a control, when the page never linked the two.
+   * Pie's eligibility inputs carry a generated id and nothing else: no `for=`,
+   * no `aria-label`, no wrapping label, so `internal:label` has nothing to
+   * match and the control came back with no address at all. The words are on
+   * the screen and are unique, which is enough to build one.
+   *
+   * The address is checked here, in the page, against the element it was built
+   * from: an xpath can resolve to exactly one node and still be the wrong node,
+   * which is how an earlier structural guess produced confident wrong answers.
+   * Only an address that finds this very element is offered.
+   */
+  const nearbyText = (el) => {
+    let node = el.previousElementSibling;
+    for (let i = 0; i < 3 && node; i++, node = node.previousElementSibling) {
+      if (node.querySelector(SELECTOR)) break;
+      const t = (node.innerText || '').trim().replace(/\s+/g, ' ');
+      if (t.length >= 8 && t.length <= 160 && !t.includes('"')) return t;
+    }
+    // A wrapper holding this control and its caption, and nothing else.
+    const box = el.parentElement;
+    if (box && box.querySelectorAll(SELECTOR).length === 1) {
+      const t = (box.innerText || '').trim().replace(/\s+/g, ' ');
+      if (t.length >= 8 && t.length <= 160 && !t.includes('"')) return t;
+    }
+    return '';
+  };
+
+  const findsThisElement = (xpath, el) => {
+    try {
+      const r = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      return r.snapshotLength === 1 && r.snapshotItem(0) === el;
+    } catch (e) {
+      return false;
+    }
+  };
+
   const candidates = (el, name, testid, role, accName) => {
     const out = [];
     const tag = el.tagName.toLowerCase();
@@ -87,6 +124,19 @@
       // Playwright-only engines; they resolve in Python, never here.
       out.push(`internal:label=${JSON.stringify(accName)}i`);
       if (role) out.push(`internal:role=${role}[name=${JSON.stringify(accName)}i]`);
+    }
+    if (!out.length) {
+      const text = nearbyText(el);
+      if (text) {
+        const type = el.getAttribute('type');
+        const kind = type ? `[@type="${type}"]` : '';
+        for (const xp of [
+          `//*[normalize-space(.)="${text}"][not(*)]/following::${tag}${kind}[1]`,
+          `//*[normalize-space(.)="${text}"][not(*)]/ancestor::*[.//${tag}${kind}][1]//${tag}${kind}`,
+        ]) {
+          if (findsThisElement(xp, el)) { out.push(`xpath=${xp}`); break; }
+        }
+      }
     }
     return out;
   };
