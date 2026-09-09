@@ -25,6 +25,7 @@ nothing, at a model call each.
 """
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -41,6 +42,7 @@ from trailblazer.agents.login import LoginError, resolve_login
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.agents.validator import validate
 from trailblazer.agents.vision import read_page, resolve
+from trailblazer.agents.vision.vision import set_shot_dir
 from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.generation import GenerationRequest
@@ -48,8 +50,9 @@ from trailblazer.contracts.page_description import PageDescription
 from trailblazer.loop.overlays import OverlayTable, dismiss
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.contracts.validation import ValidationRequest
+from trailblazer.observability.events import event
 from trailblazer.observability.ledger import RunLedger
-from trailblazer.observability.logging import get_logger, log_contract
+from trailblazer.observability.logging import configure_logging, get_logger, log_contract
 from trailblazer.shared.config import Settings, get_settings
 from trailblazer.shared.dev_carrier_creds import resolve_carrier_creds
 
@@ -163,9 +166,14 @@ def run_crawl(
         # and it only ever receives `settings`.
         settings = settings.model_copy(update={"crawl_business_type": business_types[0]})
     job_id = uuid.uuid4().hex[:12]
+    run_dir = _run_dir(
+        Path(out_dir or settings.artifacts_dir), carrier_id, business_types, insurance_types
+    )
+    configure_logging(settings.log_level, to_file=run_dir / "crawl.log")
+    set_shot_dir(run_dir)
     ledger = RunLedger(job_id=job_id)
     generator = Generator(
-        out_dir=Path(out_dir or settings.artifacts_dir) / job_id,
+        out_dir=run_dir,
         carrier=carrier_id,
         business_type=business_types[0] if business_types else "",
         insurance_type=insurance_types[0] if insurance_types else "",
@@ -182,13 +190,11 @@ def run_crawl(
         # The nav step from the landing page into the application is part of the
         # flow, so the replay script has to make it too.
         generator.metadata_doc.config.createSubmissionText = start_text
-    log.info(
-        "crawl start job_id=%s carrier_id=%s url=%s insurance_types=%s business_types=%s",
-        job_id,
-        carrier_id,
-        url,
-        ",".join(insurance_types),
-        ",".join(business_types),
+    event(
+        "run", "loop", job=job_id, carrier=carrier_id, url=url,
+        insurance=",".join(insurance_types) or None,
+        business=",".join(business_types) or None,
+        out=str(run_dir),
     )
 
     objective = (
@@ -230,19 +236,49 @@ def run_crawl(
         generator.metadata_doc.stoppedReason = frontier.stuck_reason()
         generator.flush()
     state = generator.state()
-    log.info(
-        "crawl end job_id=%s stage_id=%s polarity=%s routes=%d flow_done=%s "
-        "coverage=%s artifacts=%s",
-        job_id,
-        result.page.stageId,
-        result.polarity,
-        frontier.walk,
-        frontier.flow_done(),
-        frontier.coverage(),
-        state.model_dump(),
+    event(
+        "summary", "loop",
+        job=job_id,
+        stage=result.page.stageId,
+        routes=frontier.walk,
+        flow_done=frontier.flow_done(),
+        stopped=frontier.stuck_reason(),
+        out=str(run_dir),
     )
+    for board in frontier.coverage():
+        gates = board["gates"]
+        event(
+            "summary", "frontier", stage=board["stageId"],
+            controls=board["controls"], attempted=len(board["attempted"]),
+            unattempted=len(board["unattempted"]) or None,
+            gates=len(gates) or None,
+            gates_done=sum(1 for g in gates.values() if not g["remaining"]) or None,
+            gates_owing=sum(1 for g in gates.values() if g["remaining"]) or None,
+            unexplored=len(board["unexplored"]) or None,
+        )
+    log.debug("coverage %s artifacts %s", frontier.coverage(), state.model_dump())
     ledger.log_summary()
     return result
+
+
+def _run_dir(
+    root: Path, carrier_id: str, business_types: list[str], insurance_types: list[str]
+) -> Path:
+    """`<root>/NNN-carrier-business-insurance`, numbered one past the highest.
+
+    Named rather than hashed, and ordered rather than random: the run to look at
+    after something goes wrong is almost always the last one, and a directory of
+    job ids does not say which that is.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    used = [
+        int(p.name[:3]) for p in root.iterdir()
+        if p.is_dir() and p.name[:3].isdigit()
+    ]
+    slug = "-".join(
+        part for part in (carrier_id, *business_types[:1], *insurance_types[:1]) if part
+    )
+    return root / f"{max(used, default=0) + 1:03d}-{slug}"
 
 
 def _write_replay_config(carrier_id: str, settings: Settings, out_dir: Path) -> Path | None:
@@ -1031,6 +1067,23 @@ def _see_field(
         return False
     frontier.reopen_with_hint(field_id, words)
     return True
+
+
+def _snapshot_stuck(tab, generator: Generator | None, stage_id: str) -> None:
+    """Save the page as it stands when it is declared stuck, beside the artifacts.
+
+    The log says what was not found; the picture shows what was there. On one
+    run a press was refused with no error text the extractor could read, and the
+    cause was unrecoverable once the browser closed.
+    """
+    if generator is None:
+        return
+    path = generator.out_dir / f"stuck-{stage_id}.png"
+    try:
+        tab.screenshot(path=str(path), full_page=True)
+        event("stuck", "loop", logging.ERROR, stage=stage_id, screenshot=str(path))
+    except PlaywrightError as e:
+        event("stuck", "loop", logging.ERROR, stage=stage_id, screenshot="failed", detail=str(e))
 
 
 def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:

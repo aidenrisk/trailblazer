@@ -20,6 +20,7 @@ stops loudly -- this is the last resort, so its failure is the page's failure.
 """
 
 import base64
+import logging
 import time
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from playwright.sync_api import Page
 from trailblazer.contracts.page_description import Control
 from trailblazer.contracts.vision import Anchor, VisionReading
 from trailblazer.observability.cost import CostTracker
+from trailblazer.observability.events import event
 from trailblazer.observability.logging import get_logger, log_contract
 from trailblazer.shared.config import Settings, get_settings
 from trailblazer.shared.models import get_vision_model, invoke_with_retry
@@ -57,6 +59,28 @@ eight controls, one was filled, and the following perceive discarded all eight.
 Keyed on `Control.key`, the extractor's per-element id, which is stable for as
 long as the page's markup is.
 """
+
+_SHOT_DIR: Path | None = None
+"""Where badged screenshots are written, set by `set_shot_dir`. Every picture
+the model was shown is kept: a reading that misses is diagnosed from what it
+saw, which the log line alone cannot carry."""
+
+
+def set_shot_dir(path: Path) -> None:
+    """Write screenshots into `path`. Called once, with the run's own folder."""
+    global _SHOT_DIR
+    _SHOT_DIR = path
+
+
+def _save(shot: bytes, badges: list[dict]) -> str | None:
+    """Write the badged screenshot beside the artifacts. Returns its path."""
+    if _SHOT_DIR is None:
+        return None
+    _SHOT_DIR.mkdir(parents=True, exist_ok=True)
+    path = _SHOT_DIR / f"vision-{int(time.time())}-{len(badges)}badges.png"
+    path.write_bytes(shot)
+    return str(path)
+
 
 _MAX_BADGES = 25
 """Elements one screenshot may carry. Past this the picture is unreadable and
@@ -100,16 +124,19 @@ def read_page(
     finally:
         _unbadge(page)
 
-    log.info(
-        "vision looking job_id=%s badges=%d bytes=%d question=%r",
-        job_id, len(badges), len(shot), question[:80],
-    )
+    shot_path = _save(shot, badges)
+    event("vision", "vision", badges=len(badges), screenshot=shot_path, asked=question)
     reading = _ask(shot, badges, question, settings, job_id)
     log_contract(log, "VisionReading", reading)
-    log.info(
-        "vision read job_id=%s anchors=%d relevant=%s ms=%d",
-        job_id, len(reading.anchors), reading.relevant,
-        int((time.monotonic() - started) * 1000),
+    for anchor in reading.anchors:
+        event(
+            "vision", "vision", badge=anchor.badge, label=anchor.label,
+            heading=anchor.heading or None, purpose=anchor.purpose or None,
+        )
+    event(
+        "vision", "vision", anchors=len(reading.anchors),
+        relevant=",".join(str(b) for b in reading.relevant) or None,
+        note=reading.note or None, ms=int((time.monotonic() - started) * 1000),
     )
     return reading
 
@@ -149,15 +176,16 @@ def resolve(
                 continue
             locator = _first_hit(page, anchor, control, anchor.badge)
             if locator is None:
-                log.warning(
-                    "no locator built from %r/%r reaches badge %d (%s)",
-                    anchor.label, anchor.heading, anchor.badge, control.fieldId,
+                event(
+                    "vision", "vision", logging.WARNING, badge=anchor.badge,
+                    field=control.fieldId, label=anchor.label, heading=anchor.heading or None,
+                    resolved=False, tried=len(_candidates(anchor, control)),
                 )
                 continue
             resolved[key] = locator
-            log.info(
-                "vision addressed %s via %r: %s",
-                control.fieldId, anchor.label or anchor.heading, locator,
+            event(
+                "vision", "vision", badge=anchor.badge, field=control.fieldId,
+                via=anchor.label or anchor.heading, locator=locator, resolved=True,
             )
     finally:
         _unbadge(page)
@@ -197,9 +225,7 @@ def restore(page: Page, page_description) -> int:
         control.unique = True
         restored += 1
     if restored:
-        log.info(
-            "restored %d vision address(es) on %s", restored, page_description.stageId
-        )
+        event("vision", "vision", stage=page_description.stageId, restored=restored)
     return restored
 
 
@@ -224,13 +250,19 @@ def _first_hit(page: Page, anchor: Anchor, control: Control, badge: int) -> str 
     for selector in _candidates(anchor, control):
         try:
             found = page.locator(selector)
-            if found.count() != 1:
+            matched = found.count()
+            if matched != 1:
+                event("vision", "vision", logging.DEBUG, badge=badge,
+                      candidate=selector, matched=matched, hit=False)
                 continue
-            if found.first.get_attribute("data-tb-badge") == str(badge):
+            on_badge = found.first.get_attribute("data-tb-badge") == str(badge)
+            event("vision", "vision", logging.DEBUG, badge=badge,
+                  candidate=selector, matched=1, hit=on_badge)
+            if on_badge:
                 return selector
-            log.debug("candidate %r resolves to a different element than badge %d", selector, badge)
         except PlaywrightError as e:
-            log.debug("candidate %r rejected: %s", selector, e)
+            event("vision", "vision", logging.DEBUG, badge=badge,
+                  candidate=selector, hit=False, detail=str(e))
     return None
 
 

@@ -12,6 +12,7 @@ action and is never handed to the filler -- Loop renavigates, replays the fills
 that preceded the branch point, and then asks again.
 """
 
+import logging
 import re
 import time
 
@@ -19,6 +20,7 @@ from trailblazer.agents.frontier.board import CHECKED, MAX_FAILURES, Board
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.page_description import Action, Control, Option, PageDescription
 from trailblazer.observability.ledger import RunLedger
+from trailblazer.observability.events import event
 from trailblazer.observability.logging import get_logger, log_contract
 
 log = get_logger(__name__)
@@ -173,7 +175,7 @@ class Frontier:
             self.boards[page.stageId] = self.board
             if resumed is None:
                 self.stage_order.append(page.stageId)
-                log.info("board opened stage_id=%s url=%s", page.stageId, page.url)
+                event("look", "frontier", stage=page.stageId, url=page.url, board="opened")
             else:
                 log.info(
                     "board resumed stage_id=%s walk=%d attempted=%d",
@@ -255,7 +257,7 @@ class Frontier:
         """
         assert self.board is not None
         self.board.stuck = reason
-        log.error("stuck stage_id=%s: %s", self.board.stage_id, reason)
+        event("stuck", "frontier", logging.ERROR, stage=self.board.stage_id, reason=reason)
 
     def fold(self, stage_id: str, report: FillReport) -> None:
         """Fold one report into the board for `stage_id`, with no fresh description.
@@ -364,7 +366,8 @@ class Frontier:
         )
 
         if decision is None:
-            log.info("page done stage_id=%s", self.board.stage_id)
+            event("assign", "frontier", stage=self.board.stage_id, decision="page done",
+              attempted=len(self.board.attempted), refused=len(self.board.failures))
             self._record("done", self.board.stage_id, started)
             return None
 
@@ -381,12 +384,16 @@ class Frontier:
             return decision
 
         log_contract(log, "Assignment", decision)
-        log.info(
-            "assign stage_id=%s intent=%s field_id=%s value=%s",
-            self.board.stage_id,
-            decision.intent,
-            decision.fieldId or "-",
-            decision.value or "-",
+        event(
+            "assign", "frontier",
+            stage=self.board.stage_id,
+            field=decision.fieldId,
+            label=decision.label or None,
+            intent=decision.intent,
+            locator=decision.locator,
+            value=decision.value or ("filler's choice" if decision.fieldId else None),
+            round=(self.board.failures.get(decision.fieldId or "", 0) + 1) or None,
+            hint=(self.board.hints.get(decision.fieldId or "") or None),
         )
         self._record("assign", decision.fieldId or decision.intent, started)
         return decision
@@ -523,7 +530,8 @@ class Frontier:
         # once the page's fields are repaired. Recording at assignment time put
         # a refused Next in `advanced`, and three runs declared page three done
         # with every field accepted and Next never pressed a second time.
-        log.info("advancing stage_id=%s locator=%r", self.board.stage_id, self.page.next)
+        event("assign", "frontier", stage=self.board.stage_id, intent="advance",
+              locator=self.page.next, reason="every field acted on")
         return Assignment(intent="advance", locator=self.page.next)
 
     def _seed_for(self, control: Control) -> str | None:
@@ -963,7 +971,8 @@ class Frontier:
             if control.type in _EXPANDABLE_TYPES and not control.typeahead:
                 # The choices are not in the DOM until the widget is opened.
                 return Assignment(
-                    intent="expand", locator=control.locator, fieldId=control.fieldId
+                    intent="expand", locator=control.locator, fieldId=control.fieldId,
+                    label=control.label,
                 )
             if control.typeahead:
                 # Opening a typeahead reveals nothing; its choices answer what is
@@ -973,6 +982,7 @@ class Frontier:
                     intent="fill",
                     locator=control.locator,
                     fieldId=control.fieldId,
+                    label=control.label,
                     value=self._seed_for(control),
                     typeahead=True,
                     constraintHint=self._hint_for(control),
@@ -986,6 +996,7 @@ class Frontier:
                     intent="check",
                     locator=control.locator,
                     fieldId=control.fieldId,
+                    label=control.label,
                     value=value,
                     constraintHint=self._hint_for(control),
                 )
@@ -993,6 +1004,7 @@ class Frontier:
                 intent="fill",
                 locator=control.locator,
                 fieldId=control.fieldId,
+                label=control.label,
                 value=self._seed_for(control),
                 constraintHint=self._hint_for(control),
                 helpText=control.helpText or None,
@@ -1007,6 +1019,7 @@ class Frontier:
             intent="select",
             locator=control.locator,
             fieldId=control.fieldId,
+            label=control.label,
             value=value,
             optionLocator=option_locator,
             # A value not named here is the filler's to choose, and it needs the

@@ -29,6 +29,7 @@ from trailblazer.contracts.page_description import (
 )
 from trailblazer.contracts.scraper_result import PerceiveRequest, ScraperResult
 from trailblazer.observability.cost import CostTracker
+from trailblazer.observability.events import event
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings, get_settings
@@ -292,13 +293,6 @@ def perceive(
     """
     settings = settings or get_settings()
     started = time.monotonic()
-    log.info(
-        "perceive start job_id=%s page_index=%s perceiver=%s",
-        request.job_id,
-        request.page_index,
-        settings.scraper_perceiver,
-    )
-
     progress = {"phase": "dom"}
     stop = threading.Event()
     threading.Thread(
@@ -337,13 +331,18 @@ def perceive(
 
     scraper_result = diff_pages(described, request.prior, request.assignment)
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    log.info(
-        "perceive end job_id=%s stage_id=%s controls=%d polarity=%s ms=%d",
-        request.job_id,
-        described.stageId,
-        len(described.controls),
-        scraper_result.polarity,
-        elapsed_ms,
+    event(
+        "look", "scraper",
+        stage=described.stageId,
+        controls=len(described.controls),
+        unaddressed=sum(1 for c in described.controls if not c.locator or not c.unique) or None,
+        added=len(scraper_result.addedControls) or None,
+        removed=len(scraper_result.removedControls) or None,
+        polarity=scraper_result.polarity,
+        next=described.next,
+        blockers=len(described.blockers) or None,
+        ms=elapsed_ms,
+        usd=total,
     )
     if ledger is not None:
         ledger.record(

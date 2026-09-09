@@ -39,6 +39,15 @@ class Assignment(BaseModel):
     """Measured by the scraper. The filler does not construct or repair it."""
 
     fieldId: str | None = None
+
+    label: str = ""
+    """The question this control asks, as the scraper cleaned it.
+
+    Carried on the assignment because the filler cannot always read it off the
+    page: Pie's eligibility percentages have no accessible name, the filler was
+    handed `q_002` as the field's whole identity, and the value chooser answered
+    four "what percentage of labor cost" questions with business names.
+    """
     """The control acted on. `None` for `advance`, which targets an action."""
 
     value: str | None = None

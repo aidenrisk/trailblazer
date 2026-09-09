@@ -24,6 +24,7 @@ Two things it owns that nothing else can:
 """
 
 import json
+import logging
 import time
 
 from playwright.sync_api import Error as PlaywrightError
@@ -33,6 +34,7 @@ from trailblazer.agents.browser import write_tools
 from trailblazer.agents.browser.write_tools import LocatorError, RefusedError
 from trailblazer.agents.form_filler.values import choose_value
 from trailblazer.contracts.assignment import Assignment, FillReport
+from trailblazer.observability.events import event
 from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings, get_settings
@@ -157,13 +159,6 @@ def fill_one(
     """
     settings = settings or get_settings()
     started = time.monotonic()
-    log.info(
-        "fill start intent=%s field_id=%s locator=%s",
-        assignment.intent,
-        assignment.fieldId,
-        assignment.locator,
-    )
-
     usd = 0.0
     unpriced = False
     try:
@@ -198,13 +193,19 @@ def fill_one(
             ok=report.ok,
             unpriced=unpriced,
         )
-    log.info(
-        "fill end intent=%s field_id=%s ok=%s retried=%s ms=%d",
-        assignment.intent,
-        assignment.fieldId,
-        report.ok,
-        report.retried,
-        ms,
+    event(
+        "fill", "filler",
+        logging.INFO if report.ok else logging.WARNING,
+        field=assignment.fieldId,
+        label=assignment.label or None,
+        intent=assignment.intent,
+        locator=assignment.locator,
+        value=report.valueUsed,
+        ok=report.ok,
+        retried=report.retried or None,
+        refused=(report.blocked or {}).get("whatYouTried"),
+        ms=ms,
+        usd=usd or None,
     )
     return report
 
@@ -221,13 +222,6 @@ def _report(assignment: Assignment, **fields) -> FillReport:
 
 def _blocked(assignment: Assignment, what_you_tried: str) -> FillReport:
     """The report for an action that could not be completed. Never an exception."""
-    log.warning(
-        "blocked intent=%s field_id=%s locator=%s: %s",
-        assignment.intent,
-        assignment.fieldId,
-        assignment.locator,
-        what_you_tried,
-    )
     return _report(
         assignment,
         ok=False,
@@ -287,9 +281,18 @@ def _do_fill(
 
     usd = 0.0
     unpriced = False
-    # The Assignment carries no label -- `fieldId` is `q_003` -- so the name the
-    # model judges by is read off the live control instead.
-    label = _label_of(page, assignment.locator) or assignment.fieldId or assignment.locator
+    # The scraper's label first: it is the question as a person reads it, and
+    # the model cleaned it from markup the live page does not expose. Read off
+    # the control only when the assignment carries none. Pie's eligibility
+    # percentages have no accessible name, so the live read returned nothing,
+    # the chooser was given `q_002`, and it answered "what percentage of labor
+    # cost" with a business name -- five refused presses on one page.
+    label = (
+        assignment.label
+        or _label_of(page, assignment.locator)
+        or assignment.fieldId
+        or assignment.locator
+    )
 
     if assignment.value is not None:
         value = assignment.value
@@ -421,7 +424,10 @@ def _type_and_pick(
     write_tools.click(page, target)
     page.wait_for_timeout(300)
     committed = write_tools.resolve(page, assignment.locator).input_value() or chosen["label"]
-    log.info("typeahead %s: typed %r, picked %r, holds %r", assignment.locator, value, chosen["label"], committed)
+    event(
+        "fill", "filler", field=assignment.fieldId, locator=assignment.locator,
+        via="typeahead", typed=value, picked=chosen["label"], holds=committed,
+    )
     stated = "; ".join(t for t in (assignment.constraintHint, assignment.helpText) if t)
     constraint = _constraint_from(page, assignment.locator, stated, "")
     return _report(assignment, ok=True, valueUsed=committed, constraint=constraint), usd, unpriced
@@ -741,7 +747,11 @@ def _do_advance(page: Page, assignment: Assignment) -> FillReport:
     if moved:
         # The new page may still be loading; a look now describes a spinner.
         write_tools.wait_for_content(page)
-    log.info("advance %s -> %s", assignment.locator, "moved" if moved else "same url")
+    event(
+        "advance", "filler",
+        logging.INFO if moved else logging.WARNING,
+        locator=assignment.locator, was=before, now=page.url if moved else None, moved=moved,
+    )
     if not moved:
         # The click happened and the page stayed: the action did not yield its
         # result, so it is not reported as done. Recorded as done, the board
@@ -809,7 +819,8 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
         )
 
     if not options:
-        log.info("expand opened %s and no options appeared", assignment.locator)
+        event("fill", "filler", logging.WARNING, field=assignment.fieldId,
+              locator=assignment.locator, via="expand", options=0)
     return _report(assignment, ok=True, optionsRevealed=options)
 
 
