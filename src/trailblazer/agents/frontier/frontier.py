@@ -15,7 +15,7 @@ that preceded the branch point, and then asks again.
 import re
 import time
 
-from trailblazer.agents.frontier.board import CHECKED, Board
+from trailblazer.agents.frontier.board import CHECKED, MAX_FAILURES, Board
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
 from trailblazer.contracts.page_description import Action, Control, Option, PageDescription
 from trailblazer.observability.ledger import RunLedger
@@ -205,13 +205,13 @@ class Frontier:
         log_contract(log, "FrontierBoard", board.summary())
         self._record("observe", page.stageId, started)
 
-    def reopen(self, locators: list[str], forward: str | None) -> list[str]:
-        """Put fields back on the to-do list after a forward press changed nothing.
+    def reopen(self, locators: list[str]) -> list[str]:
+        """Put fields back on the to-do list after a forward press was refused.
 
-        Pressing Next with every field attempted is not the same as every field
+        Pressing Next with every field accepted is not the same as every field
         being right. The Loop reads the page for problems; the controls named
-        here lose their attempt so they are assigned again, and the forward
-        control is forgotten so it can be pressed again once they are. Returns
+        here lose their acceptance so they are assigned again. The refused press
+        itself was never recorded as done, so Next needs no forgetting. Returns
         the fieldIds reopened.
         """
         assert self.board is not None
@@ -223,8 +223,6 @@ class Frontier:
         reopened = [by_locator[l] for l in locators if l and l in by_locator]
         for field_id in reopened:
             self.board.attempted.discard(field_id)
-        if forward:
-            self.board.advanced.discard(forward)
         if reopened:
             log.warning(
                 "reopening stage_id=%s fields=%s after a forward press changed nothing",
@@ -236,14 +234,13 @@ class Frontier:
         """Give a spent field one more attempt, with what the page was seen to say.
 
         The filler corrected twice against the page's error text and the field
-        was still refused; `exhausted` then keeps it from being re-armed by the
-        rejection alone. This is the one thing that does re-arm it, because it
-        arrives with new information -- the vision fallback's reading of the
-        page -- rather than the same rejection again.
+        was still refused. The hint arrives with new information -- the vision
+        fallback's reading of the page -- so the field is granted one attempt
+        past its failure count rather than the same rejection again.
         """
         assert self.board is not None
         self.board.hints[field_id] = hint
-        self.board.exhausted.discard(field_id)
+        self.board.failures[field_id] = MAX_FAILURES - 1
         self.board.attempted.discard(field_id)
         log.warning(
             "reopening %s on %s with what the page was seen to say: %s",
@@ -318,6 +315,14 @@ class Frontier:
             ]
             return
 
+        if not report.ok:
+            # Not done: the field stays open and the refusal is counted. A gate
+            # side is credited only when the page accepted it.
+            board.record_failure(
+                report.fieldId, (report.blocked or {}).get("whatYouTried", "blocked")
+            )
+            return
+
         board.record_fill(report.fieldId)
         gate = board.gates.get(report.fieldId)
         if gate is not None and report.valueUsed is not None:
@@ -325,15 +330,6 @@ class Frontier:
         elif gate is not None and report.intent == "check":
             # A check with no value recorded still took the checked side.
             gate.take(CHECKED)
-
-        if not report.ok:
-            log.warning(
-                "assignment failed stage_id=%s field_id=%s intent=%s blocked=%s",
-                board.stage_id,
-                report.fieldId,
-                report.intent,
-                report.blocked,
-            )
 
     # --------------------------------------------------------------- decisions
 
@@ -629,15 +625,15 @@ class Frontier:
         filler: the board has to know which side was taken to know which one is
         still owed, and a value Frontier did not choose cannot be accounted for.
 
-        A control never acted on comes before one reopened on its rejection.
-        Board order alone put a reopened field first because it sat higher on
-        the page, so a run spent its corrections re-filling a claims box the
-        page kept refusing while eight controls the vision fallback had just
-        addressed were never touched at all.
+        A control never refused comes before one that has been. Board order
+        alone put a refused field first because it sat higher on the page, so a
+        run spent its corrections re-filling a claims box the page kept refusing
+        while eight controls the vision fallback had just addressed were never
+        touched at all.
         """
         assert self.board is not None
         pending = self.board.unattempted()
-        for field_id in sorted(pending, key=lambda f: f in self.board.error_reopens):
+        for field_id in sorted(pending, key=lambda f: self.board.failures.get(f, 0)):
             control = self.board.controls[field_id]
             gate = self.board.gates.get(field_id)
             pinned = self.board.pinned.get(field_id)

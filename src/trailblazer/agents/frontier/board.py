@@ -17,8 +17,10 @@ from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
 
-MAX_ERROR_REOPENS = 2
-"""Corrections a field gets on the page's own rejection before the page stops on it."""
+MAX_FAILURES = 2
+"""Refused fills a field may collect before it is given up. Each is a full
+assignment, and the filler corrects twice within one against the page's error
+text, so a field is refused at least six times before the board stops asking."""
 
 # The two sides of a gate that carries no options: a checkbox is either set or
 # not, and there is no option label to name either state.
@@ -82,11 +84,17 @@ class Board:
     """fieldIds in the order they were first seen, so assignments are stable."""
 
     attempted: set[str] = field(default_factory=set)
-    """fieldIds carrying a FillReport in the current walk.
+    """fieldIds whose fill the page accepted in the current walk.
 
-    Cleared by `restart`: the replay refills the prefix, and the fields after
-    the branch point are answered again against whatever the owed side reveals.
+    Done means it yielded its result: a refused fill is counted in `failures`
+    and the field stays open. Cleared by `restart`: the replay refills the
+    prefix, and the fields after the branch point are answered again against
+    whatever the owed side reveals.
     """
+
+    failures: dict[str, int] = field(default_factory=dict)
+    """fieldId -> refused fills this walk. A field at `MAX_FAILURES` is given
+    up: still open in principle, but no longer assigned."""
 
     gates: dict[str, GateWalk] = field(default_factory=dict)
     revealed: dict[str, str] = field(default_factory=dict)
@@ -160,15 +168,6 @@ class Board:
     further attempt. Kept across walks -- a field's requirement does not change
     with the route."""
 
-    exhausted: set[str] = field(default_factory=set)
-    """fieldIds whose correction budget is spent. Reported once, never re-armed:
-    the page keeps rendering the same rejection, and each observe would
-    otherwise reopen the field again."""
-
-    error_reopens: dict[str, int] = field(default_factory=dict)
-    """fieldId -> how many times an error has reopened it this walk. Capped by
-    `MAX_ERROR_REOPENS`, past which the error stays and the page stops on it."""
-
     unexplored: dict[str, str] = field(default_factory=dict)
     """fieldId -> why a gate's owed side was never walked.
 
@@ -199,25 +198,11 @@ class Board:
         if control.error:
             self.errors[control.fieldId] = control.error
             if control.fieldId in self.attempted and control.locator:
-                n = self.error_reopens.get(control.fieldId, 0)
-                if n < MAX_ERROR_REOPENS:
-                    self.error_reopens[control.fieldId] = n + 1
-                    self.attempted.discard(control.fieldId)
-                    log.warning(
-                        "reopening %s (%r) on its rejection: %s",
-                        control.fieldId, control.label[:40], control.error[:120],
-                    )
-                elif control.fieldId not in self.exhausted:
-                    # Spent, and reported once. Every later observe sees the
-                    # same rejection, and re-arming on each cost one live run
-                    # three more refills of a field the page had already
-                    # refused nine times -- while eight controls vision had
-                    # just addressed sat unfilled beside it.
-                    self.exhausted.add(control.fieldId)
-                    log.error(
-                        "%s (%r) still rejected after %d corrections; not retried: %s",
-                        control.fieldId, control.label[:40], n, control.error[:120],
-                    )
+                # The page accepted the value at fill time and rejects it now,
+                # at Next. The fill did not yield its result after all: it is
+                # undone and counted as a failure like any other refusal.
+                self.attempted.discard(control.fieldId)
+                self.record_failure(control.fieldId, control.error)
         else:
             self.errors.pop(control.fieldId, None)
 
@@ -252,7 +237,12 @@ class Board:
             and not self.controls[f].disabled
             and not self.controls[f].additionalRow
             and self.controls[f].locator
+            and self.failures.get(f, 0) < MAX_FAILURES
         ]
+
+    def given_up(self) -> list[str]:
+        """fieldIds refused `MAX_FAILURES` times this walk, in the order seen."""
+        return [f for f in self.order if self.failures.get(f, 0) >= MAX_FAILURES]
 
     def half_walked(self) -> list[str]:
         """fieldIds of gates with a side still untaken, in the order seen.
@@ -289,16 +279,19 @@ class Board:
         ]
 
     def record_fill(self, field_id: str) -> None:
-        """Mark `field_id` attempted in the current walk.
-
-        A fill after a forward press means the page is not what was pressed on,
-        so the press is forgotten and may be made again. Without this a page
-        whose fields were all repaired after a refused Next was declared done
-        with Next never re-pressed: `advanced` still held it from the refusal.
-        """
+        """Mark `field_id` done in the current walk: the page accepted the fill."""
         self.attempted.add(field_id)
         self.walk_of[field_id] = self.walk
-        self.advanced.clear()
+
+    def record_failure(self, field_id: str, why: str) -> None:
+        """Count one refused fill against `field_id`. The field stays open until the cap."""
+        n = self.failures.get(field_id, 0) + 1
+        self.failures[field_id] = n
+        label = self.controls[field_id].label[:40] if field_id in self.controls else field_id
+        if n >= MAX_FAILURES:
+            log.error("%s (%r) given up after %d refusals: %s", field_id, label, n, why[:120])
+        else:
+            log.warning("%s (%r) refused (%d/%d): %s", field_id, label, n, MAX_FAILURES, why[:120])
 
     def restart_for(self, walk: int) -> None:
         """Join route `walk`, dropping what was recorded on the route being left.
@@ -317,8 +310,7 @@ class Board:
         self.attempted.clear()
         self.advanced.clear()
         self.pinned.clear()
-        self.error_reopens.clear()
-        self.exhausted.clear()
+        self.failures.clear()
 
     def charge_restart(self) -> None:
         """Count one restart against this page's own budget."""

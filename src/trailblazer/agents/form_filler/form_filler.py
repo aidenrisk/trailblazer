@@ -760,6 +760,15 @@ def _do_advance(page: Page, assignment: Assignment) -> FillReport:
         # The new page may still be loading; a look now describes a spinner.
         write_tools.wait_for_content(page)
     log.info("advance %s -> %s", assignment.locator, "moved" if moved else "same url")
+    if not moved:
+        # The click happened and the page stayed: the action did not yield its
+        # result, so it is not reported as done. Recorded as done, the board
+        # marked Next pressed and never pressed it again after the page's
+        # fields were repaired.
+        return _report(
+            assignment, ok=False,
+            blocked={"control": assignment.locator, "whatYouTried": "pressed; the page did not move"},
+        )
     return _report(assignment, ok=True)
 
 

@@ -494,7 +494,7 @@ def _walk_page(
             # Every field attempted is not every field right. Read the page
             # before moving on; anything wrong is re-filled first.
             problems = page_problems(tab)
-            if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
+            if problems and frontier.reopen([p["locator"] for p in problems]):
                 log.info("page not complete before advance: %s", problems)
                 # The last fill's report has already been folded in; folding it
                 # again would mark the reopened field attempted before it is refilled.
@@ -520,7 +520,12 @@ def _walk_page(
             # real gate its second side.
             prefix.append((result.page.stageId, _pinned(assignment, report)))
 
-        _generate(generator, job_id, result.page, report, frontier.walk, ledger)
+        if report.ok or assignment.intent != "advance":
+            # A refused forward press is a diagnosis to run, not a block to
+            # record: the page's rejection is read next and the fields it names
+            # are repaired. Written to the artifacts it would stand as a blocked
+            # step on a page the route then leaves.
+            _generate(generator, job_id, result.page, report, frontier.walk, ledger)
         before_stage = result.page.stageId
         report_stage = before_stage
         result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
@@ -552,7 +557,7 @@ def _walk_page(
                     continue
 
             problems = page_problems(tab)
-            if problems and frontier.reopen([p["locator"] for p in problems], assignment.locator):
+            if problems and frontier.reopen([p["locator"] for p in problems]):
                 log.warning("forward press changed nothing; problems=%s", problems)
                 report = None
                 report_stage = None
