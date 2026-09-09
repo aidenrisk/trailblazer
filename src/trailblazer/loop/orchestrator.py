@@ -511,6 +511,13 @@ def _walk_page(
             tab, result, overlays, job_id, objective, settings, ledger, generator
         )
 
+        # A control the page renders and code cannot address is settled before
+        # anything is filled: where a caption sits is layout, which differs per
+        # carrier, so the words are read off the rendered page rather than
+        # guessed at from the markup around the input.
+        if any(not c.locator or not c.unique for c in result.page.controls):
+            _see(tab, result, seen, job_id, settings)
+
         frontier.observe(result.page, report, result.addedControls, report_stage)
 
         decision = frontier.next_assignment()
@@ -587,17 +594,6 @@ def _walk_page(
             # requirement skipped the diagnosis on exactly the pages that
             # needed it, and page three ended its route with eight controls
             # never addressed and Next never re-pressed.
-
-            # A control the page renders but code cannot address is the first
-            # thing to settle: it can never be filled, so no amount of
-            # re-filling what *is* addressable will satisfy the page. On page
-            # three the reopen path spent both its corrections on one claims
-            # field while eight lapse controls sat unaddressed beside it.
-            if any(not c.locator or not c.unique for c in result.page.controls):
-                if _see(tab, result, seen, job_id, settings):
-                    report = None
-                    report_stage = None
-                    continue
 
             problems = page_problems(tab)
             if problems and frontier.reopen([p["locator"] for p in problems]):
@@ -1007,8 +1003,8 @@ def _see(
     reading = read_page(
         tab,
         unaddressed,
-        "The page refused to move forward and named no field. Which badged elements "
-        "does its message refer to, and what words identify each of them?",
+        "Each badged element is a form field the page never named in its markup. "
+        "What question or caption is printed for each one, exactly as it appears?",
         settings,
         job_id,
     )
