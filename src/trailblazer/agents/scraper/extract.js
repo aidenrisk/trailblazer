@@ -66,10 +66,21 @@
    * Candidate locators, most stable first. Python takes the first that
    * resolves to exactly one node.
    */
+  /**
+   * An id a framework generated for this render, not a name the page gave the
+   * field: a UUID, or React's `:r3:`. Pie's eligibility inputs carry a fresh
+   * UUID per submission, so a locator built on one resolves on the crawl and
+   * dies in the replay script the next day.
+   */
+  const generatedId = (id) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ||
+    /^[:«][^:»]*[:»]$/.test(id) ||
+    /^(mui|radix|headlessui|react-aria)[-_:]/i.test(id);
+
   const candidates = (el, name, testid, role, accName) => {
     const out = [];
     const tag = el.tagName.toLowerCase();
-    if (el.id) out.push(`#${esc(el.id)}`);
+    if (el.id && !generatedId(el.id)) out.push(`#${esc(el.id)}`);
     if (testid) out.push(`[data-testid="${testid}"]`);
     if (name) out.push(`${tag}[name="${name}"]`);
     if (accName) {

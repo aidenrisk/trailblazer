@@ -40,6 +40,13 @@ class Assignment(BaseModel):
 
     fieldId: str | None = None
 
+    step: str = ""
+    """Ties every event about this one assignment together: the frontier's
+    choice, the value chooser's question, the fill, its refusal, the vision
+    look and the reopen. `grep step=s014` is one field's whole history in
+    order, which a fieldId alone is not -- `q_002` repeats on every page and
+    across every walk."""
+
     label: str = ""
     """The question this control asks, as the scraper cleaned it.
 

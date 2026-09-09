@@ -196,6 +196,7 @@ def fill_one(
     event(
         "fill", "filler",
         logging.INFO if report.ok else logging.WARNING,
+        step=assignment.step or None,
         field=assignment.fieldId,
         label=assignment.label or None,
         intent=assignment.intent,
@@ -298,6 +299,7 @@ def _do_fill(
         value = assignment.value
     else:
         value, usd, unpriced = choose_value(
+            step=assignment.step,
             label=label,
             locator=assignment.locator,
             url=page.url,
@@ -425,8 +427,9 @@ def _type_and_pick(
     page.wait_for_timeout(300)
     committed = write_tools.resolve(page, assignment.locator).input_value() or chosen["label"]
     event(
-        "fill", "filler", field=assignment.fieldId, locator=assignment.locator,
-        via="typeahead", typed=value, picked=chosen["label"], holds=committed,
+        "fill", "filler", step=assignment.step or None, field=assignment.fieldId,
+        locator=assignment.locator, via="typeahead", typed=value,
+        picked=chosen["label"], holds=committed,
     )
     stated = "; ".join(t for t in (assignment.constraintHint, assignment.helpText) if t)
     constraint = _constraint_from(page, assignment.locator, stated, "")
@@ -750,6 +753,7 @@ def _do_advance(page: Page, assignment: Assignment) -> FillReport:
     event(
         "advance", "filler",
         logging.INFO if moved else logging.WARNING,
+        step=assignment.step or None,
         locator=assignment.locator, was=before, now=page.url if moved else None, moved=moved,
     )
     if not moved:

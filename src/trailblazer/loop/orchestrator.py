@@ -236,6 +236,7 @@ def run_crawl(
         generator.metadata_doc.stoppedReason = frontier.stuck_reason()
         generator.flush()
     state = generator.state()
+    frontier.log_unexplored("before exit")
     event(
         "summary", "loop",
         job=job_id,

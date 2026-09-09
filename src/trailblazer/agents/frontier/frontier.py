@@ -127,6 +127,9 @@ class Frontier:
         walked and never hold the flow open: a filter toggle on a dashboard is
         not a branch of the application.
         """
+        self._step_seq = 0
+        """Numbers each assignment, so every event about it shares one id."""
+
         self._pin_for: dict[str, str] = {}
         """Ancestor sides to pin when the next restart's walk opens.
 
@@ -248,6 +251,28 @@ class Frontier:
             "reopening %s on %s with what the page was seen to say: %s",
             field_id, self.board.stage_id, hint[:120],
         )
+
+    def log_unexplored(self, when: str) -> None:
+        """Write every gate that still owes a side, one line each.
+
+        Called when a path completes and again before the crawl exits: a run
+        that ends with branches unwalked has to say which, by name, or the gap
+        is invisible until someone counts the artifacts.
+        """
+        for stage_id in self.stage_order:
+            board = self.boards[stage_id]
+            for field_id, gate in board.gates.items():
+                if not gate.remaining:
+                    continue
+                control = board.controls.get(field_id)
+                event(
+                    "summary", "frontier", logging.WARNING,
+                    when=when, stage=stage_id, field=field_id,
+                    label=(control.label if control else None),
+                    walked=",".join(gate.walked) or None,
+                    owing=",".join(gate.remaining),
+                    unexplored=board.unexplored.get(field_id),
+                )
 
     def mark_stuck(self, reason: str) -> None:
         """The page is complete as far as anything can tell, and it will not advance.
@@ -384,8 +409,11 @@ class Frontier:
             return decision
 
         log_contract(log, "Assignment", decision)
+        self._step_seq += 1
+        decision.step = f"s{self._step_seq:03d}"
         event(
             "assign", "frontier",
+            step=decision.step,
             stage=self.board.stage_id,
             field=decision.fieldId,
             label=decision.label or None,
@@ -494,9 +522,19 @@ class Frontier:
         """
         assert self.board is not None and self.page is not None
         if not self.page.next:
-            # A forward control can appear as the form completes, so a missing
-            # one is judged only once every field has been acted on.
-            if self.page.blockers or self.board.stuck or self.board.unattempted():
+            # A page with nothing to fill and no way on is a terminal, whatever
+            # text it carries. A decline reads as a blocker to the scraper --
+            # "we cannot currently insure this business" is decline chrome by
+            # the contract -- and the blocker guard then treated the end of a
+            # completed path as an obstruction: `reached_end` stayed false, and
+            # every restart path begins by returning on that, so a run that
+            # walked five pages branched none of its twenty owed gates.
+            terminal = not self.page.controls and self.board.stage_id != self._start_stage
+            if self.board.stuck or self.board.unattempted():
+                return None
+            if self.page.blockers and not terminal:
+                # Mid-load, or covered by a dialog: a page that has a way
+                # forward once the blocker clears.
                 return None
             if not self.page.controls and self.board.stage_id == self._start_stage:
                 return None
@@ -515,13 +553,13 @@ class Frontier:
             # missed that page's Next, and every page after it goes unwalked.
             if not self._reached_end:
                 self._reached_end = True
-                log.info(
-                    "flow end reached stage_id=%s walk=%d fields=%d; "
-                    "gate coverage starts now",
-                    self.board.stage_id,
-                    self.walk_seq,
-                    len(self.page.controls),
+                event(
+                    "summary", "frontier", stage=self.board.stage_id, walk=self.walk_seq,
+                    reached="flow end", fields=len(self.page.controls),
+                    terminal_text=("; ".join(self.page.blockers)[:120] or None),
+                    gates_owing=sum(len(b.half_walked()) for b in self.boards.values()),
                 )
+                self.log_unexplored("path complete")
             return None
         if self.page.next in self.board.advanced:
             return None

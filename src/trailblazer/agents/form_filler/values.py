@@ -39,6 +39,7 @@ def choose_value(
     state: str = "",
     control_type: str = "",
     help_text: str | None = None,
+    step: str = "",
     options: list[str] | None = None,
 ) -> tuple[str, float, bool]:
     """Decide what to type into one field.
@@ -124,6 +125,7 @@ def choose_value(
     total = tracker.total_usd()
     event(
         "fill", "chooser",
+        step=step or None,
         question=label,
         chose=value,
         type=control_type or None,
