@@ -503,6 +503,16 @@ def _walk_page(
                 continue
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
+        if not report.ok and report.blocked and assignment.fieldId:
+            # The filler read the label, the tooltip and the markup's format
+            # hints, and corrected twice against the page's own error text.
+            # What remains is what a person would do: look at the field. One
+            # look per field; if the page's words do not get it accepted either,
+            # the field is given up as before.
+            if _see_field(tab, result, frontier, assignment.fieldId, report, seen, job_id, settings):
+                report = None
+                report_stage = None
+                continue
         if report.ok:
             # Only what succeeded is part of the route. A blocked fill changed
             # nothing on the page, and re-executing it can only block again: on
@@ -967,6 +977,51 @@ def _see(
         "vision addressed %d control(s) on %s that code could not: %s",
         len(addresses), stage, sorted(addresses.values()),
     )
+    return True
+
+
+def _see_field(
+    tab,
+    result: ScraperResult,
+    frontier: Frontier,
+    field_id: str,
+    report: FillReport,
+    seen: dict[str, int],
+    job_id: str,
+    settings: Settings,
+) -> bool:
+    """Look at one refused field and hand the filler what the page says about it.
+
+    Reached only after the filler's own corrections are spent. The model reads
+    the field's caption, any instruction beside it and the error the page is
+    showing, and reports them as words; those words become the field's hint and
+    the field gets one more assignment. Returns False when nothing legible was
+    found or the field has already been looked at, which leaves the caller to
+    record the block as before.
+    """
+    key = f"{result.page.stageId}:{field_id}"
+    if seen.get(key):
+        return False
+    seen[key] = 1
+    control = next((c for c in result.page.controls if c.fieldId == field_id), None)
+    if control is None or not control.locator:
+        return False
+    tried = (report.blocked or {}).get("whatYouTried", "")[:200]
+    reading = read_page(
+        tab,
+        [control],
+        f"The badged field rejected every answer tried ({tried}). What does the page say "
+        "it requires: its caption, any instruction or format beside it, and the error it "
+        "shows for it right now?",
+        settings,
+        job_id,
+    )
+    anchor = next((a for a in reading.anchors if a.badge == 1), None)
+    words = "; ".join(p for p in (anchor.purpose, anchor.label, anchor.heading, reading.note) if p) if anchor else reading.note
+    if not words.strip():
+        log.warning("vision read nothing legible for %s on %s", field_id, result.page.stageId)
+        return False
+    frontier.reopen_with_hint(field_id, words)
     return True
 
 

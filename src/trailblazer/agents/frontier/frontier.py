@@ -232,6 +232,24 @@ class Frontier:
             )
         return reopened
 
+    def reopen_with_hint(self, field_id: str, hint: str) -> None:
+        """Give a spent field one more attempt, with what the page was seen to say.
+
+        The filler corrected twice against the page's error text and the field
+        was still refused; `exhausted` then keeps it from being re-armed by the
+        rejection alone. This is the one thing that does re-arm it, because it
+        arrives with new information -- the vision fallback's reading of the
+        page -- rather than the same rejection again.
+        """
+        assert self.board is not None
+        self.board.hints[field_id] = hint
+        self.board.exhausted.discard(field_id)
+        self.board.attempted.discard(field_id)
+        log.warning(
+            "reopening %s on %s with what the page was seen to say: %s",
+            field_id, self.board.stage_id, hint[:120],
+        )
+
     def mark_stuck(self, reason: str) -> None:
         """The page is complete as far as anything can tell, and it will not advance.
 
@@ -1002,6 +1020,9 @@ class Frontier:
         parts = [control.formatHint]
         if control.error:
             parts.append(f"the page rejected the last answer: {control.error}")
+        seen = self.board.hints.get(control.fieldId) if self.board else None
+        if seen:
+            parts.append(f"the page says this field asks for: {seen}")
         hint = "; ".join(p for p in parts if p)
         return hint or None
 

@@ -152,6 +152,14 @@ class Board:
     filler is what fixes a field, and it cannot fix what it is never told.
     """
 
+    hints: dict[str, str] = field(default_factory=dict)
+    """fieldId -> what the vision fallback read the field as asking for.
+
+    Set once the filler's own corrections are spent: the page's words about the
+    field, as a person sees them, handed to the filler as its constraint on one
+    further attempt. Kept across walks -- a field's requirement does not change
+    with the route."""
+
     exhausted: set[str] = field(default_factory=set)
     """fieldIds whose correction budget is spent. Reported once, never re-armed:
     the page keeps rendering the same rejection, and each observe would
