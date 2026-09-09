@@ -159,7 +159,12 @@ def denial_reason(locator: Locator) -> str | None:
     backwards for an action that cannot be undone.
     """
     try:
-        sources = (
+        # A choice in a chooser is a value, not an action: picking "Non Payment"
+        # as a reason for a coverage lapse pays nothing. The text check is for
+        # buttons and links, which is what a denied phrase on an option is not;
+        # the payment-context and card checks below still apply to it.
+        is_option = (locator.get_attribute("role") or "").strip().lower() == "option"
+        sources = () if is_option else (
             ("accessible name", (locator.get_attribute("aria-label") or "").strip()),
             ("text", (locator.inner_text() or "").strip()),
             ("value", (locator.get_attribute("value") or "").strip()),
