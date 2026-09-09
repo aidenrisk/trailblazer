@@ -68,9 +68,17 @@
    */
   /**
    * An id a framework generated for this render, not a name the page gave the
-   * field: a UUID, or React's `:r3:`. Pie's eligibility inputs carry a fresh
-   * UUID per submission, so a locator built on one resolves on the crawl and
-   * dies in the replay script the next day.
+   * field: a UUID, React's `:r3:`, a component library's prefix.
+   *
+   * Rejected as an address because it is not the same id twice. Pie's
+   * eligibility inputs carry a fresh UUID per submission -- `#e81a2048-…` on
+   * one crawl, `#dd8be20b-…` on the next -- so a script built on one resolves
+   * nothing when it runs. Being unique is not being stable, and only the
+   * measurement can see the first.
+   *
+   * Safe to reject only because a control with no other candidate is addressed
+   * by the text beside it: rejecting the id on its own left nine fields with no
+   * address at all and stopped a run on eligibility.
    */
   const generatedId = (id) =>
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ||
