@@ -289,9 +289,16 @@ class Board:
         ]
 
     def record_fill(self, field_id: str) -> None:
-        """Mark `field_id` attempted in the current walk."""
+        """Mark `field_id` attempted in the current walk.
+
+        A fill after a forward press means the page is not what was pressed on,
+        so the press is forgotten and may be made again. Without this a page
+        whose fields were all repaired after a refused Next was declared done
+        with Next never re-pressed: `advanced` still held it from the refusal.
+        """
         self.attempted.add(field_id)
         self.walk_of[field_id] = self.walk
+        self.advanced.clear()
 
     def restart_for(self, walk: int) -> None:
         """Join route `walk`, dropping what was recorded on the route being left.
