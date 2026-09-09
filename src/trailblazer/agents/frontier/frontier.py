@@ -682,7 +682,11 @@ class Frontier:
         if owed:
             if not self.reached_end:
                 return None
-            field_id = owed[0]
+            # The last owed gate on the page: the deepest choice point on the
+            # route is the one to branch from, so the walk that opens differs
+            # from the last one as late as possible and everything before it
+            # is already known to reach here.
+            field_id = owed[-1]
             side = self.board.gates[field_id].remaining[0]
             self.board.charge_restart()
             return Restart(
@@ -692,7 +696,7 @@ class Frontier:
                 stageId=self.board.stage_id,
             )
 
-        return self._restart_for_absent(absent[0])
+        return self._restart_for_absent(absent[-1])
 
     @property
     def reached_end(self) -> bool:
@@ -722,14 +726,16 @@ class Frontier:
         gate's side decides what the later pages render, so branching before
         the end leaves them described under whichever side was set last.
 
-        Pages are taken in the order they were entered, so the earliest
-        undecided branch is resolved first and the routes come out in a stable
-        order.
+        Pages are taken from the deepest entered backwards, and on each the
+        last owed gate first: depth-first, so each new route is the previous
+        one with its latest choice changed. An earlier-first order re-entered
+        for a page-one gate while later pages still owed sides, and every one
+        of those branches waited on a route that might never reach them again.
         """
         assert self.board is not None
         if not self.reached_end:
             return None
-        for stage_id in self.stage_order:
+        for stage_id in reversed(self.stage_order):
             if stage_id == self.board.stage_id or stage_id == self._start_stage:
                 continue
             board = self.boards[stage_id]
@@ -739,7 +745,7 @@ class Frontier:
             if not owed:
                 continue
 
-            field_id = owed[0]
+            field_id = owed[-1]
             gate = board.gates[field_id]
             if not gate.remaining:
                 continue
