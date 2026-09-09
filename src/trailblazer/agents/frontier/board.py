@@ -1,7 +1,7 @@
 """The board: what Frontier knows about one page.
 
 The only state in the pipeline. It answers, for one page, which controls exist,
-which have been acted on, which two-sided gates remain half-walked, which
+which have been acted on, which gates still owe a side, which
 controls appeared as a result of which assignment, and which walk each fill
 belongs to.
 
@@ -27,36 +27,36 @@ UNCHECKED = "false"
 
 
 def gate_sides(control: Control) -> list[str] | None:
-    """The two values `control` must be walked through, or `None` if it is no gate.
+    """Every value `control` must be walked through, or `None` if it is no gate.
 
     Decided by shape, not by type name (spec §4, "What counts as a gate"): a
-    `toggle` is always a gate, a control with no options is a checkbox-shaped
-    gate, and anything carrying exactly two options is a gate.
+    `toggle` is a gate with two sides, and a control carrying two or more
+    options is a gate with one side per option. Which option changes the pages
+    after it cannot be known without taking it.
 
-    The two-option clause reads `options` and not `type`, because `type` is the
+    The option clause reads `options` and not `type`, because `type` is the
     model's judgment and `options` is measured. Pie's "Legal Entity Type" is the
     case: perceived as `other`, it is the one gate this pipeline exists to walk,
     and a rule keyed on the type name never saw it. The contract bars
     `text`/`number`/`date` from carrying options at all, so a control holding
-    two of them is choice-bearing whatever it was typed.
+    options is choice-bearing whatever it was typed.
 
     One option is not a gate: there is no second side to owe, so walking it is
-    filling it. Three or more is not either -- the walk covers branches, not
-    combinations, and each extra side costs a restart that replays the whole
-    prefix, against a `MAX_RESTARTS` of 8.
+    filling it. Each further side costs one re-entry of the flow; `MAX_RESTARTS`
+    bounds that per page.
     """
     if control.options is None:
         # `text`/`number`/`date` are barred from options by the contract, so an
         # optionless control here is a toggle: a checkbox with two implicit sides.
         return [CHECKED, UNCHECKED] if control.type == "toggle" else None
-    if len(control.options) == 2:
+    if len(control.options) >= 2:
         return [o.label for o in control.options]
     return None
 
 
 @dataclass
 class GateWalk:
-    """One gate's two sides and which of them have been taken."""
+    """One gate's sides and which of them have been taken."""
 
     walked: list[str] = field(default_factory=list)
     remaining: list[str] = field(default_factory=list)

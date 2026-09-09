@@ -581,9 +581,13 @@ class Generator:
         return sorted(self._answers)
 
     def record_branch_exploration(
-        self, stage_id: str, walked_both: list[str], unexplored: dict[str, str]
+        self, stage_id: str, walked_all: list[str], unexplored: dict[str, str]
     ) -> None:
         """Write one page's gate coverage into the metadata artifact.
+
+        `walked_all` is every gate with no side left to take: both sides of a
+        toggle, every option of a chooser. The artifact key keeps the spec's
+        name, `gatesWalkedBothSides`.
 
         The completion assertion reads `branchExploration`, not Frontier's board:
         a gate owed a side and neither walked nor declared here fails the run.
@@ -591,7 +595,7 @@ class Generator:
         this class allocated is what the entries carry.
         """
         exploration = self.metadata_doc.branchExploration
-        for field_id in walked_both:
+        for field_id in walked_all:
             qid = self._by_field.get((stage_id, field_id))
             if qid is not None and qid not in exploration.gatesWalkedBothSides:
                 exploration.gatesWalkedBothSides.append(qid)

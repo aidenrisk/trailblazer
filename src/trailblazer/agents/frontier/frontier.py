@@ -380,12 +380,12 @@ class Frontier:
     def page_done(self) -> bool:
         """True when this page needs nothing more on the route under way.
 
-        Every field attempted and every gate on it either walked both ways or
+        Every field attempted and every gate on it either walked every side or
         holding a side for a later route. A gate still owing a side does not
         keep the route on the page: the side decides what the *later* pages
         render, so the route advances and the flow is re-entered for it (spec
         4, "Backtracking"). `flow_done` is what reports the spec's page-done
-        condition -- every two-sided gate walked both ways -- across the flow.
+        condition -- every gate walked on every side -- across the flow.
 
         A pure read: unlike `next_assignment` it records nothing, so Loop can
         ask before deciding whether to assign.

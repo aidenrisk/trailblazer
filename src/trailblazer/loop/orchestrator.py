@@ -982,13 +982,13 @@ def _record_branch_exploration(generator: Generator | None, frontier: Frontier) 
     if generator is None:
         return
     for board in frontier.coverage():
-        walked_both = [
+        walked_all = [
             field_id
             for field_id, gate in board["gates"].items()
-            if not gate["remaining"] and len(gate["walked"]) == 2
+            if not gate["remaining"] and gate["walked"]
         ]
         generator.record_branch_exploration(
-            board["stageId"], walked_both, board["unexplored"]
+            board["stageId"], walked_all, board["unexplored"]
         )
 
 
