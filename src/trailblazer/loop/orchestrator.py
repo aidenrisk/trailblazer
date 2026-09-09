@@ -271,9 +271,12 @@ def _run_dir(
     job ids does not say which that is.
     """
     root.mkdir(parents=True, exist_ok=True)
+    # Only `NNN-...` counts. A job-id folder from an earlier layout can begin
+    # with digits -- `981ab3...` read as 981 -- and one of those set the next
+    # run's number to 982.
     used = [
         int(p.name[:3]) for p in root.iterdir()
-        if p.is_dir() and p.name[:3].isdigit()
+        if p.is_dir() and len(p.name) > 3 and p.name[:3].isdigit() and p.name[3] == "-"
     ]
     slug = "-".join(
         part for part in (carrier_id, *business_types[:1], *insurance_types[:1]) if part
