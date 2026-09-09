@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 
 from trailblazer.observability.cost import CostTracker
+from trailblazer.observability.events import event
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings
 from trailblazer.shared.models import _ATTEMPTS, TransientModelError, get_model, invoke_with_retry
@@ -121,12 +122,16 @@ def choose_value(
         ) from e
 
     total = tracker.total_usd()
-    log.info(
-        "chose value field=%s corrected=%s usd=%s ms=%d",
-        label,
-        error_text is not None,
-        "unknown" if total is None else f"{total:.6f}",
-        int((time.monotonic() - started) * 1000),
+    event(
+        "fill", "chooser",
+        question=label,
+        chose=value,
+        type=control_type or None,
+        format=constraint_hint or None,
+        tooltip=help_text or None,
+        correcting=error_text or None,
+        usd=total,
+        ms=int((time.monotonic() - started) * 1000),
     )
     return value, (0.0 if total is None else total), total is None
 

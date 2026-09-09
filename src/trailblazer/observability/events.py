@@ -48,7 +48,12 @@ def _fmt(value: Any) -> str:
     text = str(value).replace("\n", "\\n").replace("\r", "")
     if len(text) > _MAX_VALUE:
         text = text[:_MAX_VALUE] + f"…+{len(str(value)) - _MAX_VALUE}"
-    return f'"{text}"' if (" " in text or "=" in text or not text) else text
+    if " " in text or "=" in text or '"' in text or not text:
+        # A locator carries quotes of its own -- `a[href="/x"]` -- and an
+        # unescaped one ended the value early and left the rest looking like
+        # fields.
+        return '"' + text.replace('"', '\\"') + '"'
+    return text
 
 
 def event(action: str, agent: str, level: int = logging.INFO, **fields: Any) -> None:

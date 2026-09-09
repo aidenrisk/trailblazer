@@ -6,6 +6,7 @@ assigned in Python afterwards, because models get counters wrong and a fixed
 rule applies more reliably in code than in a prompt.
 """
 
+import logging
 import re
 import threading
 import time
@@ -331,6 +332,26 @@ def perceive(
 
     scraper_result = diff_pages(described, request.prior, request.assignment)
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    for control in described.controls:
+        # Every question the page asks, as the crawl understood it. What the
+        # filler is given to answer with is exactly this, so a wrong answer is
+        # diagnosed by reading the line above it rather than by guessing what
+        # the field was: four "what percentage of labor cost" fields were
+        # answered with business names and the log showed only `q_002`.
+        event(
+            "look", "scraper", logging.DEBUG if control.locator else logging.WARNING,
+            stage=described.stageId,
+            field=control.fieldId,
+            label=control.label,
+            type=control.type,
+            required=control.required,
+            locator=control.locator or None,
+            unique=None if control.unique else False,
+            options=len(control.options) if control.options else None,
+            format=control.formatHint or None,
+            tooltip=control.helpText or None,
+            error=control.error or None,
+        )
     event(
         "look", "scraper",
         stage=described.stageId,

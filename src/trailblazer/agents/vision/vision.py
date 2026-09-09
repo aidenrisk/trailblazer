@@ -126,6 +126,21 @@ def read_page(
 
     shot_path = _save(shot, badges)
     event("vision", "vision", badges=len(badges), screenshot=shot_path, asked=question)
+    by_key = {c.key: c for c in controls}
+    for badge in badges:
+        # What each number in the picture stands for, before the model says
+        # anything: the reading below is judged against this, and a badge whose
+        # own label is empty is why the model was asked at all.
+        control = by_key.get(badge["key"])
+        event(
+            "vision", "vision", badge=badge["badge"], field=control.fieldId if control else None,
+            label=(control.label if control else "") or None,
+            type=control.type if control else None,
+            tooltip=(control.helpText if control else "") or None,
+            format=(control.formatHint if control else "") or None,
+            tag=badge["tag"], at=f'{badge["rect"]["x"]},{badge["rect"]["y"]}',
+            size=f'{badge["rect"]["w"]}x{badge["rect"]["h"]}',
+        )
     reading = _ask(shot, badges, question, settings, job_id)
     log_contract(log, "VisionReading", reading)
     for anchor in reading.anchors:

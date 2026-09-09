@@ -10,6 +10,7 @@ because which one wins is a property of the portal, not of the design.
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Protocol
@@ -17,6 +18,7 @@ from typing import Any, Protocol
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 
+from trailblazer.observability.events import event
 from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -291,7 +293,7 @@ def _read_help_tooltip(page: Page, key: str) -> str:
         log.warning("hovering the help icon for %s navigated the page; text discarded", key)
         return ""
     if text:
-        log.info("help tooltip read key=%s chars=%d", key, len(text))
+        event("look", "scraper", logging.DEBUG, key=key, tooltip=text)
     return " ".join(text.split())[:400]
 
 
