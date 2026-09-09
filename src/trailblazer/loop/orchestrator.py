@@ -596,15 +596,37 @@ def _walk_page(
             # never addressed and Next never re-pressed.
 
             problems = page_problems(tab)
-            if problems and frontier.reopen([p["locator"] for p in problems]):
-                log.warning("forward press changed nothing; problems=%s", problems)
+            if problems:
+                for problem in problems:
+                    event("reopen", "loop", logging.WARNING, stage=before_stage,
+                          locator=problem["locator"], rejected=problem["problem"])
+                if frontier.reopen([p["locator"] for p in problems]):
+                    report = None
+                    report_stage = None
+                    continue
+            # The page showed a message and named no field: nothing is
+            # unaddressed, something is rejected, which is a different question
+            # than `_see` answers. Restored here after being removed when
+            # vision moved to fire on an unaddressed control -- this is the
+            # situation that trigger never covered, and a run stalled on it
+            # with no field to blame and no further attempt.
+            if result.page.blockers and _see_rejection(tab, result, frontier, seen, job_id, settings):
                 report = None
                 report_stage = None
                 continue
+            # The page's own words, if it showed any: a blocker string is the
+            # only account of *why* Next refused when no field carries an error.
+            # A stuck reason built only from the locator and the stage told a
+            # reader nothing the page itself had said -- one run showed
+            # blockers=1 on the look just before this and the stuck line still
+            # read "no invalid, empty or errored field found".
+            blocker_text = "; ".join(result.page.blockers) or None
             frontier.mark_stuck(
                 f"{assignment.locator!r} pressed on {before_stage} and the page did not "
                 "change; no invalid, empty or errored field found"
+                + (f"; page shows: {blocker_text}" if blocker_text else "")
             )
+            _snapshot_stuck(tab, generator, before_stage)
             _record_route_end(generator, frontier, result)
             _record_branch_exploration(generator, frontier)
             return result
@@ -995,7 +1017,19 @@ def _see(
         return False
     seen[stage] = seen.get(stage, 0) + 1
 
-    unaddressed = [c for c in result.page.controls if not c.locator or not c.unique]
+    # A radio group's own locator addresses the group, not the answer -- it is
+    # not meant to be clicked, and its non-uniqueness (two radios share a name)
+    # is expected, not a defect. A control whose options each carry their own
+    # locator is settable through them regardless of the group address, so it
+    # is not vision's problem: one run badged "owners" twice on that account,
+    # both attempts failed the identity check, and the real gap sat unlooked.
+    def has_own_options(c):
+        return c.options and all(o.locator for o in c.options)
+
+    unaddressed = [
+        c for c in result.page.controls
+        if (not c.locator or not c.unique) and not has_own_options(c)
+    ]
     if not unaddressed:
         log.info("nothing on %s lacks an address; vision has nothing to add", stage)
         return False
@@ -1084,6 +1118,59 @@ def _snapshot_stuck(tab, generator: Generator | None, stage_id: str) -> None:
         event("stuck", "loop", logging.ERROR, stage=stage_id, screenshot=str(path))
     except PlaywrightError as e:
         event("stuck", "loop", logging.ERROR, stage=stage_id, screenshot="failed", detail=str(e))
+
+
+def _see_rejection(
+    tab,
+    result: ScraperResult,
+    frontier: Frontier,
+    seen: dict[str, int],
+    job_id: str,
+    settings: Settings,
+) -> bool:
+    """Ask which of the page's own controls its rejection message is about.
+
+    Reached when Next was refused, the page displays a message, and no field
+    carries an error -- distinct from `_see`, which handles a control with no
+    address at all. Every control on the page is badged (not only the
+    unaddressed ones: the field the message means may already have a working
+    address and simply hold the wrong value), and the model is asked which
+    badges the visible text concerns. Each is reopened with the message as its
+    hint, the same path a blocked fill's correction takes.
+    """
+    stage = result.page.stageId
+    key = f"{stage}:rejection"
+    if seen.get(key, 0) >= _MAX_LOOKS_PER_STAGE:
+        return False
+    seen[key] = seen.get(key, 0) + 1
+
+    message = "; ".join(result.page.blockers)
+    candidates = [c for c in result.page.controls if c.locator]
+    if not candidates:
+        return False
+
+    reading = read_page(
+        tab, candidates,
+        f'The page shows this message and will not proceed: "{message}". Which badged '
+        "fields does it concern, and what does the message say about each?",
+        settings, job_id,
+    )
+    if not reading.relevant:
+        return False
+
+    by_badge = {}
+    for i, c in enumerate(candidates, start=1):
+        by_badge[i] = c
+    hinted = False
+    for badge in reading.relevant:
+        control = by_badge.get(badge)
+        if control is None:
+            continue
+        anchor = next((a for a in reading.anchors if a.badge == badge), None)
+        words = "; ".join(p for p in (message, anchor.purpose if anchor else "", anchor.label if anchor else "") if p)
+        frontier.reopen_with_hint(control.fieldId, words)
+        hinted = True
+    return hinted
 
 
 def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:

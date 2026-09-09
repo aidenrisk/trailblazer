@@ -261,23 +261,33 @@ def _first_hit(page: Page, anchor: Anchor, control: Control, badge: int) -> str 
     then the label alone. Each is expressed as "the element of this kind nearest
     the text", which is what the model actually saw, and each is tested by
     identity rather than by count alone.
+
+    Every candidate is written at DEBUG as it is tried; if none hits, the whole
+    attempt is written again at WARNING, one line per candidate, so a failure
+    shows what was tried without needing DEBUG turned on for the entire run.
     """
+    tried: list[dict] = []
     for selector in _candidates(anchor, control):
         try:
             found = page.locator(selector)
             matched = found.count()
             if matched != 1:
-                event("vision", "vision", logging.DEBUG, badge=badge,
+                event("vision", "vision", logging.DEBUG, badge=badge, field=control.fieldId,
                       candidate=selector, matched=matched, hit=False)
+                tried.append({"candidate": selector, "matched": matched, "hit": False})
                 continue
             on_badge = found.first.get_attribute("data-tb-badge") == str(badge)
-            event("vision", "vision", logging.DEBUG, badge=badge,
+            event("vision", "vision", logging.DEBUG, badge=badge, field=control.fieldId,
                   candidate=selector, matched=1, hit=on_badge)
             if on_badge:
                 return selector
+            tried.append({"candidate": selector, "matched": 1, "hit": False})
         except PlaywrightError as e:
-            event("vision", "vision", logging.DEBUG, badge=badge,
+            event("vision", "vision", logging.DEBUG, badge=badge, field=control.fieldId,
                   candidate=selector, hit=False, detail=str(e))
+            tried.append({"candidate": selector, "hit": False, "detail": str(e)})
+    for t in tried:
+        event("vision", "vision", logging.WARNING, badge=badge, field=control.fieldId, **t)
     return None
 
 

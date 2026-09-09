@@ -15,6 +15,7 @@ clickable that closes it and keeps the answers, and `dismiss` presses that
 measured address and adds the entry.
 """
 
+import logging
 import time
 
 from playwright.sync_api import Error as PlaywrightError
@@ -23,6 +24,7 @@ from playwright.sync_api import Page
 from trailblazer.agents.browser.write_tools import RefusedError, wait_settled
 from trailblazer.agents.form_filler.safety import refuse_if_denied
 from trailblazer.contracts.page_description import Overlay
+from trailblazer.observability.events import event
 from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -88,9 +90,9 @@ def clear_known(page: Page, table: OverlayTable) -> list[str]:
         title = pending[0]["title"]
         locator = table.get(title)
         if locator is None:
-            log.info("dialog %r not yet recorded; left for the scraper", title)
+            event("dismiss", "loop", dialog=title, action="left for the scraper")
             break
-        log.info("clearing recorded dialog %r via %s", title, locator)
+        event("dismiss", "loop", dialog=title, locator=locator, via="recorded")
         gone = _press(page, locator, title)
         cleared.append(title)
         if not gone:
@@ -103,7 +105,7 @@ def dismiss(page: Page, overlay: Overlay) -> str:
     chosen = next((c for c in overlay.clickables if c.key == overlay.dismissKey), None)
     if chosen is None or not chosen.locator:
         raise RuntimeError(f"dialog {overlay.title!r}: dismissKey {overlay.dismissKey!r} names no measured clickable")
-    log.info("dismissing dialog %r via %r (%s)", overlay.title, chosen.label, chosen.locator)
+    event("dismiss", "loop", dialog=overlay.title, via=chosen.label, locator=chosen.locator)
     _press(page, chosen.locator, overlay.title)
     return chosen.locator
 
@@ -121,5 +123,6 @@ def _press(page: Page, locator: str, title: str) -> bool:
             wait_settled(page)
             return True
         page.wait_for_timeout(200)
-    log.warning("dialog %r still showing %dms after %s was clicked", title, _GONE_TIMEOUT_MS, locator)
+    event("dismiss", "loop", logging.WARNING, dialog=title, locator=locator,
+          detail=f"still showing after {_GONE_TIMEOUT_MS}ms")
     return False

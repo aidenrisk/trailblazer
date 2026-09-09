@@ -10,9 +10,11 @@ previous board rather than extending it, because `fieldId` is a per-page counter
 (`page_description.Control.fieldId`) and carries no cross-page identity.
 """
 
+import logging
 from dataclasses import dataclass, field
 
 from trailblazer.contracts.page_description import Control, Option
+from trailblazer.observability.events import event
 from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -213,7 +215,8 @@ class Board:
             # four such checkboxes on Pie's insurance-history page -- then would
             # have restarted for each one's other side. Never assigned, never a
             # gate; the gap is logged so it reaches the reader, not swallowed.
-            log.warning("control %s (%r) has no locator and cannot be set", control.fieldId, control.label[:40])
+            event("assign", "frontier", logging.WARNING, stage=self.stage_id,
+                  field=control.fieldId, label=control.label[:60], reason="no locator; cannot be set")
         sides = None if unsettable else gate_sides(control)
         if sides is None:
             self.gates.pop(control.fieldId, None)
@@ -288,10 +291,13 @@ class Board:
         n = self.failures.get(field_id, 0) + 1
         self.failures[field_id] = n
         label = self.controls[field_id].label[:40] if field_id in self.controls else field_id
-        if n >= MAX_FAILURES:
-            log.error("%s (%r) given up after %d refusals: %s", field_id, label, n, why[:120])
-        else:
-            log.warning("%s (%r) refused (%d/%d): %s", field_id, label, n, MAX_FAILURES, why[:120])
+        given_up = n >= MAX_FAILURES
+        event(
+            "fill", "frontier", logging.ERROR if given_up else logging.WARNING,
+            stage=self.stage_id, field=field_id, label=label,
+            attempt=n, of=MAX_FAILURES, refused=why[:200],
+            given_up=given_up or None,
+        )
 
     def restart_for(self, walk: int) -> None:
         """Join route `walk`, dropping what was recorded on the route being left.
