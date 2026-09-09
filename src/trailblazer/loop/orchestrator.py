@@ -1145,7 +1145,19 @@ def _see_rejection(
     seen[key] = seen.get(key, 0) + 1
 
     message = "; ".join(result.page.blockers)
-    candidates = [c for c in result.page.controls if c.locator]
+    # Badge only the fields the page itself marks rejected or empty, not every
+    # addressed control on the page: on a 17-field eligibility page the model
+    # was shown the whole page, badges landed on already-filled fields, and the
+    # one actually marked "Required" carried no badge at all. `page_problems`
+    # reads the same invalid flag and error slot `_rejection_text` does, no
+    # model needed to narrow the set.
+    flagged = {p["locator"] for p in page_problems(tab)}
+    candidates = [c for c in result.page.controls if c.locator and c.locator in flagged]
+    if not candidates:
+        # The page named nothing specific -- a page-level message with no
+        # field-level marks at all. Fall back to everything addressed, capped
+        # by `_MAX_BADGES`, which is the situation this trigger was built for.
+        candidates = [c for c in result.page.controls if c.locator]
     if not candidates:
         return False
 

@@ -17,10 +17,18 @@
   document.getElementById(overlayId)?.remove();
   document.querySelectorAll('[data-tb-badge]').forEach((n) => n.removeAttribute('data-tb-badge'));
 
+  // Positioned against the document, not the viewport: a full-page screenshot
+  // stitches the whole scrollable area together, and a `position:fixed`
+  // overlay only ever paints once, at wherever the viewport last scrolled to
+  // -- every badge below the fold rendered at the wrong place in the picture,
+  // or not at all. `absolute` against a full-height overlay tracks the page.
   const overlay = document.createElement('div');
   overlay.id = overlayId;
   overlay.setAttribute('style', [
-    'position:fixed', 'inset:0', 'z-index:2147483647', 'pointer-events:none',
+    'position:absolute', 'top:0', 'left:0',
+    `width:${document.documentElement.scrollWidth}px`,
+    `height:${document.documentElement.scrollHeight}px`,
+    'z-index:2147483647', 'pointer-events:none',
   ].join(';'));
   document.body.appendChild(overlay);
 
@@ -38,7 +46,10 @@
 
     const n = out.length + 1;
     el.setAttribute('data-tb-badge', String(n));
-    const r = el.getBoundingClientRect();
+    const v = el.getBoundingClientRect();
+    // Document-relative, so the badge sits at the element's true position in
+    // a full-page capture regardless of the current scroll offset.
+    const r = { left: v.left + window.scrollX, top: v.top + window.scrollY, width: v.width, height: v.height };
 
     // The outline sits over the element and the number beside it. Both are in
     // the fixed overlay rather than on the element, so no layout is disturbed:

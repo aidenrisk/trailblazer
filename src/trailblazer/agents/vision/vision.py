@@ -113,11 +113,25 @@ def read_page(
         return VisionReading()
 
     try:
+        # Scroll to the first badge-worthy element before measuring anything.
+        # A control below the fold badges at a negative or out-of-viewport
+        # rect -- coordinates the model is handed with nothing in the picture
+        # at them -- and one that scrolled further off between the measurement
+        # and the shot moves the picture out from under its own badges. Full-
+        # page capture is what makes a badge's rect and the image agree at all:
+        # a viewport shot only, with badges built for the whole page, put boxes
+        # on already-filled fields while the one field actually marked
+        # "Required" carried no visible badge.
+        first = page.locator(f'[data-tb-key="{keys[0]}"]').first
+        try:
+            first.scroll_into_view_if_needed(timeout=3_000)
+        except PlaywrightError:
+            pass
         badges = page.evaluate(_BADGE_JS, keys)
         if not badges:
             log.warning("none of the %d elements offered to vision are visible", len(keys))
             return VisionReading()
-        shot = page.screenshot(type="png")
+        shot = page.screenshot(type="png", full_page=True)
     except PlaywrightError as e:
         log.error("vision could not photograph the page: %s", e)
         return VisionReading()
