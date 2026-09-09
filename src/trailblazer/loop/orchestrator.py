@@ -475,6 +475,16 @@ def _walk_page(
 
         decision = frontier.next_assignment()
         if decision is None:
+            if result.page.next and not frontier.reached_end:
+                # Nothing left to assign on a page that still has a way forward
+                # and is not the flow's end: that is a page the crawl cannot
+                # leave, not a finished route. Declared done, it was published
+                # as a route that stopped on page three of six.
+                frontier.mark_stuck(
+                    f"{result.page.stageId} has a forward control and nothing left "
+                    "to assign, and the flow's end was never reached"
+                )
+                _snapshot_stuck(tab, generator, result.page.stageId)
             _record_route_end(generator, frontier, result)
             _record_branch_exploration(generator, frontier)
             return result

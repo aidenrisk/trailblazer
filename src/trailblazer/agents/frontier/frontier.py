@@ -513,7 +513,11 @@ class Frontier:
             return None
         if self.page.next in self.board.advanced:
             return None
-        self.board.advanced.add(self.page.next)
+        # Not recorded as pressed here. `_apply` records it when the report says
+        # the page moved; a refused press stays unrecorded so it is pressed again
+        # once the page's fields are repaired. Recording at assignment time put
+        # a refused Next in `advanced`, and three runs declared page three done
+        # with every field accepted and Next never pressed a second time.
         log.info("advancing stage_id=%s locator=%r", self.board.stage_id, self.page.next)
         return Assignment(intent="advance", locator=self.page.next)
 
