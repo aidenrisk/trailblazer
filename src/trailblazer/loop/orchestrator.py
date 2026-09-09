@@ -500,17 +500,10 @@ def _walk_page(
             continue
 
         assignment = decision
-        if assignment.intent == "advance" and assignment.locator == result.page.next:
-            # Every field attempted is not every field right. Read the page
-            # before moving on; anything wrong is re-filled first.
-            problems = page_problems(tab)
-            if problems and frontier.reopen([p["locator"] for p in problems]):
-                log.info("page not complete before advance: %s", problems)
-                # The last fill's report has already been folded in; folding it
-                # again would mark the reopened field attempted before it is refilled.
-                report = None
-                report_stage = None
-                continue
+        # Whether the page is complete is the page's judgment: Next is pressed
+        # and what it rejects is read afterwards. A guess before the press --
+        # any input whose `value` read empty -- looped eligibility eleven times
+        # on two widgets that keep their value elsewhere than `value`.
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
         if not report.ok and report.blocked and assignment.fieldId:

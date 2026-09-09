@@ -507,49 +507,31 @@ _PAGE_PROBLEMS_JS = """
   const out = [];
   const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const text = (n) => (n && (n.textContent || '').trim()) || '';
-  const groups = new Map();
-  // Same rule as the extractor's markAdditionalRows: row 1+ of a repeated
-  // table is optional, and an empty one is not a problem to fix.
-  const parse = (s) => { const m = /^(.*?)[-_]?(\\d+)$/.exec(s || ''); return m && m[1] ? { prefix: m[1], index: Number(m[2]) } : null; };
-  const all = [...document.querySelectorAll('input, select, textarea')];
-  const rows = new Map(); const seen = new Set();
-  for (const el of all) { const k = parse(el.id) || parse(el.name); if (!k) continue; seen.add(k.prefix + '|' + k.index); if (!rows.has(k.index)) rows.set(k.index, new Set()); rows.get(k.index).add(k.prefix); }
-  const additional = (el) => { const k = parse(el.id) || parse(el.name); return !!(k && k.index > 0 && rows.get(k.index).size >= 2 && seen.has(k.prefix + '|0')); };
   document.querySelectorAll('input, select, textarea').forEach((el) => {
-    if (!vis(el) || el.disabled || additional(el) || el.readOnly && !/listbox|combobox/.test(el.getAttribute('role') || '')) return;
+    if (!vis(el) || el.disabled) return;
     const type = (el.getAttribute('type') || el.tagName).toLowerCase();
     if (type === 'hidden' || type === 'submit' || type === 'button') return;
     const id = el.id ? '#' + CSS.escape(el.id) : (el.name ? `[name="${el.name}"]` : '');
-    if (type === 'radio' || type === 'checkbox') {
-      // A group is one control, identified by its name -- as the extractor keys
-      // it -- not by whichever member happens to come first.
-      const g = el.name || id; const cur = groups.get(g) || {any: false, id: el.name ? `[name="${el.name}"]` : id};
-      cur.any = cur.any || el.checked; groups.set(g, cur); return;
-    }
     let message = '';
     for (const sid of (el.getAttribute('aria-errormessage') || '').split(/\\s+/)) {
       const t = sid && text(document.getElementById(sid)); if (t) { message = t; break; }
     }
     const invalid = (el.getAttribute('aria-invalid') || '').toLowerCase() === 'true';
-    const optional = /optional/i.test(text(el.closest('label')) + ' ' + text(document.querySelector(`label[for="${el.id}"]`)));
     if (invalid || message) out.push({locator: id, problem: message || 'marked invalid'});
-    else if (!String(el.value || '').trim() && !optional) out.push({locator: id, problem: 'empty'});
   });
-  for (const [g, cur] of groups) if (!cur.any) out.push({locator: cur.id, problem: 'no option chosen'});
   return out;
 }
 """
 
 
 def page_problems(page: Page) -> list[dict[str, str]]:
-    """What stops this page from being complete, read straight off the DOM.
+    """Fields the page itself marks rejected, read straight off the DOM.
 
-    No model. Every visible, settable control is checked for an invalid flag,
-    text in its named error slot, or an empty value when nothing marks it
-    optional; a radio or checkbox group counts as one control needing one
-    choice. Run before a forward control is pressed and again when pressing it
-    changed nothing, so an unfilled or rejected field is re-filled rather than
-    the page being declared done.
+    No model, and no guessing: only a control carrying `aria-invalid` or text
+    in its named error slot is reported. Whether an empty field is required is
+    the page's judgment, made when Next is pressed. Run after a forward press
+    that was refused, so a rejected field is re-filled rather than the page
+    being declared done.
     """
     try:
         return page.evaluate(_PAGE_PROBLEMS_JS)

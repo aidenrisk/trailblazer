@@ -491,12 +491,17 @@ class Frontier:
             # one is judged only once every field has been acted on.
             if self.page.blockers or self.board.stuck or self.board.unattempted():
                 return None
-            if not self.page.controls:
+            if not self.page.controls and self.board.stage_id == self._start_stage:
                 return None
             # Every field done, nothing blocking, and no way forward. The crawl
             # stops before a form's submit (`_NEXT_PATTERNS` omits it), so this
             # is the flow's end, and the route that reached it is one complete
             # path from entry to terminal. Gate coverage starts from here.
+            #
+            # A page with no controls at all is a terminal too: Pie's decision
+            # page reads "Declined -- does not meet eligibility standards" and
+            # offers nothing to fill. Requiring controls left that route
+            # unsettled and no branch was ever taken from it.
             #
             # Logged loudly because the same shape is also the failure it used
             # to be reported as: if this fires on a middle page the scraper
