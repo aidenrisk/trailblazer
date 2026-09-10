@@ -39,7 +39,7 @@ from trailblazer.agents.browser.session import AttachedSession, BrowserSession, 
 from trailblazer.agents.form_filler.form_filler import fill_one, page_problems
 from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.login import LoginError, resolve_login
-from trailblazer.agents.scraper.scraper import perceive
+from trailblazer.agents.scraper.scraper import FieldIds, perceive
 from trailblazer.agents.validator import validate
 from trailblazer.agents.vision import caption_for, read_page, resolve
 from trailblazer.agents.vision.vision import set_shot_dir
@@ -206,16 +206,63 @@ def run_crawl(
         with open_session(settings, headed) as session:
             tab = session.goto(url)
             _sign_in(tab, carrier_id, settings, ledger, generator, headed)
+            field_ids = FieldIds()
             result = perceive(
                 tab,
                 PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
                 settings,
                 ledger,
+                field_ids,
             )
             log_contract(log, "ScraperResult", result)
             result = _walk_page(
-                tab, result, frontier, job_id, objective, settings, ledger, generator
+                tab, result, frontier, job_id, objective, settings, ledger, generator,
+                field_ids,
             )
+
+        # The first route that ran to a terminal page. Its answers are one path the
+        # form actually rendered, which the per-field latest across routes is not.
+        # Whether that terminal is a quote or an appetite decline is the Validator's
+        # determination and it runs after this returns; a settled page is as close
+        # as the crawl can get. A crawl that filled nothing has no route to publish.
+        if generator.walks:
+            chosen = generator.first_settled_walk()
+            if chosen is None:
+                chosen = generator.walks[-1]
+                log.warning(
+                    "no route reached a terminal page; publishing walk=%d unsettled", chosen
+                )
+            generator.publish_walk(chosen)
+            if validate_script:
+                _validate(generator, job_id, carrier_id, settings, headed, ledger)
+
+        if frontier.stuck_reason():
+            generator.metadata_doc.stoppedReason = frontier.stuck_reason()
+            generator.flush()
+        state = generator.state()
+        frontier.log_unexplored("before exit")
+        event(
+            "summary", "loop",
+            job=job_id,
+            stage=result.page.stageId,
+            routes=frontier.walk,
+            flow_done=frontier.flow_done(),
+            stopped=frontier.stuck_reason(),
+            out=str(run_dir),
+        )
+        for board in frontier.coverage():
+            gates = board["gates"]
+            event(
+                "summary", "frontier", stage=board["stageId"],
+                controls=board["controls"], attempted=len(board["attempted"]),
+                unattempted=len(board["unattempted"]) or None,
+                gates=len(gates) or None,
+                gates_done=sum(1 for g in gates.values() if not g["remaining"]) or None,
+                gates_owing=sum(1 for g in gates.values() if g["remaining"]) or None,
+                unexplored=len(board["unexplored"]) or None,
+            )
+        log.debug("coverage %s artifacts %s", frontier.coverage(), state.model_dump())
+        return result
     except Exception:
         # An uncaught exception here ends the process, and Python's traceback
         # goes to stderr only -- gone the moment the terminal is, and absent
@@ -226,51 +273,8 @@ def run_crawl(
         # ordinary `scraper look`, giving no hint anything had gone wrong.
         log.exception("run crashed job_id=%s carrier=%s", job_id, carrier_id)
         raise
-
-    # The first route that ran to a terminal page. Its answers are one path the
-    # form actually rendered, which the per-field latest across routes is not.
-    # Whether that terminal is a quote or an appetite decline is the Validator's
-    # determination and it runs after this returns; a settled page is as close
-    # as the crawl can get. A crawl that filled nothing has no route to publish.
-    if generator.walks:
-        chosen = generator.first_settled_walk()
-        if chosen is None:
-            chosen = generator.walks[-1]
-            log.warning(
-                "no route reached a terminal page; publishing walk=%d unsettled", chosen
-            )
-        generator.publish_walk(chosen)
-        if validate_script:
-            _validate(generator, job_id, carrier_id, settings, headed, ledger)
-
-    if frontier.stuck_reason():
-        generator.metadata_doc.stoppedReason = frontier.stuck_reason()
-        generator.flush()
-    state = generator.state()
-    frontier.log_unexplored("before exit")
-    event(
-        "summary", "loop",
-        job=job_id,
-        stage=result.page.stageId,
-        routes=frontier.walk,
-        flow_done=frontier.flow_done(),
-        stopped=frontier.stuck_reason(),
-        out=str(run_dir),
-    )
-    for board in frontier.coverage():
-        gates = board["gates"]
-        event(
-            "summary", "frontier", stage=board["stageId"],
-            controls=board["controls"], attempted=len(board["attempted"]),
-            unattempted=len(board["unattempted"]) or None,
-            gates=len(gates) or None,
-            gates_done=sum(1 for g in gates.values() if not g["remaining"]) or None,
-            gates_owing=sum(1 for g in gates.values() if g["remaining"]) or None,
-            unexplored=len(board["unexplored"]) or None,
-        )
-    log.debug("coverage %s artifacts %s", frontier.coverage(), state.model_dump())
-    ledger.log_summary()
-    return result
+    finally:
+        ledger.log_summary()
 
 
 def _run_dir(
@@ -462,12 +466,15 @@ def _walk_page(
     settings: Settings,
     ledger: RunLedger | None = None,
     generator: Generator | None = None,
+    field_ids: FieldIds | None = None,
 ) -> ScraperResult:
     """Drive perceive -> observe -> assign -> fill -> generate -> perceive until done.
 
     Returns the last `ScraperResult`, which is what the crawl endpoint answers
     with until the Generator exists to produce the three artifacts.
     """
+    field_ids = field_ids if field_ids is not None else FieldIds()
+    field_ids.absorb(result.page)
     entry_url = result.page.url
     prefix: list[tuple[str, Assignment]] = []
     overlays = OverlayTable()
@@ -519,7 +526,8 @@ def _walk_page(
         # Next, Frontier found no forward control, and a completed page was
         # thrown away for a full route restart.
         result = _clear_overlays(
-            tab, result, overlays, job_id, objective, settings, ledger, generator
+            tab, result, overlays, job_id, objective, settings, ledger, generator,
+            field_ids,
         )
 
         frontier.observe(result.page, report, result.addedControls, report_stage)
@@ -546,7 +554,7 @@ def _walk_page(
             _record_route_end(generator, frontier, result)
             result, prefix, report = _restart_walk(
                 tab, result, decision, prefix, entry_url, frontier,
-                job_id, objective, settings, ledger, generator, pages,
+                job_id, objective, settings, ledger, generator, pages, field_ids,
             )
             continue
 
@@ -558,7 +566,7 @@ def _walk_page(
             # words, which is the only way this field is ever fillable. It runs
             # here rather than off a refusal because a fill that cannot be
             # attempted never produces one.
-            if _see_field(tab, result, frontier, assignment.fieldId, None, seen, job_id, settings):
+            if _see_field(tab, result, frontier, assignment.fieldId, None, seen, job_id, settings, ledger):
                 report = None
                 report_stage = None
                 continue
@@ -581,7 +589,7 @@ def _walk_page(
             # left for the forward press to discover. One look per field; if
             # what the page shows does not get it accepted either, the page is
             # declared stuck naming the field.
-            if _see_field(tab, result, frontier, assignment.fieldId, report, seen, job_id, settings):
+            if _see_field(tab, result, frontier, assignment.fieldId, report, seen, job_id, settings, ledger):
                 report = None
                 report_stage = None
                 continue
@@ -600,7 +608,9 @@ def _walk_page(
             _generate(generator, job_id, result.page, report, frontier.walk, ledger)
         before_stage = result.page.stageId
         report_stage = before_stage
-        result = _perceive_after(tab, result, assignment, job_id, objective, settings, ledger)
+        result = _perceive_after(
+            tab, result, assignment, job_id, objective, settings, ledger, field_ids
+        )
 
         if (
             assignment.intent == "advance"
@@ -709,6 +719,7 @@ def _perceive_after(
     objective: str,
     settings: Settings,
     ledger: RunLedger | None,
+    field_ids: FieldIds,
 ) -> ScraperResult:
     """Look at the page again, telling the scraper what was just done to it."""
     result = perceive(
@@ -724,6 +735,7 @@ def _perceive_after(
         ),
         settings,
         ledger,
+        field_ids,
     )
     log_contract(log, "ScraperResult", result)
     return result
@@ -742,6 +754,7 @@ def _restart_walk(
     ledger: RunLedger | None,
     generator: Generator | None,
     pages: dict[str, PageDescription],
+    field_ids: FieldIds,
 ) -> tuple[ScraperResult, list[tuple[str, Assignment]], FillReport | None]:
     """Re-enter the flow, re-execute the route up to the gate, take its owed side.
 
@@ -789,6 +802,7 @@ def _restart_walk(
         ),
         settings,
         ledger,
+        field_ids,
     )
     log_contract(log, "ScraperResult", result)
     # The re-entered page is what the re-execution starts from; its board is
@@ -836,6 +850,7 @@ def _restart_walk(
         ),
         settings,
         ledger,
+        field_ids,
     )
     log_contract(log, "ScraperResult", result)
     frontier.observe(result.page, None, result.addedControls)
@@ -843,8 +858,8 @@ def _restart_walk(
     _note_divergence(frontier, result, restart.stageId, walk)
 
     if result.page.stageId != restart.stageId:
-        # The replay did not arrive where the gate is, so setting it would act
-        # on whatever control happens to carry that fieldId on this page.
+        # The replay did not arrive where the gate is. The gate's fieldId is
+        # unique on the crawl, but it is not on this page to set.
         frontier.abandon_gate(
             restart.fieldId,
             f"replay reached {result.page.stageId} not {restart.stageId} on walk {walk}",
@@ -871,7 +886,9 @@ def _restart_walk(
     replayed.append((result.page.stageId, owed))
 
     _generate(generator, job_id, result.page, report, walk, ledger)
-    result = _perceive_after(tab, result, owed, job_id, objective, settings, ledger)
+    result = _perceive_after(
+        tab, result, owed, job_id, objective, settings, ledger, field_ids
+    )
     pages[result.page.stageId] = result.page
     return result, replayed, report
 
@@ -912,9 +929,8 @@ def _prefix_before(
     -- the owed side renders a different set of fields, and possibly a different
     set of later pages, which Frontier assigns once it sees them.
 
-    The gate is matched on its stage as well as its fieldId, because `fieldId`
-    is a per-page counter: `q_001` names a different control on every page, and
-    matching on it alone would cut the prefix at the first page.
+    The gate is matched on its stage as well as its fieldId: the prefix is a
+    route of (stage, assignment) pairs, and the cut belongs to the gate's page.
     """
     cut = next(
         (
@@ -936,6 +952,7 @@ def _clear_overlays(
     settings: Settings,
     ledger: RunLedger | None,
     generator: Generator | None,
+    field_ids: FieldIds,
 ) -> ScraperResult:
     """Press the dismisser the scraper named for each notice, then re-describe.
 
@@ -984,6 +1001,7 @@ def _clear_overlays(
         PerceiveRequest(job_id=job_id, page_index=1, objective=objective, prior=result.page),
         settings,
         ledger,
+        field_ids,
     )
 
 
@@ -1016,6 +1034,7 @@ def _see_field(
     seen: dict[str, int],
     job_id: str,
     settings: Settings,
+    ledger: RunLedger | None,
 ) -> bool:
     """Look at one field: prove an address for it, or hand over its words.
 
@@ -1062,7 +1081,7 @@ def _see_field(
             "it requires: its caption, any instruction or format beside it, and the error it "
             "shows for it right now?"
         )
-    reading, _ = read_page(tab, [control], question, settings, job_id)
+    reading, _ = read_page(tab, [control], question, settings, job_id, ledger)
     # An address proven against the badged element is the stronger answer, and
     # for a control with no address it is the only useful one: a hint would be
     # re-issued against the same empty locator and refused the same way.

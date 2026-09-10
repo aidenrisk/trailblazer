@@ -17,6 +17,7 @@ from pathlib import Path
 
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.events import event
+from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger
 from trailblazer.shared.config import Settings
 from trailblazer.shared.models import _ATTEMPTS, TransientModelError, get_model, invoke_with_retry
@@ -42,20 +43,21 @@ def choose_value(
     step: str = "",
     options: list[str] | None = None,
     shown_because: str | None = None,
+    ledger: RunLedger | None = None,
 ) -> tuple[str, float, bool]:
     """Decide what to type into one field.
 
     Returns the value, the USD the call cost, and whether it could not be
-    priced. The cost is returned rather than logged and forgotten because the
-    caller records it on the run ledger, and a step that does not report its
-    spend is invisible in the per-agent accounting.
+    priced. Each completed call is posted to `ledger` as it lands, so a
+    crash after the provider billed still has the spend. The return value
+    is for the fill event, not a second ledger write.
 
     `error_text` is the page's complaint about the previous attempt. When it is
     given the model is correcting a rejected value, not choosing a first one.
     """
     started = time.monotonic()
     model = get_model(settings)
-    tracker = CostTracker(step="choose_value")
+    tracker = CostTracker(step="choose_value", ledger=ledger)
 
     # Today's date is sent because the model has no clock: without it a policy
     # effective date came back in the past, which every carrier rejects. The

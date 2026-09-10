@@ -15,16 +15,17 @@ Two things it owns that nothing else can:
   so it reads it, corrects, refills and reports the constraint. Routing this to
   Frontier would cost a full scrape-assign cycle to learn something already on
   screen.
-- **`expand`.** Opening a `<div role="combobox">` mounts its whole listbox at
-  once, which is the only way to enumerate a set whose options are not in the
-  DOM. The widget is closed again without a selection, and the page's URL and
-  every form value are compared before and after: an open that navigated, or
-  that answered a field nobody answered, was not a disclosure, and the report
-  says so rather than pretending.
+- **`expand`.** Opening a combobox mounts its listbox. Options are read from
+  the accessibility tree (`option` / `menuitem`), not from tag names: a span
+  that the AX tree exposes as an option is collected, a nav `<li>` is not.
+  The widget is closed without a selection. URL and every form value are
+  compared before and after; an open that navigated or answered a field was
+  not a disclosure.
 """
 
 import json
 import logging
+import re
 import time
 
 from playwright.sync_api import Error as PlaywrightError
@@ -65,44 +66,23 @@ makes dozens of existing elements newly visible, and a visibility diff read
 those as options once.
 """
 
-_APPEARED_OPTIONS_JS = """
+_NATIVE_SELECT_OPTIONS_JS = """
 (el) => {
-  const doc = el.ownerDocument;
-  // innerText, not textContent: an option laid out as two lines -- a name
-  // over a code -- has its lines glued by textContent and separated by the
-  // accessibility engine, so a name built from textContent addresses nothing
-  // and a label recorded from it is one no client answer could ever equal.
   const text = (n) => ((n.innerText ?? n.textContent) || '').trim().replace(/\\s+/g, ' ');
-  const isNew = (n) => !n.__tbSeen;
-  const vis = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const out = [];
   const seen = new Set();
-  const add = (n) => {
-    const t = text(n);
-    if (!t || seen.has(t)) return;
-    seen.add(t);
-    out.push({ label: t, id: n.id || '', testid: n.getAttribute('data-testid') || '',
-               role: n.getAttribute('role') || '' });
-  };
-  // A native select never mounts anything: its <option> children are the set.
-  if (el.tagName.toLowerCase() === 'select') {
-    for (const o of el.options) { const t = text(o); if (t && !seen.has(t)) { seen.add(t); out.push({ label: t, id: '', testid: '', role: 'option', native: true }); } }
-    return out;
+  for (const o of el.options) {
+    const t = text(o);
+    if (t && !seen.has(t)) { seen.add(t); out.push({ label: t, native: true }); }
   }
-  // A root the control names is authoritative wherever the page put it.
-  for (const id of (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '').split(/\\s+/)) {
-    const root = id && doc.getElementById(id);
-    if (root) root.querySelectorAll('[role="option"], [role="menuitem"], option').forEach(add);
-  }
-  if (out.length) return out;
-  // Otherwise: exactly the option-shaped elements that did not exist before
-  // the open and are visible now. Never a page-wide search -- that returned
-  // the portal's nav as a field's options.
-  doc.querySelectorAll('[role="option"], [role="menuitem"]').forEach((n) => { if (isNew(n) && vis(n)) add(n); });
-  if (!out.length) doc.querySelectorAll('li').forEach((n) => { if (isNew(n) && vis(n)) add(n); });
   return out;
 }
 """
+
+_ARIA_CHOICE = re.compile(
+    r'- (option|menuitem) "((?:\\.|[^"\\])*)"',
+)
+"""A choice line in Playwright's aria snapshot YAML."""
 
 
 _FORM_STATE_JS = """
@@ -160,12 +140,11 @@ def fill_one(
     settings = settings or get_settings()
     started = time.monotonic()
     usd = 0.0
-    unpriced = False
     try:
         if assignment.intent == "fill":
-            report, usd, unpriced = _do_fill(page, assignment, settings)
+            report, usd, _unpriced = _do_fill(page, assignment, settings, ledger)
         elif assignment.intent == "select":
-            report, usd, unpriced = _do_select(page, assignment, settings)
+            report, usd, _unpriced = _do_select(page, assignment, settings, ledger)
         elif assignment.intent == "check":
             report = _do_check(page, assignment)
         elif assignment.intent == "expand":
@@ -188,10 +167,10 @@ def fill_one(
             agent="form_filler",
             action=assignment.intent,
             detail=assignment.fieldId or assignment.locator,
-            usd=usd,
+            usd=0.0,
             ms=ms,
             ok=report.ok,
-            unpriced=unpriced,
+            unpriced=False,
         )
     event(
         "fill", "filler",
@@ -267,12 +246,12 @@ def _resolve_credential(placeholder: str, settings: Settings) -> str:
 
 
 def _do_fill(
-    page: Page, assignment: Assignment, settings: Settings
+    page: Page, assignment: Assignment, settings: Settings, ledger: RunLedger | None = None
 ) -> tuple[FillReport, float, bool]:
     """Type a value, and correct it if the page rejects it.
 
-    Returns the report alongside the LLM spend, which the caller records on the
-    ledger -- the cost belongs to this step and nothing else can see it.
+    Returns the report alongside the LLM spend for the fill event. Call
+    cost is posted to `ledger` from the chooser as each model reply lands.
     """
     if assignment.value in _CREDENTIAL_PLACEHOLDERS:
         placeholder = assignment.value
@@ -308,9 +287,10 @@ def _do_fill(
             settings=settings,
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
-            control_type=_type_of(page, assignment.locator),
+            control_type=assignment.tag or _type_of(page, assignment.locator),
             help_text=assignment.helpText,
             shown_because=assignment.shownBecause,
+            ledger=ledger,
         )
 
     if assignment.typeahead:
@@ -335,9 +315,10 @@ def _do_fill(
             settings=settings,
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
-            control_type=_type_of(page, assignment.locator),
+            control_type=assignment.tag or _type_of(page, assignment.locator),
             help_text=assignment.helpText,
             shown_because=assignment.shownBecause,
+            ledger=ledger,
         )
         usd += call_usd
         unpriced = unpriced or call_unpriced
@@ -664,7 +645,10 @@ def _shape_of(value: str) -> str:
 
 
 def _do_select(
-    page: Page, assignment: Assignment, settings: Settings | None = None
+    page: Page,
+    assignment: Assignment,
+    settings: Settings | None = None,
+    ledger: RunLedger | None = None,
 ) -> tuple[FillReport, float, bool]:
     """Set a choice: click the option's own locator, or set the parent by label.
 
@@ -692,10 +676,11 @@ def _do_select(
             settings=settings,
             business_type=settings.crawl_business_type,
             state=settings.crawl_state,
-            control_type=_type_of(page, assignment.locator),
+            control_type=assignment.tag or _type_of(page, assignment.locator),
             help_text=assignment.helpText,
             shown_because=assignment.shownBecause,
             options=labels,
+            ledger=ledger,
         )
         if chosen not in labels:
             return _blocked(
@@ -813,10 +798,11 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
             "relationship, and is not a native select",
         )
 
-    page.evaluate(_MARK_JS)
     _open_widget(page, assignment.locator)
+    expanded = False
     try:
         options = _read_appeared_options(page, assignment.locator)
+        expanded = (element.get_attribute("aria-expanded") or "").lower() == "true"
     finally:
         _close(page, assignment.locator)
 
@@ -836,6 +822,11 @@ def _do_expand(page: Page, assignment: Assignment) -> FillReport:
         )
 
     if not options:
+        if expanded:
+            return _blocked(
+                assignment,
+                "combobox is expanded but the accessibility tree has no option or menuitem",
+            )
         event("fill", "filler", logging.WARNING, field=assignment.fieldId,
               locator=assignment.locator, via="expand", options=0)
     return _report(assignment, ok=True, optionsRevealed=options)
@@ -921,21 +912,70 @@ _OPEN_SETTLE_MS = 500
 
 
 def _read_appeared_options(page: Page, locator: str) -> list[dict[str, str | None]]:
-    """The options the widget mounted, each with the locator that addresses it.
+    """The options the open widget exposes in the accessibility tree.
 
-    Called with the widget open and the pre-open element set already stamped by
-    `_MARK_JS`. What is returned is what appeared, or what the control's own
-    `aria-controls` root holds; nothing else on the page qualifies.
+    Native `<select>` is read from its `<option>` nodes. Everything else is
+    `option` / `menuitem` in the AX tree: first the control's own aria snapshot
+    (owned listbox included), then any visible choice role on the page. A nav
+    `<li>` has neither role and is not collected.
     """
     element = write_tools.resolve(page, locator)
     try:
-        items = element.evaluate(_APPEARED_OPTIONS_JS)
+        if element.evaluate("el => el.tagName.toLowerCase()") == "select":
+            items = element.evaluate(_NATIVE_SELECT_OPTIONS_JS)
+            return [{"label": it["label"], "locator": None} for it in items if it.get("label")]
     except PlaywrightError as e:
         raise LocatorError(f"could not read the options at {locator!r}: {e}") from e
+
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, role in _aria_choices(page, locator):
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        found.append((label, role))
     return [
-        {"label": it["label"], "locator": _option_locator(page, it)}
-        for it in items if it.get("label")
+        {"label": label, "locator": _option_locator(page, {"label": label, "role": role})}
+        for label, role in found
     ]
+
+
+def _aria_choices(page: Page, locator: str) -> list[tuple[str, str]]:
+    """`(label, role)` for each option/menuitem the open widget put in the tree."""
+    try:
+        owned = _parse_aria_choices(page.locator(locator).aria_snapshot())
+        if owned:
+            return owned
+    except PlaywrightError as e:
+        log.warning("aria snapshot of %r failed: %s", locator, e)
+    out: list[tuple[str, str]] = []
+    for role in ("option", "menuitem"):
+        loc = page.get_by_role(role)
+        try:
+            count = loc.count()
+        except PlaywrightError:
+            continue
+        for i in range(count):
+            node = loc.nth(i)
+            try:
+                if not node.is_visible():
+                    continue
+                label = " ".join((node.inner_text() or "").split())
+            except PlaywrightError:
+                continue
+            if label:
+                out.append((label, role))
+    return out
+
+
+def _parse_aria_choices(snapshot: str) -> list[tuple[str, str]]:
+    """Option and menuitem names from a Playwright aria-snapshot YAML string."""
+    out: list[tuple[str, str]] = []
+    for role, raw in _ARIA_CHOICE.findall(snapshot):
+        label = raw.replace('\\"', '"')
+        if label:
+            out.append((label, role))
+    return out
 
 
 def _close(page: Page, locator: str) -> None:

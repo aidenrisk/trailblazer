@@ -27,6 +27,7 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
+from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -41,6 +42,13 @@ _ANTHROPIC_PRICES: dict[str, tuple[float, float]] = {
 
 _CACHE_READ_MULTIPLIER = 0.1
 _CACHE_WRITE_MULTIPLIER = 1.25
+
+# CostTracker.step is the call site; the ledger groups spend by agent.
+_LEDGER_AGENT = {
+    "perceive": "scraper",
+    "choose_value": "form_filler",
+    "vision": "vision",
+}
 
 
 def _anthropic_usd(model: str, usage: dict[str, Any]) -> float | None:
@@ -72,11 +80,17 @@ class CostTracker(BaseCallbackHandler):
     Passed as `config={"callbacks": [tracker]}` to `agent.invoke()`, so it sees
     every call the agent loop makes -- including the extra structured-output
     call at the end.
+
+    Each completed call is posted to `ledger` immediately. A later exception
+    cannot drop spend that has already been billed.
     """
 
-    def __init__(self, step: str, job_id: str | None = None) -> None:
+    def __init__(
+        self, step: str, job_id: str | None = None, ledger: RunLedger | None = None
+    ) -> None:
         self.step = step
-        self.job_id = job_id
+        self.ledger = ledger
+        self.job_id = job_id or (ledger.job_id if ledger is not None else None)
         self.calls: list[dict[str, Any]] = []
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
@@ -106,6 +120,14 @@ class CostTracker(BaseCallbackHandler):
             row["output_tokens"],
             "unknown" if usd is None else f"{usd:.6f}",
         )
+        if self.ledger is not None:
+            self.ledger.record(
+                agent=_LEDGER_AGENT.get(self.step, self.step),
+                action=self.step,
+                detail=model,
+                usd=0.0 if usd is None else float(usd),
+                unpriced=usd is None,
+            )
 
     def total_usd(self) -> float | None:
         """Sum of the priced calls, or None when any call could not be priced."""

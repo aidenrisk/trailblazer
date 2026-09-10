@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from trailblazer.observability.cost import CostTracker
+from trailblazer.observability.ledger import RunLedger
 
 
 def _result(message: AIMessage) -> LLMResult:
@@ -71,7 +72,8 @@ def test_anthropic_cost_prices_cache_buckets_separately() -> None:
 
 def test_unpriced_anthropic_model_reports_unknown_not_a_guess(caplog) -> None:
     """A model missing from the table is reported as unknown, never estimated."""
-    tracker = CostTracker(step="perceive")
+    ledger = RunLedger(job_id="j1")
+    tracker = CostTracker(step="vision", ledger=ledger)
     with caplog.at_level("WARNING", logger="trailblazer"):
         tracker.on_llm_end(
             _result(
@@ -86,11 +88,15 @@ def test_unpriced_anthropic_model_reports_unknown_not_a_guess(caplog) -> None:
     assert tracker.calls[0]["usd"] is None
     assert tracker.total_usd() is None
     assert "no price for model" in caplog.text
+    assert ledger.steps[0].unpriced is True
+    assert ledger.steps[0].usd == 0.0
+    assert ledger.steps[0].agent == "vision"
 
 
 def test_every_call_in_the_loop_is_recorded_and_totalled() -> None:
     """The tool loop plus the structured-output call are separate rows."""
-    tracker = CostTracker(step="perceive")
+    ledger = RunLedger(job_id="j1")
+    tracker = CostTracker(step="perceive", job_id="j1", ledger=ledger)
     for cost in (0.001, 0.002, 0.0005):
         tracker.on_llm_end(
             _result(
@@ -104,6 +110,9 @@ def test_every_call_in_the_loop_is_recorded_and_totalled() -> None:
 
     assert len(tracker.calls) == 3
     assert tracker.total_usd() == 0.0035
+    assert [s.usd for s in ledger.steps] == [0.001, 0.002, 0.0005]
+    assert ledger.total_usd() == 0.0035
+    assert all(s.agent == "scraper" and s.action == "perceive" for s in ledger.steps)
 
 
 def test_missing_usage_metadata_does_not_raise() -> None:

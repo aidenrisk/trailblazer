@@ -31,6 +31,7 @@ from trailblazer.contracts.page_description import Control
 from trailblazer.contracts.vision import Anchor, VisionReading
 from trailblazer.observability.cost import CostTracker
 from trailblazer.observability.events import event
+from trailblazer.observability.ledger import RunLedger
 from trailblazer.observability.logging import get_logger, log_contract
 from trailblazer.shared.config import Settings, get_settings
 from trailblazer.shared.models import get_vision_model, invoke_with_retry
@@ -103,6 +104,7 @@ def read_page(
     question: str,
     settings: Settings | None = None,
     job_id: str | None = None,
+    ledger: RunLedger | None = None,
 ) -> tuple[VisionReading, dict[int, str]]:
     """Badge `controls`, photograph the viewport once, and ask what is written near each.
 
@@ -137,8 +139,8 @@ def read_page(
         first = page.locator(f'[data-tb-key="{keys[0]}"]').first
         try:
             first.scroll_into_view_if_needed(timeout=3_000)
-        except PlaywrightError:
-            pass
+        except PlaywrightError as e:
+            log.warning("could not scroll %s into view: %s", keys[0], e)
         badges = page.evaluate(_BADGE_JS, keys)
         if not badges:
             log.warning("none of the %d elements offered to vision are on screen", len(keys))
@@ -167,7 +169,7 @@ def read_page(
             tag=badge["tag"], at=f'{badge["rect"]["x"]},{badge["rect"]["y"]}',
             size=f'{badge["rect"]["w"]}x{badge["rect"]["h"]}',
         )
-    reading = _ask(shot, badges, question, settings, job_id)
+    reading = _ask(shot, badges, question, settings, job_id, ledger)
     log_contract(log, "VisionReading", reading)
     for anchor in reading.anchors:
         event(
@@ -384,16 +386,19 @@ def _candidates(anchor: Anchor, control: Control) -> list[str]:
     """Locators expressing "the control of this kind nearest these words".
 
     The text is the model's, quoted into the selector; the structure around it
-    is ours. The label's cell is found by its exact text and the search runs
-    forward to the nearest control *of this control's kind*. Kind is what
-    separates two controls sharing a row: Pie's "2025-26" carries both a
-    checkbox and a `role="listbox"` dropdown, and each finds its own.
+    is ours. The HTML tag is `Control.tag` from the extractor, copied onto the
+    assignment: `Control.type` is the model's enum and collapses `<textarea>`
+    into `text`, so a selector built from the type names the wrong element.
+    Kind still separates two controls sharing a row: Pie's "2025-26" carries
+    both a checkbox and a `role="listbox"` dropdown, and each finds its own.
 
     The heading is not part of any address. It reached the right element for
     the wrong reason on a fixture -- position, not identity -- and a re-ordered
     row would send the replay script to a different answer.
     """
-    tag = "select" if control.type == "select" and control.options else "input"
+    tag = control.tag
+    if not tag:
+        return []
     kind = _kind(control)
     out: list[str] = []
 
@@ -462,6 +467,7 @@ def _ask(
     question: str,
     settings: Settings,
     job_id: str | None,
+    ledger: RunLedger | None = None,
 ) -> VisionReading:
     """One model call: the screenshot, the badge table, and what the caller needs."""
     table = "\n".join(
@@ -471,7 +477,7 @@ def _ask(
         for b in badges
     )
     model = get_vision_model(settings).with_structured_output(VisionReading)
-    tracker = CostTracker(step="vision", job_id=job_id)
+    tracker = CostTracker(step="vision", job_id=job_id, ledger=ledger)
     message = {
         "role": "user",
         "content": [

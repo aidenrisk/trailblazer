@@ -460,8 +460,10 @@ def test_every_step_is_recorded_on_the_ledger(page, monkeypatch) -> None:
     assert [s.action for s in ledger.steps] == ["fill", "expand", "advance"]
     assert [s.ok for s in ledger.steps] == [True, True, False]
     assert all(s.agent == "form_filler" for s in ledger.steps)
-    # The LLM cost of the fill is on the fill step and nowhere else.
-    assert ledger.steps[0].usd == pytest.approx(0.0012)
+    # The LLM spend is posted from CostTracker as each call completes, not
+    # on this work step, so a patched chooser and a live call agree: fill
+    # itself is free.
+    assert ledger.steps[0].usd == 0.0
     assert ledger.steps[1].usd == 0.0
     assert ledger.by_agent()["form_filler"]["failed"] == 1
 

@@ -1,7 +1,8 @@
 """Per-agent step and cost accounting for one crawl.
 
-`CostTracker` prices one agent's LLM calls. This aggregates across every agent
-in a run: what each did, how many steps it took, what it spent, and the total.
+`CostTracker` posts one ledger row per completed LLM call. Agent work steps
+(a look, a fill, an assign) are recorded separately at zero USD so spend is
+not counted twice. `total_usd` is the sum of every row.
 
 A crawl walks a form page by page and every wrong turn costs a model call, so
 "which agent is burning the budget" is the first question asked of a run that
@@ -24,14 +25,15 @@ class Step:
 
     agent: str
     action: str
-    """What was done: `perceive`, `assign`, `fill`, `append`, `validate`."""
+    """What was done: a work action (`fill`, `assign`, `append`) or an LLM
+    call site (`perceive`, `choose_value`, `vision`)."""
 
     detail: str = ""
     """The target, when there is one: a fieldId, a stageId, an outcome."""
 
     usd: float = 0.0
-    """Cost of this step's LLM calls. Zero for a step that makes none --
-    Frontier and the Generator are deterministic."""
+    """USD for an LLM-call row. Zero on work steps: those make no call of
+    their own, and Frontier and the Generator are deterministic."""
 
     unpriced: bool = False
     """A call was made but could not be priced: an Anthropic model missing from

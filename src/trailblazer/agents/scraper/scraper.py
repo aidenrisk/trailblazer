@@ -6,10 +6,12 @@ assigned in Python afterwards, because models get counters wrong and a fixed
 rule applies more reliably in code than in a prompt.
 """
 
+import json
 import logging
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -93,6 +95,72 @@ def _identities(controls: list[Control]) -> list[tuple[str, str, int]]:
     return out
 
 
+@dataclass
+class FieldIds:
+    """Crawl-wide field identity. An issued id is never reused or rewritten.
+
+    Lookup is per stage: the same locator on two pages is two controls. Bindings
+    survive unmount, so a field that disappears on a gate flip and comes back
+    after backtracking keeps the id it was first given.
+    """
+
+    next_n: int = 1
+    issued: set[str] = field(default_factory=set)
+    by_locator: dict[tuple[str, str], str] = field(default_factory=dict)
+    by_identity: dict[tuple[str, str, str, int], str] = field(default_factory=dict)
+    unaddressed_by_key: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def mint(self) -> str:
+        """Next unused `q_00N` for the crawl."""
+        field_id = f"q_{self.next_n:03d}"
+        self.next_n += 1
+        self.issued.add(field_id)
+        return field_id
+
+    def absorb(self, page: PageDescription) -> None:
+        """Learn ids this page already carries, without moving existing bindings.
+
+        Used to seed from a `prior` the index has not seen. A field already in
+        `issued` is left alone: a stale look must not pull its locator back.
+        """
+        for identity, control in zip(_identities(page.controls), page.controls):
+            if not control.fieldId:
+                continue
+            self._raise_next(control.fieldId)
+            if control.fieldId in self.issued:
+                continue
+            self.issued.add(control.fieldId)
+            self._bind(page.stageId, identity, control)
+
+    def remember(self, page: PageDescription) -> None:
+        """Write this look's bindings. Controls not on the page keep theirs."""
+        for identity, control in zip(_identities(page.controls), page.controls):
+            if not control.fieldId:
+                continue
+            self.issued.add(control.fieldId)
+            self._unbind(control.fieldId)
+            self._bind(page.stageId, identity, control)
+            self._raise_next(control.fieldId)
+
+    def _raise_next(self, field_id: str) -> None:
+        """Keep `next_n` past every id that has been seen, including absorbed ones."""
+        self.next_n = max(self.next_n, int(field_id[2:]) + 1)
+
+    def _unbind(self, field_id: str) -> None:
+        """Drop lookup keys for `field_id` so a later bind cannot leave two owners."""
+        for table in (self.by_locator, self.by_identity, self.unaddressed_by_key):
+            for key in [k for k, v in table.items() if v == field_id]:
+                del table[key]
+
+    def _bind(self, stage_id: str, identity: tuple[str, str, int], control: Control) -> None:
+        """Index `control` under the joins `assign_field_ids` will consult."""
+        if control.locator and control.unique:
+            self.by_locator[(stage_id, control.locator)] = control.fieldId
+        else:
+            self.unaddressed_by_key[(stage_id, control.key)] = control.fieldId
+        self.by_identity[(stage_id, *identity)] = control.fieldId
+
+
 def finalize(
     page: PageDescription,
     page_index: int,
@@ -100,6 +168,7 @@ def finalize(
     title: str,
     actions: list[dict] | None = None,
     prior: PageDescription | None = None,
+    field_ids: FieldIds | None = None,
 ) -> PageDescription:
     """Assign the fields code owns: `stageId`, `fieldId` and `actions`.
 
@@ -112,7 +181,7 @@ def finalize(
     the same reason locators are: a model-authored click target is unverified.
     """
     name_stage(page, page_index, url, title)
-    assign_field_ids(page, prior)
+    assign_field_ids(page, prior, field_ids)
     if actions is not None:
         page.actions = [Action(**a) for a in actions]
     return page
@@ -127,35 +196,30 @@ def name_stage(page: PageDescription, page_index: int, url: str, title: str) -> 
     page.url = url
 
 
-def assign_field_ids(page: PageDescription, prior: PageDescription | None = None) -> None:
-    """Give every control its `fieldId`, carrying an id across looks where it can.
+def assign_field_ids(
+    page: PageDescription,
+    prior: PageDescription | None = None,
+    field_ids: FieldIds | None = None,
+) -> None:
+    """Give every control its `fieldId`. Mint only for a control the crawl has not seen.
 
-    Runs after every measured and proven address is on the controls, because a
-    locator is the only identity here that does not move. A control vision
-    addressed is matched on that locator like any other.
+    An issued id is never given to a different control. Matching is per stage
+    against the crawl-wide table, not only the last look, so a field that
+    unmounted still owns its id when it remounts after a restart.
 
     Three matches, strongest first: a unique locator, then the control's own
-    identity (`_identities`), then -- only where neither look had an address --
+    identity (`_identities`), then -- only where this look has no address --
     the extractor key. The label sits in the middle because for a control the
     markup never named the model writes a fresh one each look, and the key is
     last, and fenced, because it is a document position.
     """
-    by_locator: dict[str, str] = {}
-    by_identity: dict[tuple[str, str, int], str] = {}
-    unaddressed_by_key: dict[str, str] = {}
-    highest = 0
-    if prior is not None and prior.stageId == page.stageId:
-        for identity, c in zip(_identities(prior.controls), prior.controls):
-            if c.locator and c.unique:
-                by_locator[c.locator] = c.fieldId
-            else:
-                unaddressed_by_key[c.key] = c.fieldId
-            by_identity[identity] = c.fieldId
-            highest = max(highest, int(c.fieldId[2:]))
+    index = field_ids if field_ids is not None else FieldIds()
+    if prior is not None:
+        index.absorb(prior)
 
-    next_n = highest + 1
-    issued: dict[str, Control] = {}
+    claimed: dict[str, Control] = {}
     identities = list(zip(_identities(page.controls), page.controls))
+    stage = page.stageId
 
     # Pass 1: locator and `_identities`, the two joins that cannot be fooled by
     # what mounted where. Run to completion before the key fallback is
@@ -165,18 +229,18 @@ def assign_field_ids(page: PageDescription, prior: PageDescription | None = None
     for identity, control in identities:
         carried = None
         if control.locator and control.unique:
-            carried = by_locator.get(control.locator)
+            carried = index.by_locator.get((stage, control.locator))
         if carried is None:
-            carried = by_identity.get(identity)
+            carried = index.by_identity.get((stage, *identity))
         if carried is None:
             unclaimed.append((identity, control))
             continue
-        if carried in issued:
+        if carried in claimed:
             raise RuntimeError(
-                f"fieldId {carried} matched two controls on {page.stageId}: "
-                f"{issued[carried].label!r} and {control.label!r}"
+                f"fieldId {carried} matched two controls on {stage}: "
+                f"{claimed[carried].label!r} and {control.label!r}"
             )
-        issued[carried] = control
+        claimed[carried] = control
         control.fieldId = carried
 
     # Pass 2: the key fallback, only against ids pass 1 left unclaimed. `key` is
@@ -201,14 +265,15 @@ def assign_field_ids(page: PageDescription, prior: PageDescription | None = None
             #
             # It covers the window between a control first appearing and vision
             # proving an address for it, where the model renames it freely.
-            candidate = unaddressed_by_key.get(control.key)
-            if candidate is not None and candidate not in issued:
+            candidate = index.unaddressed_by_key.get((stage, control.key))
+            if candidate is not None and candidate not in claimed:
                 carried = candidate
         if carried is None:
-            carried = f"q_{next_n:03d}"
-            next_n += 1
-        issued[carried] = control
+            carried = index.mint()
+        claimed[carried] = control
         control.fieldId = carried
+
+    index.remember(page)
 
 
 def restore_measured_locators(
@@ -287,6 +352,7 @@ def restore_measured_locators(
             bool(source.get("typeahead")),
             bool(source.get("additionalRow")),
             str(source.get("error") or ""),
+            str(source.get("tag") or ""),
         )
 
     for control in described.controls:
@@ -391,6 +457,7 @@ def _set_measured(
     typeahead: bool = False,
     additional_row: bool = False,
     error: str = "",
+    tag: str = "",
 ) -> None:
     """Assign the measured fields, bypassing nothing the contract checks.
 
@@ -408,6 +475,7 @@ def _set_measured(
         "typeahead": typeahead,
         "additionalRow": additional_row,
         "error": error,
+        "tag": tag,
     }
     Control.model_validate({**fields, **measured})
     control.locator = locator
@@ -418,6 +486,7 @@ def _set_measured(
     control.disabled = disabled
     control.formatHint = format_hint
     control.error = error
+    control.tag = tag
 
 
 def perceive(
@@ -425,6 +494,7 @@ def perceive(
     request: PerceiveRequest,
     settings: Settings | None = None,
     ledger: RunLedger | None = None,
+    field_ids: FieldIds | None = None,
 ) -> ScraperResult:
     """Look at `page`, describe it, and diff against `request.prior`.
 
@@ -443,7 +513,7 @@ def perceive(
     try:
         payload = _run_perceiver(page, settings, request.prior, progress)
         progress["phase"] = "model"
-        described = _describe(page, payload, request, settings)
+        described = _describe(page, payload, request, settings, ledger)
     finally:
         stop.set()
     payload_controls = payload["controls"]
@@ -464,7 +534,7 @@ def perceive(
     # ids that way and published as three separate questions. Before the diff
     # too, so a restored control is not reported as changed.
     vision_restore(page, described)
-    assign_field_ids(described, request.prior)
+    assign_field_ids(described, request.prior, field_ids)
     if payload.get("actions") is not None:
         described.actions = [Action(**a) for a in payload["actions"]]
     # Rejection text the extractor could tie to no field is a page blocker,
@@ -475,6 +545,10 @@ def perceive(
 
     scraper_result = diff_pages(described, request.prior, request.assignment)
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    log.info(
+        "PageDescription %s",
+        json.dumps(described.model_dump(mode="json"), separators=(",", ":")),
+    )
     for control in described.controls:
         # Every question the page asks, as the crawl understood it. What the
         # filler is given to answer with is exactly this, so a wrong answer is
@@ -482,7 +556,8 @@ def perceive(
         # the field was: four "what percentage of labor cost" fields were
         # answered with business names and the log showed only `q_002`.
         event(
-            "look", "scraper", logging.DEBUG if control.locator else logging.WARNING,
+            "look", "scraper",
+            logging.WARNING if (not control.locator or control.error) else logging.DEBUG,
             stage=described.stageId,
             field=control.fieldId,
             label=control.label,
@@ -495,6 +570,8 @@ def perceive(
             tooltip=control.helpText or None,
             error=control.error or None,
         )
+    for text in described.blockers:
+        event("look", "scraper", logging.WARNING, stage=described.stageId, blocker=text)
     event(
         "look", "scraper",
         stage=described.stageId,
@@ -513,9 +590,9 @@ def perceive(
             agent="scraper",
             action="perceive",
             detail=described.stageId,
-            usd=total or 0.0,
+            usd=0.0,
             ms=elapsed_ms,
-            unpriced=total is None,
+            unpriced=False,
         )
     return scraper_result
 
@@ -540,7 +617,11 @@ def _watch_hang(stop: threading.Event, progress: dict[str, str], job_id: str, pa
 
 
 def _describe(
-    page: Page, payload: dict, request: PerceiveRequest, settings: Settings
+    page: Page,
+    payload: dict,
+    request: PerceiveRequest,
+    settings: Settings,
+    ledger: RunLedger | None = None,
 ) -> tuple[PageDescription, float | None]:
     """Ask the model for its judgment on the payload. Returns the description and its cost."""
     text = payload_to_text(payload)
@@ -561,7 +642,7 @@ def _describe(
         response_format=PageDescription,
     )
     objective = request.objective or "Describe this form page."
-    tracker = CostTracker(step="perceive", job_id=request.job_id)
+    tracker = CostTracker(step="perceive", job_id=request.job_id, ledger=ledger)
     result = invoke_with_retry(
         lambda: agent.invoke(
             {"messages": [{"role": "user", "content": f"{objective}\n\nExtractor payload:\n{text}"}]},
