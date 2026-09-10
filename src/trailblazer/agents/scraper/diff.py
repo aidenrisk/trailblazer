@@ -4,15 +4,16 @@ Pure function over two contract objects: no browser, no model, so a settled page
 is *always* recognised as settled. That matters because `-ve` is the condition
 that gates replay generation.
 
-Alignment is by `locator`, not `fieldId`: `fieldId` is a per-page counter and
-does not survive a re-perceive.
+Alignment is by `locator`, not `fieldId`: `fieldId` is itself derived from this
+alignment (`scraper.finalize`), so it is the result, not the primitive.
 """
 
 from trailblazer.contracts.page_description import Control, PageDescription, RevealedBy
 from trailblazer.contracts.scraper_result import ScraperResult
 
 # Properties whose change means the control is meaningfully different. `fieldId`
-# is excluded because it is a counter, and `revealedBy` because the diff sets it.
+# is excluded because it is carried from the prior, and `revealedBy` because the
+# diff sets it.
 _COMPARED = ("label", "type", "required", "options", "unique")
 
 

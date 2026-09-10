@@ -125,9 +125,9 @@ def _infer_unit(label: str, control: Control | None) -> str | None:
 class Generator:
     """Accumulates the three artifacts for one `(carrier, businessType, insuranceType)` flow.
 
-    Owns `questionId` allocation. `Control.fieldId` is a per-page counter reset
-    at every perceive, so it is not cross-page identity and cannot be the join
-    key; the mapping from `(stageId, fieldId)` to a `questionId` is held here.
+    Owns `questionId` allocation. `Control.fieldId` is per stage, so it is not
+    cross-page identity and cannot be the join key; the mapping from
+    `(stageId, fieldId)` to a `questionId` is held here.
     """
 
     def __init__(

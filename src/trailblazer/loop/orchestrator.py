@@ -41,7 +41,7 @@ from trailblazer.agents.frontier import Frontier
 from trailblazer.agents.login import LoginError, resolve_login
 from trailblazer.agents.scraper.scraper import perceive
 from trailblazer.agents.validator import validate
-from trailblazer.agents.vision import read_page, resolve
+from trailblazer.agents.vision import caption_for, read_page, resolve
 from trailblazer.agents.vision.vision import set_shot_dir
 from trailblazer.agents.generator import Generator
 from trailblazer.contracts.assignment import Assignment, FillReport, Restart
@@ -202,19 +202,30 @@ def run_crawl(
         f"insurance for a {', '.join(business_types) or 'general'} business."
     )
 
-    with open_session(settings, headed) as session:
-        tab = session.goto(url)
-        _sign_in(tab, carrier_id, settings, ledger, generator, headed)
-        result = perceive(
-            tab,
-            PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
-            settings,
-            ledger,
-        )
-        log_contract(log, "ScraperResult", result)
-        result = _walk_page(
-            tab, result, frontier, job_id, objective, settings, ledger, generator
-        )
+    try:
+        with open_session(settings, headed) as session:
+            tab = session.goto(url)
+            _sign_in(tab, carrier_id, settings, ledger, generator, headed)
+            result = perceive(
+                tab,
+                PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
+                settings,
+                ledger,
+            )
+            log_contract(log, "ScraperResult", result)
+            result = _walk_page(
+                tab, result, frontier, job_id, objective, settings, ledger, generator
+            )
+    except Exception:
+        # An uncaught exception here ends the process, and Python's traceback
+        # goes to stderr only -- gone the moment the terminal is, and absent
+        # from `crawl.log` entirely, which is what a headed run is watched
+        # through and what is read back afterwards. Logged here, before the
+        # re-raise, so the run's own log carries the reason it stopped: a run
+        # crashed on a duplicate fieldId and crawl.log's last line was an
+        # ordinary `scraper look`, giving no hint anything had gone wrong.
+        log.exception("run crashed job_id=%s carrier=%s", job_id, carrier_id)
+        raise
 
     # The first route that ran to a terminal page. Its answers are one path the
     # form actually rendered, which the per-field latest across routes is not.
@@ -511,13 +522,6 @@ def _walk_page(
             tab, result, overlays, job_id, objective, settings, ledger, generator
         )
 
-        # A control the page renders and code cannot address is settled before
-        # anything is filled: where a caption sits is layout, which differs per
-        # carrier, so the words are read off the rendered page rather than
-        # guessed at from the markup around the input.
-        if any(not c.locator or not c.unique for c in result.page.controls):
-            _see(tab, result, seen, job_id, settings)
-
         frontier.observe(result.page, report, result.addedControls, report_stage)
 
         decision = frontier.next_assignment()
@@ -547,6 +551,24 @@ def _walk_page(
             continue
 
         assignment = decision
+        if assignment.fieldId and not assignment.locator:
+            # The control has no address, so there is nothing for the filler to
+            # act on: Playwright refuses an empty selector. The look reads the
+            # caption off the rendered page and proves an address from those
+            # words, which is the only way this field is ever fillable. It runs
+            # here rather than off a refusal because a fill that cannot be
+            # attempted never produces one.
+            if _see_field(tab, result, frontier, assignment.fieldId, None, seen, job_id, settings):
+                report = None
+                report_stage = None
+                continue
+            # Unaddressable and unread. Marking it attempted would tell the
+            # forward-press gate it was filled; leaving it is what keeps the
+            # page from advancing over a blank required field.
+            frontier.give_up(assignment.fieldId, "no address, and the page's own words proved none")
+            report = None
+            report_stage = None
+            continue
         # Whether the page is complete is the page's judgment: Next is pressed
         # and what it rejects is read afterwards. A guess before the press --
         # any input whose `value` read empty -- looped eligibility eleven times
@@ -554,11 +576,11 @@ def _walk_page(
         report = fill(tab, assignment, settings, ledger)
         log_contract(log, "FillReport", report)
         if not report.ok and report.blocked and assignment.fieldId:
-            # The filler read the label, the tooltip and the markup's format
-            # hints, and corrected twice against the page's own error text.
-            # What remains is what a person would do: look at the field. One
-            # look per field; if the page's words do not get it accepted either,
-            # the field is given up as before.
+            # Every field on the page has to be filled for the replay script to
+            # be exhaustive, so a refusal is repaired at the field rather than
+            # left for the forward press to discover. One look per field; if
+            # what the page shows does not get it accepted either, the page is
+            # declared stuck naming the field.
             if _see_field(tab, result, frontier, assignment.fieldId, report, seen, job_id, settings):
                 report = None
                 report_stage = None
@@ -600,20 +622,10 @@ def _walk_page(
                 for problem in problems:
                     event("reopen", "loop", logging.WARNING, stage=before_stage,
                           locator=problem["locator"], rejected=problem["problem"])
-                if frontier.reopen([p["locator"] for p in problems]):
+                if frontier.reopen([p["key"] for p in problems]):
                     report = None
                     report_stage = None
                     continue
-            # The page showed a message and named no field: nothing is
-            # unaddressed, something is rejected, which is a different question
-            # than `_see` answers. Restored here after being removed when
-            # vision moved to fire on an unaddressed control -- this is the
-            # situation that trigger never covered, and a run stalled on it
-            # with no field to blame and no further attempt.
-            if result.page.blockers and _see_rejection(tab, result, frontier, seen, job_id, settings):
-                report = None
-                report_stage = None
-                continue
             # The page's own words, if it showed any: a blocker string is the
             # only account of *why* Next refused when no field carries an error.
             # A stuck reason built only from the locator and the stage told a
@@ -769,7 +781,12 @@ def _restart_walk(
     tab.goto(entry_url)
     result = perceive(
         tab,
-        PerceiveRequest(job_id=job_id, page_index=1, objective=objective),
+        PerceiveRequest(
+            job_id=job_id, page_index=1, objective=objective,
+            # The entry page as last described: its controls keep their ids, so
+            # the resumed board's record still names them.
+            prior=pages.get(frontier.stage_order[0]) if frontier.stage_order else None,
+        ),
         settings,
         ledger,
     )
@@ -986,76 +1003,8 @@ def _record_route_end(
     )
 
 
-_MAX_LOOKS_PER_STAGE = 2
-"""Screenshots one page may cost. A page whose controls vision could not address
-twice is not going to yield on the third, and the cap keeps a stuck page from
-photographing itself forever."""
 
 
-def _see(
-    tab,
-    result: ScraperResult,
-    seen: dict[str, int],
-    job_id: str,
-    settings: Settings,
-) -> bool:
-    """Look at the page for the addresses code could not measure. True if any was found.
-
-    The last resort, reached only where the deterministic path has nothing left:
-    every control was measured, the page's error slots were read, and the page
-    still refuses to move without naming a field. What is left is what a person
-    would do -- look at it.
-
-    Addresses proven against the badged element are written onto the controls in
-    place, so the caller loops round and Frontier assigns them on its next turn
-    with no further look. Returns False when nothing was proven, which leaves
-    the caller to stop as it would have.
-    """
-    stage = result.page.stageId
-    if seen.get(stage, 0) >= _MAX_LOOKS_PER_STAGE:
-        log.warning("vision already looked at %s %d times; not looking again", stage, seen[stage])
-        return False
-    seen[stage] = seen.get(stage, 0) + 1
-
-    # A radio group's own locator addresses the group, not the answer -- it is
-    # not meant to be clicked, and its non-uniqueness (two radios share a name)
-    # is expected, not a defect. A control whose options each carry their own
-    # locator is settable through them regardless of the group address, so it
-    # is not vision's problem: one run badged "owners" twice on that account,
-    # both attempts failed the identity check, and the real gap sat unlooked.
-    def has_own_options(c):
-        return c.options and all(o.locator for o in c.options)
-
-    unaddressed = [
-        c for c in result.page.controls
-        if (not c.locator or not c.unique) and not has_own_options(c)
-    ]
-    if not unaddressed:
-        log.info("nothing on %s lacks an address; vision has nothing to add", stage)
-        return False
-
-    reading = read_page(
-        tab,
-        unaddressed,
-        "Each badged element is a form field the page never named in its markup. "
-        "What question or caption is printed for each one, exactly as it appears?",
-        settings,
-        job_id,
-    )
-    addresses = resolve(tab, unaddressed, reading, stage)
-    if not addresses:
-        return False
-
-    for control in result.page.controls:
-        located = addresses.get(control.key)
-        if located:
-            control.locator = located
-            control.unique = True
-    log.warning(
-        "vision addressed %d control(s) on %s that code could not: %s",
-        len(addresses), stage, sorted(addresses.values()),
-    )
-    return True
 
 
 def _see_field(
@@ -1063,37 +1012,82 @@ def _see_field(
     result: ScraperResult,
     frontier: Frontier,
     field_id: str,
-    report: FillReport,
+    report: FillReport | None,
     seen: dict[str, int],
     job_id: str,
     settings: Settings,
 ) -> bool:
-    """Look at one refused field and hand the filler what the page says about it.
+    """Look at one field: prove an address for it, or hand over its words.
 
-    Reached only after the filler's own corrections are spent. The model reads
-    the field's caption, any instruction beside it and the error the page is
-    showing, and reports them as words; those words become the field's hint and
-    the field gets one more assignment. Returns False when nothing legible was
-    found or the field has already been looked at, which leaves the caller to
-    record the block as before.
+    Two callers, and `report` is what tells them apart.
+
+    With a report, a fill was refused -- the point every cheaper source is
+    spent, since the filler read the label, the tooltip and the markup's format
+    hints and corrected twice against the page's own error text.
+
+    With `report` as `None`, the control has no address at all, so no fill can
+    be attempted and no refusal will ever arrive. The look has to fire on the
+    absence itself: waiting for a rejection that cannot happen left Pie's lapse
+    checkbox and reason field untouched for the whole walk.
+
+    The field is scrolled into view and badged alone, so there is no number to
+    misread. Two outcomes, in order:
+
+    - the address is what failed (an unaddressable control, or a locator that
+      no longer clicks): the words are turned into a locator and proven against
+      the badged element, and the control is addressed in place;
+    - the address worked and the value was refused: the words become the
+      field's hint and it gets one more assignment.
+
+    One look per field per stage. Returns False when neither outcome was
+    reached, which leaves the caller to record the block.
     """
     key = f"{result.page.stageId}:{field_id}"
     if seen.get(key):
         return False
     seen[key] = 1
     control = next((c for c in result.page.controls if c.fieldId == field_id), None)
-    if control is None or not control.locator:
+    if control is None:
         return False
-    tried = (report.blocked or {}).get("whatYouTried", "")[:200]
-    reading = read_page(
-        tab,
-        [control],
-        f"The badged field rejected every answer tried ({tried}). What does the page say "
-        "it requires: its caption, any instruction or format beside it, and the error it "
-        "shows for it right now?",
-        settings,
-        job_id,
-    )
+    if report is None:
+        question = (
+            "The badged field is one the page never named in its markup, so code cannot "
+            "address it. What question or caption is printed for it, exactly as it appears, "
+            "and what does the page say it requires?"
+        )
+    else:
+        tried = (report.blocked or {}).get("whatYouTried", "")[:200]
+        question = (
+            f"The badged field rejected every answer tried ({tried}). What does the page say "
+            "it requires: its caption, any instruction or format beside it, and the error it "
+            "shows for it right now?"
+        )
+    reading, _ = read_page(tab, [control], question, settings, job_id)
+    # An address proven against the badged element is the stronger answer, and
+    # for a control with no address it is the only useful one: a hint would be
+    # re-issued against the same empty locator and refused the same way.
+    addressed = resolve(tab, [control], reading, result.page.stageId)
+    if addressed.get(control.key):
+        control.locator = addressed[control.key]
+        control.unique = True
+        # The words the address was built from name the field better than a
+        # label the model invented for a control the markup never named, and
+        # unlike that label they are the same on the next look.
+        anchor = next((a for a in reading.anchors if a.badge == 1), None)
+        caption = caption_for(anchor) if anchor else ""
+        if caption:
+            control.label = caption
+        frontier.readdress(field_id, control.locator, caption)
+        return True
+    if not control.locator:
+        # Nothing was proven and there is no address to hand a hint to. The
+        # field stays unfilled, which is what the forward-press gate reads, so
+        # the page is declared stuck naming it rather than advanced over it.
+        log.warning(
+            "vision could not address %s (%r) on %s; it stays unfilled",
+            field_id, control.label, result.page.stageId,
+        )
+        return False
     anchor = next((a for a in reading.anchors if a.badge == 1), None)
     words = "; ".join(p for p in (anchor.purpose, anchor.label, anchor.heading, reading.note) if p) if anchor else reading.note
     if not words.strip():
@@ -1120,69 +1114,6 @@ def _snapshot_stuck(tab, generator: Generator | None, stage_id: str) -> None:
         event("stuck", "loop", logging.ERROR, stage=stage_id, screenshot="failed", detail=str(e))
 
 
-def _see_rejection(
-    tab,
-    result: ScraperResult,
-    frontier: Frontier,
-    seen: dict[str, int],
-    job_id: str,
-    settings: Settings,
-) -> bool:
-    """Ask which of the page's own controls its rejection message is about.
-
-    Reached when Next was refused, the page displays a message, and no field
-    carries an error -- distinct from `_see`, which handles a control with no
-    address at all. Every control on the page is badged (not only the
-    unaddressed ones: the field the message means may already have a working
-    address and simply hold the wrong value), and the model is asked which
-    badges the visible text concerns. Each is reopened with the message as its
-    hint, the same path a blocked fill's correction takes.
-    """
-    stage = result.page.stageId
-    key = f"{stage}:rejection"
-    if seen.get(key, 0) >= _MAX_LOOKS_PER_STAGE:
-        return False
-    seen[key] = seen.get(key, 0) + 1
-
-    message = "; ".join(result.page.blockers)
-    # Badge only the fields the page itself marks rejected or empty, not every
-    # addressed control on the page: on a 17-field eligibility page the model
-    # was shown the whole page, badges landed on already-filled fields, and the
-    # one actually marked "Required" carried no badge at all. `page_problems`
-    # reads the same invalid flag and error slot `_rejection_text` does, no
-    # model needed to narrow the set.
-    flagged = {p["locator"] for p in page_problems(tab)}
-    candidates = [c for c in result.page.controls if c.locator and c.locator in flagged]
-    if not candidates:
-        # The page named nothing specific -- a page-level message with no
-        # field-level marks at all. Fall back to everything addressed, capped
-        # by `_MAX_BADGES`, which is the situation this trigger was built for.
-        candidates = [c for c in result.page.controls if c.locator]
-    if not candidates:
-        return False
-
-    reading = read_page(
-        tab, candidates,
-        f'The page shows this message and will not proceed: "{message}". Which badged '
-        "fields does it concern, and what does the message say about each?",
-        settings, job_id,
-    )
-    if not reading.relevant:
-        return False
-
-    by_badge = {}
-    for i, c in enumerate(candidates, start=1):
-        by_badge[i] = c
-    hinted = False
-    for badge in reading.relevant:
-        control = by_badge.get(badge)
-        if control is None:
-            continue
-        anchor = next((a for a in reading.anchors if a.badge == badge), None)
-        words = "; ".join(p for p in (message, anchor.purpose if anchor else "", anchor.label if anchor else "") if p)
-        frontier.reopen_with_hint(control.fieldId, words)
-        hinted = True
-    return hinted
 
 
 def _record_branch_exploration(generator: Generator | None, frontier: Frontier) -> None:

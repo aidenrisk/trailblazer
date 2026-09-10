@@ -310,6 +310,7 @@ def _do_fill(
             state=settings.crawl_state,
             control_type=_type_of(page, assignment.locator),
             help_text=assignment.helpText,
+            shown_because=assignment.shownBecause,
         )
 
     if assignment.typeahead:
@@ -336,6 +337,7 @@ def _do_fill(
             state=settings.crawl_state,
             control_type=_type_of(page, assignment.locator),
             help_text=assignment.helpText,
+            shown_because=assignment.shownBecause,
         )
         usd += call_usd
         unpriced = unpriced or call_unpriced
@@ -526,7 +528,7 @@ _PAGE_PROBLEMS_JS = """
       const t = sid && text(document.getElementById(sid)); if (t) { message = t; break; }
     }
     const invalid = (el.getAttribute('aria-invalid') || '').toLowerCase() === 'true';
-    if (invalid || message) out.push({locator: id, problem: message || 'marked invalid'});
+    if (invalid || message) out.push({locator: id, key: el.getAttribute('data-tb-key') || '', problem: message || 'marked invalid'});
   });
   return out;
 }
@@ -537,7 +539,9 @@ def page_problems(page: Page) -> list[dict[str, str]]:
     """Fields the page itself marks rejected, read straight off the DOM.
 
     No model, and no guessing: only a control carrying `aria-invalid` or text
-    in its named error slot is reported. Whether an empty field is required is
+    in its named error slot is reported, named by its id-or-name locator and by
+    the extractor's key (`Control.key`), which is how Frontier and the vision
+    pass find the control. Whether an empty field is required is
     the page's judgment, made when Next is pressed. Run after a forward press
     that was refused, so a rejected field is re-filled rather than the page
     being declared done.
@@ -690,6 +694,7 @@ def _do_select(
             state=settings.crawl_state,
             control_type=_type_of(page, assignment.locator),
             help_text=assignment.helpText,
+            shown_because=assignment.shownBecause,
             options=labels,
         )
         if chosen not in labels:
@@ -726,15 +731,23 @@ def _do_select(
 
 
 def _do_check(page: Page, assignment: Assignment) -> FillReport:
-    """Toggle a checkbox and report the state it ended in."""
-    write_tools.click(page, assignment.locator)
+    """Set a checkbox to the side asked for and report the state it ended in.
+
+    Clicked only when the box does not already hold that side: a click on a box
+    the page pre-checked unchecks it, and the side credited is then the opposite
+    of the one assigned. With no side named the box is toggled.
+    """
     try:
         checked = write_tools.resolve(page, assignment.locator).is_checked()
     except PlaywrightError:
-        # A `role="switch"` div is not a checkbox and has no checked state; the
-        # click still happened, so the action is reported without a value rather
-        # than as a failure.
+        # A `role="switch"` div is not a checkbox and has no checked state; it
+        # is clicked, and the action is reported without a value rather than
+        # as a failure.
+        write_tools.click(page, assignment.locator)
         return _report(assignment, ok=True, valueUsed=None)
+    if assignment.value is None or (assignment.value == "true") != checked:
+        write_tools.click(page, assignment.locator)
+        checked = write_tools.resolve(page, assignment.locator).is_checked()
     return _report(assignment, ok=True, valueUsed="true" if checked else "false")
 
 

@@ -51,12 +51,20 @@ retry.
    whether the business does something a carrier declines, answer as the described
    business honestly. A decline is a valid outcome of this crawl.
 
+10. **Agree with the answer that revealed the field.** When you are told the field
+    appeared because an earlier question was answered a certain way, your value must be
+    consistent with that answer. A claims count shown because "has the business had any
+    claims or work-related injuries?" was answered Yes is at least 1, never 0. A lapse
+    reason shown because a lapse was confirmed names a real reason. The page revealed
+    this field *because* of that answer, so a value contradicting it is rejected.
+
 ## Input
 
 You are given the field's label, its control type, the page's URL, today's date, the
 state and business type the crawl is scoped to, what the page states about the format,
-what the field's help tooltip says, and, when a previous attempt was rejected, the error
-text the page showed. The tooltip is often the only place the rule is stated: a
+what the field's help tooltip says, the earlier question and answer that revealed the
+field when one did, and, when a previous attempt was rejected, the error text the page
+showed. The tooltip is often the only place the rule is stated: a
 rejection may say just "Please enter the FEIN" while the tooltip says nine digits.
 
 ## Output

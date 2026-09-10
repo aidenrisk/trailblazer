@@ -68,7 +68,9 @@ class Control(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     fieldId: str
-    """Per-page counter, `q_001`. Reset every perceive; not cross-page identity."""
+    """`q_001`, per stage. Kept across looks at the same stage, matched by
+    locator; a control seen for the first time takes the next unused number.
+    Not cross-page identity."""
 
     key: str = Field(exclude=True)
     """The extractor payload's per-element key (`el_0`), echoed back by the model.

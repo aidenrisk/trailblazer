@@ -100,6 +100,15 @@ class Assignment(BaseModel):
     """The field's tooltip text, from `Control.helpText`. The rule a portal
     states only behind a help icon, available before the first attempt."""
 
+    shownBecause: str | None = None
+    """The earlier question and answer that made this field appear, in words:
+    `'Has the business had any claims?' was answered 'Yes'`. None for a field
+    the page held from its first look.
+
+    The chooser sees one field at a time. This is the piece of the rest of the
+    page its answer has to agree with: a count revealed by a Yes cannot be 0.
+    """
+
 
 class Restart(BaseModel):
     """Frontier's request that Loop return the page to its pre-gate state.

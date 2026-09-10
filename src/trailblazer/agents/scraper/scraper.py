@@ -65,26 +65,150 @@ def derive_stage_slug(url: str, title: str) -> str:
     return _slugify(title) or "page"
 
 
+def _identities(controls: list[Control]) -> list[tuple[str, str, int]]:
+    """Identify each control by its label, type and ordinal among its namesakes.
+
+    The fallback for a control with no unique locator to be matched on. None of
+    the three depends on document position, so a control keeps its identity when
+    something mounts above it -- which `key` does not.
+
+    It is a fallback and not the primary because `label` is the model's word for
+    the field, and for a control the markup never named the model has nothing to
+    copy and writes a fresh one each look. `assign_field_ids` runs after vision's
+    proven addresses are restored precisely so those controls are matched on a
+    measured locator instead of reaching this.
+
+    Two identically-labelled controls of the same type are separated only by the
+    ordinal, so a mount *between* them still shifts them. That is not
+    distinguishable from anything the page states, and the caller raises on the
+    resulting collision rather than pairing them silently.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    out = []
+    for c in controls:
+        base = (c.label.strip().casefold(), c.type)
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        out.append((*base, n))
+    return out
+
+
 def finalize(
     page: PageDescription,
     page_index: int,
     url: str,
     title: str,
     actions: list[dict] | None = None,
+    prior: PageDescription | None = None,
 ) -> PageDescription:
-    """Assign the fields code owns: `fieldId`, `stageId` and `actions`.
+    """Assign the fields code owns: `stageId`, `fieldId` and `actions`.
+
+    `name_stage` then `assign_field_ids`, which is the whole of it for a caller
+    with no vision addresses to restore. `perceive` calls the two separately
+    because a proven address has to be back on the controls between them -- see
+    `assign_field_ids`.
 
     `actions` are measured, so they are restored from the extractor payload for
     the same reason locators are: a model-authored click target is unverified.
     """
-    for i, control in enumerate(page.controls, start=1):
-        control.fieldId = f"q_{i:03d}"
-
-    page.stageId = f"form_page_{page_index}_{derive_stage_slug(url, title)}"
-    page.url = url
+    name_stage(page, page_index, url, title)
+    assign_field_ids(page, prior)
     if actions is not None:
         page.actions = [Action(**a) for a in actions]
     return page
+
+
+def name_stage(page: PageDescription, page_index: int, url: str, title: str) -> None:
+    """Set `stageId` and `url`. Separate from the ids because vision's proven
+    addresses are held per stage: the stage has to be named before they can be
+    looked up, and they have to be back on the controls before an id is matched
+    to one."""
+    page.stageId = f"form_page_{page_index}_{derive_stage_slug(url, title)}"
+    page.url = url
+
+
+def assign_field_ids(page: PageDescription, prior: PageDescription | None = None) -> None:
+    """Give every control its `fieldId`, carrying an id across looks where it can.
+
+    Runs after every measured and proven address is on the controls, because a
+    locator is the only identity here that does not move. A control vision
+    addressed is matched on that locator like any other.
+
+    Three matches, strongest first: a unique locator, then the control's own
+    identity (`_identities`), then -- only where neither look had an address --
+    the extractor key. The label sits in the middle because for a control the
+    markup never named the model writes a fresh one each look, and the key is
+    last, and fenced, because it is a document position.
+    """
+    by_locator: dict[str, str] = {}
+    by_identity: dict[tuple[str, str, int], str] = {}
+    unaddressed_by_key: dict[str, str] = {}
+    highest = 0
+    if prior is not None and prior.stageId == page.stageId:
+        for identity, c in zip(_identities(prior.controls), prior.controls):
+            if c.locator and c.unique:
+                by_locator[c.locator] = c.fieldId
+            else:
+                unaddressed_by_key[c.key] = c.fieldId
+            by_identity[identity] = c.fieldId
+            highest = max(highest, int(c.fieldId[2:]))
+
+    next_n = highest + 1
+    issued: dict[str, Control] = {}
+    identities = list(zip(_identities(page.controls), page.controls))
+
+    # Pass 1: locator and `_identities`, the two joins that cannot be fooled by
+    # what mounted where. Run to completion before the key fallback is
+    # consulted at all, so a genuine identity match always wins a race against
+    # it -- see pass 2's comment for why the race exists.
+    unclaimed: list[tuple[tuple[str, str, int], Control]] = []
+    for identity, control in identities:
+        carried = None
+        if control.locator and control.unique:
+            carried = by_locator.get(control.locator)
+        if carried is None:
+            carried = by_identity.get(identity)
+        if carried is None:
+            unclaimed.append((identity, control))
+            continue
+        if carried in issued:
+            raise RuntimeError(
+                f"fieldId {carried} matched two controls on {page.stageId}: "
+                f"{issued[carried].label!r} and {control.label!r}"
+            )
+        issued[carried] = control
+        control.fieldId = carried
+
+    # Pass 2: the key fallback, only against ids pass 1 left unclaimed. `key` is
+    # a document position, so it can name a different question when several
+    # unaddressed controls mount at once -- on Pie's eligibility page four new
+    # labor-cost fields appeared above "maximum depth" in the same look, `el_3`
+    # stopped meaning depth and started meaning the first labor-cost field, and
+    # matching by key alone handed the labor-cost field depth's id while depth
+    # itself was still on the page waiting to claim it correctly by identity.
+    # Restricting the pool to ids pass 1 did not use is what stops that: a
+    # control pass 1 already placed can never be displaced by one that only
+    # shares its old document position.
+    for identity, control in unclaimed:
+        carried = None
+        if not control.locator:
+            # Neither look had an address: the key is the only join left, and it
+            # is safe only here. Both sides being unaddressed excludes the case
+            # that caused the original defect -- a claims select mounting at the
+            # lapse checkbox's `el_6` and carrying away the id that held the
+            # record of it being unfilled. That select arrives *addressed*, so
+            # it never reaches this line.
+            #
+            # It covers the window between a control first appearing and vision
+            # proving an address for it, where the model renames it freely.
+            candidate = unaddressed_by_key.get(control.key)
+            if candidate is not None and candidate not in issued:
+                carried = candidate
+        if carried is None:
+            carried = f"q_{next_n:03d}"
+            next_n += 1
+        issued[carried] = control
+        control.fieldId = carried
 
 
 def restore_measured_locators(
@@ -103,7 +227,8 @@ def restore_measured_locators(
     Should one still arrive keyless, the fallbacks are, in order:
 
     1. the model's own returned `locator`, matched against the payload's
-       locator set -- an exact hit is real evidence of which entry is meant;
+       non-empty locator set -- an exact hit is real evidence of which entry is
+       meant, where `""` is no evidence at all;
     2. position, but only when the response carries positive evidence it kept
        the payload's order -- see `_positional_is_safe`. Index alone is not
        evidence: a reordered or invented response paired by index gives every
@@ -114,7 +239,10 @@ def restore_measured_locators(
     exactly one node, so no downstream uniqueness check would catch it.
     """
     by_key = {c["key"]: c for c in payload_controls if c.get("key")}
-    by_locator = {c["locator"]: c for c in payload_controls}
+    # Empty excluded: `""` is what an unaddressable control carries, so it is
+    # not evidence of which entry the model meant -- two of them on one page
+    # would have matched each other's.
+    by_locator = {c["locator"]: c for c in payload_controls if c["locator"]}
 
     if len(described.controls) != len(payload_controls):
         log.warning(
@@ -221,7 +349,20 @@ def _positional_is_safe(described: PageDescription, payload_controls: list[dict]
     if len(described.controls) != len(payload_controls):
         return False
 
-    index_of = {c["locator"]: i for i, c in enumerate(payload_controls)}
+    # Only locators that address something, and only those the payload holds
+    # once. An unaddressable control carries `""`, so a page with two of them
+    # collapsed to a single index and every response disagreed with it: this
+    # check failed on all eleven looks at Pie's insurance-history page and the
+    # fallback it guards was dead there.
+    counts: dict[str, int] = {}
+    for c in payload_controls:
+        if c["locator"]:
+            counts[c["locator"]] = counts.get(c["locator"], 0) + 1
+    index_of = {
+        c["locator"]: i
+        for i, c in enumerate(payload_controls)
+        if c["locator"] and counts[c["locator"]] == 1
+    }
     overlap = [(i, index_of[c.locator]) for i, c in enumerate(described.controls)
                if c.locator in index_of]
 
@@ -312,18 +453,20 @@ def perceive(
     restore_measured_overlays(described, payload.get("overlays", []))
     described.next = payload["next"]
     described.back = payload["back"]
-    finalize(
-        described,
-        request.page_index,
-        payload["url"],
-        payload["title"],
-        payload.get("actions"),
-    )
-    # After `finalize`, which is what assigns `stageId`: the addresses are held
-    # per stage, and restoring before it looked them up under the empty string
-    # the model returns, so every proven address was silently lost on the next
-    # look. Before the diff, so a restored control is not reported as changed.
+    # Named first: the proven addresses are held per stage, and restoring before
+    # the stage had a name looked them up under the empty string the model
+    # returns, so every proven address was silently lost on the next look.
+    name_stage(described, request.page_index, payload["url"], payload["title"])
+    # Then restored, before any id is assigned. A vision-proven locator is a
+    # measured address, so it is what carries a control's identity across looks;
+    # assigning ids first left the match to the model's label, which for an
+    # unnamed control is invented afresh each look -- one Pie checkbox took four
+    # ids that way and published as three separate questions. Before the diff
+    # too, so a restored control is not reported as changed.
     vision_restore(page, described)
+    assign_field_ids(described, request.prior)
+    if payload.get("actions") is not None:
+        described.actions = [Action(**a) for a in payload["actions"]]
     # Rejection text the extractor could tie to no field is a page blocker,
     # measured; the model's own list is kept alongside.
     for text in payload.get("pageErrors", []):

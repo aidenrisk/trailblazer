@@ -49,15 +49,25 @@ _UNBADGE_JS = """
 }
 """
 
-_ADDRESSED: dict[str, dict[str, str]] = {}
-"""stageId -> key -> the locator vision proved for it.
+_ADDRESSED: dict[str, dict[str, tuple[str, str]]] = {}
+"""stageId -> key -> (locator, caption) vision proved for that element.
 
 Kept for the run. The extractor re-measures every control on every look and
 these have nothing to measure, so without this the next look overwrites a
 proven address with the empty string it found -- on a live run vision addressed
 eight controls, one was filled, and the following perceive discarded all eight.
-Keyed on `Control.key`, the extractor's per-element id, which is stable for as
-long as the page's markup is.
+Keyed on `Control.key`, the extractor's per-element id. That key is a document
+position, so it names a different element once the page re-renders -- which is
+why `restore` proves the stored address still resolves to the very node now
+carrying that key, rather than trusting the key alone.
+
+The caption is the text vision read off the rendered page and built the address
+from, so it names the same element the locator does. It replaces the label on a
+restored control because a control with no accessible name has no label in the
+markup for the model to copy: the model writes one from whatever it sees, and it
+writes a different one each look. One Pie checkbox came back "Term Lapse?" on
+three looks and "Term Lapse 2025-26" on five, and the alternation published the
+same checkbox as three separate questions.
 """
 
 _SHOT_DIR: Path | None = None
@@ -93,12 +103,22 @@ def read_page(
     question: str,
     settings: Settings | None = None,
     job_id: str | None = None,
-) -> VisionReading:
-    """Badge `controls`, photograph the page once, and ask what is written near each.
+) -> tuple[VisionReading, dict[int, str]]:
+    """Badge `controls`, photograph the viewport once, and ask what is written near each.
+
+    Returns the reading and `badge -> Control.key` for the badges drawn. A
+    number counts drawn badges only -- a control that is missing, hidden or off
+    screen takes none -- so a caller reads a badge's meaning from this mapping,
+    never from the position in the list it sent.
+
+    The first control is scrolled into view, the badges are measured against
+    the viewport, and the viewport is what is captured, so a badge's rectangle
+    and the picture are one region on any screen size. Controls outside the
+    viewport are not drawn.
 
     `question` is what the caller could not answer from the DOM -- "which of
-    these does the page's error refer to", "what identifies each of these" --
-    and is put to the model alongside the standing instructions.
+    these does the page's error refer to", "what identifies this" -- and is put
+    to the model alongside the standing instructions.
 
     The badges are removed before returning, whatever happens: they are drawn in
     a fixed overlay and stamped as an attribute, and a page left marked would be
@@ -106,22 +126,14 @@ def read_page(
     """
     settings = settings or get_settings()
     started = time.monotonic()
+    nothing = VisionReading(), {}
 
     keys = [c.key for c in controls if c.key][:_MAX_BADGES]
     if not keys:
         log.warning("vision asked to read no addressable elements; nothing to badge")
-        return VisionReading()
+        return nothing
 
     try:
-        # Scroll to the first badge-worthy element before measuring anything.
-        # A control below the fold badges at a negative or out-of-viewport
-        # rect -- coordinates the model is handed with nothing in the picture
-        # at them -- and one that scrolled further off between the measurement
-        # and the shot moves the picture out from under its own badges. Full-
-        # page capture is what makes a badge's rect and the image agree at all:
-        # a viewport shot only, with badges built for the whole page, put boxes
-        # on already-filled fields while the one field actually marked
-        # "Required" carried no visible badge.
         first = page.locator(f'[data-tb-key="{keys[0]}"]').first
         try:
             first.scroll_into_view_if_needed(timeout=3_000)
@@ -129,12 +141,12 @@ def read_page(
             pass
         badges = page.evaluate(_BADGE_JS, keys)
         if not badges:
-            log.warning("none of the %d elements offered to vision are visible", len(keys))
-            return VisionReading()
-        shot = page.screenshot(type="png", full_page=True)
+            log.warning("none of the %d elements offered to vision are on screen", len(keys))
+            return nothing
+        shot = page.screenshot(type="png")
     except PlaywrightError as e:
         log.error("vision could not photograph the page: %s", e)
-        return VisionReading()
+        return nothing
     finally:
         _unbadge(page)
 
@@ -167,7 +179,7 @@ def read_page(
         relevant=",".join(str(b) for b in reading.relevant) or None,
         note=reading.note or None, ms=int((time.monotonic() - started) * 1000),
     )
-    return reading
+    return reading, {b["badge"]: b["key"] for b in badges}
 
 
 def resolve(
@@ -194,6 +206,7 @@ def resolve(
         return {}
 
     resolved: dict[str, str] = {}
+    captions: dict[str, str] = {}
     try:
         for anchor in reading.anchors:
             key = by_badge.get(anchor.badge)
@@ -212,6 +225,10 @@ def resolve(
                 )
                 continue
             resolved[key] = locator
+            # The words the address was built from, most specific first. This is
+            # what the field is called on the page, so it is what the control is
+            # labelled with from here on.
+            captions[key] = caption_for(anchor)
             event(
                 "vision", "vision", badge=anchor.badge, field=control.fieldId,
                 via=anchor.label or anchor.heading, locator=locator, resolved=True,
@@ -219,8 +236,43 @@ def resolve(
     finally:
         _unbadge(page)
     if resolved and stage_id:
-        _ADDRESSED.setdefault(stage_id, {}).update(resolved)
+        _ADDRESSED.setdefault(stage_id, {}).update(
+            {k: (loc, captions.get(k, "")) for k, loc in resolved.items()}
+        )
     return resolved
+
+
+def _addresses_key(page: Page, locator: str, key: str) -> bool:
+    """True when `locator` resolves to the element the extractor stamped `key` on.
+
+    The stamp is written onto the node itself by the extractor, so it is the one
+    join that says which element a payload entry meant. Compared here rather
+    than trusted because `key` is a document position and the address outlives
+    the look that proved it.
+    """
+    if not key:
+        return False
+    return bool(
+        page.locator(locator).first.evaluate(
+            "(el, key) => el.getAttribute('data-tb-key') === key", key
+        )
+    )
+
+
+def caption_for(anchor: Anchor) -> str:
+    """Name the badged field from the words vision read for it.
+
+    `purpose` is what the field asks for and `label` is the text nearest it --
+    a row's own value, "2025-26" for one lapse term. Both are kept and joined
+    because either alone is ambiguous on a repeated row: the purpose repeats
+    down the column and the row label repeats across it, and only the pair
+    names one cell. `heading` stands in when the model reported no purpose.
+    """
+    purpose = anchor.purpose.strip() or anchor.heading.strip()
+    label = anchor.label.strip()
+    if purpose and label and label.casefold() not in purpose.casefold():
+        return f"{purpose} {label}"
+    return purpose or label
 
 
 def restore(page: Page, page_description) -> int:
@@ -228,8 +280,14 @@ def restore(page: Page, page_description) -> int:
 
     Called after every look. The extractor cannot measure these controls -- that
     is why vision ran -- so each fresh description carries them empty again and
-    would undo the work. An address is only restored while it still resolves to
-    exactly one node: a page that re-rendered differently gets no stale locator,
+    would undo the work.
+
+    An address is restored only when it still resolves to exactly one node *and*
+    that node is the one now stamped with the control's key. The count alone is
+    not enough: the key is a document position, so after a re-render it can name
+    a different element, and a stored address that still resolves would then be
+    written onto the wrong control -- the failure this whole module exists to
+    make impossible. A page that re-rendered differently gets no stale locator,
     it gets another look.
     """
     known = _ADDRESSED.get(page_description.stageId)
@@ -237,7 +295,7 @@ def restore(page: Page, page_description) -> int:
         return 0
     restored = 0
     for control in page_description.controls:
-        locator = known.get(control.key)
+        locator, caption = known.get(control.key, ("", ""))
         if not locator or control.locator:
             continue
         try:
@@ -247,11 +305,28 @@ def restore(page: Page, page_description) -> int:
                     control.fieldId, locator,
                 )
                 continue
+            if not _addresses_key(page, locator, control.key):
+                log.warning(
+                    "vision address for %s resolves to an element that is no longer %s; "
+                    "dropped: %s",
+                    control.fieldId, control.key, locator,
+                )
+                continue
         except PlaywrightError as e:
             log.warning("vision address for %s rejected: %s", control.fieldId, e)
             continue
         control.locator = locator
         control.unique = True
+        if caption:
+            # The model invents a fresh label for a control the markup never
+            # named, and a different one each look. The read caption is fixed
+            # for the run, so the field keeps one identity and one name.
+            if control.label != caption:
+                log.info(
+                    "labelling %s from the page: %r (model returned %r)",
+                    control.fieldId, caption, control.label,
+                )
+            control.label = caption
         restored += 1
     if restored:
         event("vision", "vision", stage=page_description.stageId, restored=restored)

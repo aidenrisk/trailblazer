@@ -41,6 +41,7 @@ def choose_value(
     help_text: str | None = None,
     step: str = "",
     options: list[str] | None = None,
+    shown_because: str | None = None,
 ) -> tuple[str, float, bool]:
     """Decide what to type into one field.
 
@@ -76,6 +77,8 @@ def choose_value(
         lines.append(f"What the page says about the format: {constraint_hint}")
     if help_text:
         lines.append(f"What the field's help tooltip says: {help_text}")
+    if shown_because:
+        lines.append(f"This field appeared because {shown_because}.")
     if options:
         lines.append("The field offers exactly these choices; return one of them verbatim:")
         lines.extend(f"  - {o}" for o in options)

@@ -102,6 +102,16 @@ class Board:
     revealed: dict[str, str] = field(default_factory=dict)
     """fieldId -> the fieldId of the assignment that made it appear."""
 
+    revealed_with: dict[str, str] = field(default_factory=dict)
+    """fieldId -> the value that assignment was set to.
+
+    Kept beside `revealed` because `Control.revealedBy` is set only on the look
+    a control first appears and is null on every look after, while the chooser
+    needs it on every attempt. Pie's claims count is shown only once "any
+    claims?" is answered Yes; asked in isolation the chooser answered 0, which
+    the page then rejected as "Please add at least one claim".
+    """
+
     advanced: set[str] = field(default_factory=set)
     """Locators of actions already clicked on this page."""
 
@@ -178,7 +188,12 @@ class Board:
     when the page finishes, which is what the completion assertion reads.
     """
 
-    def add(self, control: Control, revealed_by: str | None = None) -> bool:
+    def add(
+        self,
+        control: Control,
+        revealed_by: str | None = None,
+        revealed_with: str | None = None,
+    ) -> bool:
         """Record `control`, returning True when it was not already on the board.
 
         The control is re-stored on every observe because `options` can change,
@@ -191,6 +206,8 @@ class Board:
             self.order.append(control.fieldId)
             if revealed_by is not None:
                 self.revealed[control.fieldId] = revealed_by
+                if revealed_with is not None:
+                    self.revealed_with[control.fieldId] = revealed_with
         if control.options is None and control.fieldId in self.revealed_options:
             control = control.model_copy(
                 update={"options": self.revealed_options[control.fieldId]}
@@ -221,6 +238,9 @@ class Board:
         if sides is None:
             self.gates.pop(control.fieldId, None)
         elif control.fieldId not in self.gates:
+            # Not `new`: a control the extractor could not address carries no
+            # sides on its first sighting, and vision addresses it later. Keyed
+            # on absence from `gates` so an existing walk is never reset.
             self.gates[control.fieldId] = GateWalk(remaining=list(sides))
         return new
 
@@ -231,6 +251,13 @@ class Board:
         assignment against it spends the filler's click timeout and returns
         blocked. Pie's "Agency / Program" is the case -- pre-filled from the
         logged-in agency, `disabled readonly`.
+
+        A control with no address *is* one. It cannot be filled, so it is
+        refused, and the refusal is what sends the vision pass to read its
+        caption off the page and prove an address for it. Skipping it here
+        emptied the to-do list with the field still blank, and the page
+        advanced: Pie's lapse checkbox and claims row left the page unfilled
+        and Next was pressed on them.
         """
         return [
             f
@@ -239,8 +266,25 @@ class Board:
             and f in self.present
             and not self.controls[f].disabled
             and not self.controls[f].additionalRow
-            and self.controls[f].locator
             and self.failures.get(f, 0) < MAX_FAILURES
+        ]
+
+    def unfilled(self) -> list[str]:
+        """fieldIds the page renders and no accepted fill covers, in the order seen.
+
+        What the forward press is gated on. Wider than `unattempted`: a field
+        given up after `MAX_FAILURES` is still unfilled, and pressing Next with
+        it blank publishes a walk the replay cannot reproduce. Every field the
+        page renders counts -- an optional one included -- because the replay
+        script has to carry every field the crawl saw.
+        """
+        return [
+            f
+            for f in self.order
+            if f not in self.attempted
+            and f in self.present
+            and not self.controls[f].disabled
+            and not self.controls[f].additionalRow
         ]
 
     def given_up(self) -> list[str]:
@@ -341,6 +385,7 @@ class Board:
             "controls": len(self.controls),
             "attempted": sorted(self.attempted),
             "unattempted": self.unattempted(),
+            "unfilled": self.unfilled(),
             "gates": {
                 f: {"walked": g.walked, "remaining": g.remaining} for f, g in self.gates.items()
             },

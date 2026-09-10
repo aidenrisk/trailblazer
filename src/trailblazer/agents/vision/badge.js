@@ -8,36 +8,38 @@
  * also stamped with `data-tb-badge`, which is how Python gets back to the exact
  * node afterwards to prove a proposed locator resolves to it.
  *
- * Called with the keys the extractor stamped (`data-tb-key`). Returns one entry
- * per badge with the element's rectangle and tag, for the log and for the
- * caller's own bookkeeping.
+ * Called with the keys the extractor stamped (`data-tb-key`). Only elements on
+ * screen are drawn, and numbers count drawn badges: an element that is missing,
+ * hidden or outside the viewport takes no number. Returns one entry per badge
+ * with the element's rectangle in image pixels and its tag.
  */
 (keys) => {
   const overlayId = 'tb-badges';
   document.getElementById(overlayId)?.remove();
   document.querySelectorAll('[data-tb-badge]').forEach((n) => n.removeAttribute('data-tb-badge'));
 
-  // Positioned against the document, not the viewport: a full-page screenshot
-  // stitches the whole scrollable area together, and a `position:fixed`
-  // overlay only ever paints once, at wherever the viewport last scrolled to
-  // -- every badge below the fold rendered at the wrong place in the picture,
-  // or not at all. `absolute` against a full-height overlay tracks the page.
+  // Fixed to the viewport, which is what is photographed, so the badges and
+  // the picture are one region whatever the screen size and whichever element
+  // scrolls. An overlay sized from the document's scroll height was one screen
+  // tall on a form that scrolls an inner panel, and badges were drawn to a
+  // height the capture never reached.
   const overlay = document.createElement('div');
   overlay.id = overlayId;
   overlay.setAttribute('style', [
-    'position:absolute', 'top:0', 'left:0',
-    `width:${document.documentElement.scrollWidth}px`,
-    `height:${document.documentElement.scrollHeight}px`,
-    'z-index:2147483647', 'pointer-events:none',
+    'position:fixed', 'inset:0', 'z-index:2147483647', 'pointer-events:none',
   ].join(';'));
   document.body.appendChild(overlay);
 
   const visible = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
+    if (r.bottom <= 0 || r.right <= 0 || r.top >= innerHeight || r.left >= innerWidth) return false;
     const s = getComputedStyle(el);
     return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
   };
+  // The capture is scaled by the device pixel ratio, and the rectangles are
+  // handed to the model beside it.
+  const dpr = window.devicePixelRatio || 1;
 
   const out = [];
   keys.forEach((key) => {
@@ -46,10 +48,7 @@
 
     const n = out.length + 1;
     el.setAttribute('data-tb-badge', String(n));
-    const v = el.getBoundingClientRect();
-    // Document-relative, so the badge sits at the element's true position in
-    // a full-page capture regardless of the current scroll offset.
-    const r = { left: v.left + window.scrollX, top: v.top + window.scrollY, width: v.width, height: v.height };
+    const r = el.getBoundingClientRect();
 
     // The outline sits over the element and the number beside it. Both are in
     // the fixed overlay rather than on the element, so no layout is disturbed:
@@ -79,7 +78,7 @@
       key,
       tag: el.tagName.toLowerCase(),
       inputType: el.getAttribute('type') || '',
-      rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+      rect: { x: Math.round(r.left * dpr), y: Math.round(r.top * dpr), w: Math.round(r.width * dpr), h: Math.round(r.height * dpr) },
     });
   });
   return out;

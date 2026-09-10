@@ -198,8 +198,14 @@ class Frontier:
         # A reveal is attributed only to an action on this same page.
         same_page = report is not None and (report_stage is None or report_stage == page.stageId)
         revealed_by = report.fieldId if same_page else None
+        revealed_with = report.valueUsed if same_page else None
         for control in page.controls:
-            board.add(control, revealed_by if control.fieldId in newly_added else None)
+            first_seen = control.fieldId in newly_added
+            board.add(
+                control,
+                revealed_by if first_seen else None,
+                revealed_with if first_seen else None,
+            )
 
         # Presence is replaced, not merged: a control absent from this
         # description is off the page, and assigning against it would credit a
@@ -210,22 +216,22 @@ class Frontier:
         log_contract(log, "FrontierBoard", board.summary())
         self._record("observe", page.stageId, started)
 
-    def reopen(self, locators: list[str]) -> list[str]:
+    def reopen(self, keys: list[str]) -> list[str]:
         """Put fields back on the to-do list after a forward press was refused.
 
         Pressing Next with every field accepted is not the same as every field
         being right. The Loop reads the page for problems; the controls named
-        here lose their acceptance so they are assigned again. The refused press
-        itself was never recorded as done, so Next needs no forgetting. Returns
-        the fieldIds reopened.
+        here, by extractor key (`Control.key`), lose their acceptance so they
+        are assigned again. The refused press itself was never recorded as done,
+        so Next needs no forgetting. Returns the fieldIds reopened.
         """
         assert self.board is not None
-        # A problem with no address names nothing; a control with no address
-        # cannot be refilled. Reopening either put the page in a loop: Next
-        # pressed, the same unaddressable checkbox "reopened", Next pressed --
-        # 372 times in one run before the action cap ended it.
-        by_locator = {c.locator: f for f, c in self.board.controls.items() if c.locator}
-        reopened = [by_locator[l] for l in locators if l and l in by_locator]
+        # A problem with no key names nothing; a control with no address cannot
+        # be refilled. Reopening either put the page in a loop: Next pressed,
+        # the same unaddressable checkbox "reopened", Next pressed -- 372 times
+        # in one run before the action cap ended it.
+        by_key = {c.key: f for f, c in self.board.controls.items() if c.locator}
+        reopened = [by_key[k] for k in keys if k and k in by_key]
         for field_id in reopened:
             self.board.attempted.discard(field_id)
         if reopened:
@@ -234,6 +240,48 @@ class Frontier:
                 self.board.stage_id, reopened,
             )
         return reopened
+
+    def readdress(self, field_id: str, locator: str, label: str = "") -> None:
+        """Record the address vision proved for a field, and give it another turn.
+
+        The fill was refused because the control could not be reached, or it
+        could not be reached at all. The board holds the control as the
+        extractor described it, unaddressed, so the locator is written on and
+        the refusal that triggered the look is forgiven -- the next assignment
+        is the first one that can act.
+
+        `label` is the text vision read off the page, which for a control the
+        markup never named is the only name that stays the same between looks.
+        """
+        assert self.board is not None
+        control = self.board.controls.get(field_id)
+        if control is None:
+            return
+        control.locator = locator
+        control.unique = True
+        if label:
+            control.label = label
+        self.board.failures.pop(field_id, None)
+        self.board.attempted.discard(field_id)
+        log.warning(
+            "vision addressed %s on %s that code could not: %s",
+            field_id, self.board.stage_id, locator,
+        )
+
+    def give_up(self, field_id: str, why: str) -> None:
+        """Take `field_id` to the failure cap in one step, so it is not assigned again.
+
+        For a field nothing can act on: it has no address and the page's own
+        words proved none, and the look that reads them runs once per field per
+        stage. Counting a single failure would leave it open for one more
+        assignment that would take the same path to the same place.
+
+        It is not marked attempted, so `unfilled` still names it and the forward
+        press stays blocked -- given up is not filled.
+        """
+        assert self.board is not None
+        self.board.failures[field_id] = MAX_FAILURES - 1
+        self.board.record_failure(field_id, why)
 
     def reopen_with_hint(self, field_id: str, hint: str) -> None:
         """Give a spent field one more attempt, with what the page was seen to say.
@@ -441,7 +489,7 @@ class Frontier:
         """
         if self.board is None or self.page is None:
             return False
-        return not (self._target_action() or self.board.unattempted())
+        return not (self._target_action() or self.board.unfilled())
 
     def flow_done(self) -> bool:
         """True when no page owes a gate side that has not been declared.
@@ -521,6 +569,21 @@ class Frontier:
         page is a form with two fields and a submit, and needs no special case.
         """
         assert self.board is not None and self.page is not None
+        unfilled = self.board.unfilled()
+        if unfilled and self.page.next:
+            # Every field the page renders has to be filled before the crawl
+            # leaves it: the replay script carries every field the crawl saw,
+            # and a walk that advanced over a blank one cannot be reproduced.
+            # Nothing is left to assign -- `_first_unattempted` ran before this
+            # -- so the fields here are the ones vision could not address and
+            # the filler could not get accepted.
+            self.mark_stuck(
+                f"{len(unfilled)} field(s) on {self.board.stage_id} could not be filled: "
+                + ", ".join(
+                    f"{f} ({self.board.controls[f].label[:40]})" for f in unfilled
+                )
+            )
+            return None
         if not self.page.next:
             # A page with nothing to fill and no way on is a terminal, whatever
             # text it carries. A decline reads as a blocker to the scraper --
@@ -530,7 +593,7 @@ class Frontier:
             # every restart path begins by returning on that, so a run that
             # walked five pages branched none of its twenty owed gates.
             terminal = not self.page.controls and self.board.stage_id != self._start_stage
-            if self.board.stuck or self.board.unattempted():
+            if self.board.stuck or self.board.unfilled():
                 return None
             if self.page.blockers and not terminal:
                 # Mid-load, or covered by a dialog: a page that has a way
@@ -680,15 +743,12 @@ class Frontier:
         filler: the board has to know which side was taken to know which one is
         still owed, and a value Frontier did not choose cannot be accounted for.
 
-        A control never refused comes before one that has been. Board order
-        alone put a refused field first because it sat higher on the page, so a
-        run spent its corrections re-filling a claims box the page kept refusing
-        while eight controls the vision fallback had just addressed were never
-        touched at all.
+        Board order, which is the order the page produced the controls, and
+        nothing else: a refused control is retried in place until `MAX_FAILURES`
+        gives it up, and the controls after it wait.
         """
         assert self.board is not None
-        pending = self.board.unattempted()
-        for field_id in sorted(pending, key=lambda f: self.board.failures.get(f, 0)):
+        for field_id in self.board.unattempted():
             control = self.board.controls[field_id]
             gate = self.board.gates.get(field_id)
             pinned = self.board.pinned.get(field_id)
@@ -1025,6 +1085,7 @@ class Frontier:
                     typeahead=True,
                     constraintHint=self._hint_for(control),
                     helpText=control.helpText or None,
+                    shownBecause=self._shown_because(control),
                 )
             if control.type == "toggle":
                 # `value` is "true"/"false": the two sides of a checkbox have no
@@ -1046,6 +1107,7 @@ class Frontier:
                 value=self._seed_for(control),
                 constraintHint=self._hint_for(control),
                 helpText=control.helpText or None,
+                shownBecause=self._shown_because(control),
             )
 
         option_locator = None
@@ -1068,7 +1130,25 @@ class Frontier:
             ),
             constraintHint=self._hint_for(control),
             helpText=control.helpText or None,
+            shownBecause=self._shown_because(control),
         )
+
+    def _shown_because(self, control: Control) -> str | None:
+        """The earlier question and answer that made this control appear, in words.
+
+        None for a control the page held from its first look. The chooser is
+        asked one field at a time and is shown nothing else on the page, so a
+        count that exists only because "any claims?" was answered Yes was
+        answered 0 -- consistent with its own label, contradicted by the page.
+        """
+        assert self.board is not None
+        parent_id = self.board.revealed.get(control.fieldId)
+        parent = self.board.controls.get(parent_id) if parent_id else None
+        if parent is None:
+            return None
+        value = self.board.revealed_with.get(control.fieldId)
+        answered = f" {value!r}" if value else ""
+        return f"{parent.label!r} was answered{answered}"
 
     def _hint_for(self, control: Control) -> str | None:
         """What the page has said about this field: its stated format, and the
