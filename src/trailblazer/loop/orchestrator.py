@@ -559,24 +559,31 @@ def _walk_page(
             continue
 
         assignment = decision
-        if assignment.fieldId and not assignment.locator:
-            # The control has no address, so there is nothing for the filler to
-            # act on: Playwright refuses an empty selector. The look reads the
-            # caption off the rendered page and proves an address from those
-            # words, which is the only way this field is ever fillable. It runs
-            # here rather than off a refusal because a fill that cannot be
-            # attempted never produces one.
+        control = (
+            next((c for c in result.page.controls if c.fieldId == assignment.fieldId), None)
+            if assignment.fieldId
+            else None
+        )
+        # Empty locator: Playwright refuses the fill. Shared locator: the filler
+        # would act on whichever node comes first. Both need a proven unique
+        # address before the click; vision is the only source of one.
+        if assignment.fieldId and (not assignment.locator or (control is not None and not control.unique)):
             if _see_field(tab, result, frontier, assignment.fieldId, None, seen, job_id, settings, ledger):
                 report = None
                 report_stage = None
                 continue
-            # Unaddressable and unread. Marking it attempted would tell the
-            # forward-press gate it was filled; leaving it is what keeps the
-            # page from advancing over a blank required field.
-            frontier.give_up(assignment.fieldId, "no address, and the page's own words proved none")
-            report = None
-            report_stage = None
-            continue
+            if not assignment.locator:
+                # Unaddressable and unread. Marking it attempted would tell the
+                # forward-press gate it was filled; leaving it is what keeps the
+                # page from advancing over a blank required field.
+                frontier.give_up(assignment.fieldId, "no address, and the page's own words proved none")
+                report = None
+                report_stage = None
+                continue
+            # Shared locator, vision did not uniquify it. Fill still runs: a
+            # radio group's name matches every member, and the option locators
+            # on the assignment are what actually get clicked.
+
         # Whether the page is complete is the page's judgment: Next is pressed
         # and what it rejects is read afterwards. A guess before the press --
         # any input whose `value` read empty -- looped eligibility eleven times
@@ -1044,10 +1051,11 @@ def _see_field(
     spent, since the filler read the label, the tooltip and the markup's format
     hints and corrected twice against the page's own error text.
 
-    With `report` as `None`, the control has no address at all, so no fill can
-    be attempted and no refusal will ever arrive. The look has to fire on the
-    absence itself: waiting for a rejection that cannot happen left Pie's lapse
-    checkbox and reason field untouched for the whole walk.
+    With `report` as `None`, the control has no unique address: empty, or a
+    selector that matches more than one node. No fill can be trusted until
+    vision proves one against the badge. Waiting for a rejection that cannot
+    happen left Pie's lapse checkbox and reason field untouched for the whole
+    walk; sending a shared `name` to the filler clicked the first radio.
 
     The field is scrolled into view and badged alone, so there is no number to
     misread. Two outcomes, in order:
@@ -1069,11 +1077,18 @@ def _see_field(
     if control is None:
         return False
     if report is None:
-        question = (
-            "The badged field is one the page never named in its markup, so code cannot "
-            "address it. What question or caption is printed for it, exactly as it appears, "
-            "and what does the page say it requires?"
-        )
+        if not control.locator:
+            question = (
+                "The badged field is one the page never named in its markup, so code cannot "
+                "address it. What question or caption is printed for it, exactly as it appears, "
+                "and what does the page say it requires?"
+            )
+        else:
+            question = (
+                "The badged field's locator matches more than one node on the page. What "
+                "question or caption is printed for it, exactly as it appears, and what "
+                "does the page say it requires?"
+            )
     else:
         tried = (report.blocked or {}).get("whatYouTried", "")[:200]
         question = (
@@ -1105,6 +1120,14 @@ def _see_field(
         log.warning(
             "vision could not address %s (%r) on %s; it stays unfilled",
             field_id, control.label, result.page.stageId,
+        )
+        return False
+    if not control.unique:
+        # Shared locator, no unique proof. A hint would skip the fill that can
+        # still act through option locators (Pie's owners Yes/No).
+        log.warning(
+            "vision could not uniquify %s (%r) on %s; filling with locator=%r",
+            field_id, control.label, result.page.stageId, control.locator,
         )
         return False
     anchor = next((a for a in reading.anchors if a.badge == 1), None)
