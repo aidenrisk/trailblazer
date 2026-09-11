@@ -125,9 +125,10 @@ def _infer_unit(label: str, control: Control | None) -> str | None:
 class Generator:
     """Accumulates the three artifacts for one `(carrier, businessType, insuranceType)` flow.
 
-    Owns `questionId` allocation. `Control.fieldId` is per stage, so it is not
-    cross-page identity and cannot be the join key; the mapping from
-    `(stageId, fieldId)` to a `questionId` is held here.
+    Owns `questionId` allocation. `Control.fieldId` is unique for the crawl and
+    stable once issued; `questionId` is still allocated here because it is
+    issued on first fill, not first sight, which is what the artifacts join on.
+    The mapping from `(stageId, fieldId)` to a `questionId` is held here.
     """
 
     def __init__(
@@ -170,7 +171,8 @@ class Generator:
         self._resolver = CanonicalResolver()
         self._next_question = 1
         self._by_field: dict[tuple[str, str], str] = {}
-        """`(stageId, fieldId)` -> questionId. fieldId alone repeats across pages."""
+        """`(stageId, fieldId)` -> questionId. fieldId is unique on the crawl;
+        stageId records where the fill happened."""
 
         self._answers: dict[int, dict[str, str]] = {}
         """walk -> questionId -> the value that walk answered with.
@@ -515,9 +517,9 @@ class Generator:
     def _conditional_for(self, control: Control | None) -> Conditional | None:
         """The parent gate and the revealing value, resolved to a questionId.
 
-        `revealedBy` names a `fieldId`, which is per-page; the artifact's
-        `conditional` names a `questionId`, so the mapping this class owns is
-        what makes the reference stable.
+        `revealedBy` names a `fieldId`; the artifact's `conditional` names a
+        `questionId`, so the mapping this class owns is what makes the reference
+        stable.
         """
         if control is None or control.revealedBy is None:
             return None
@@ -591,8 +593,8 @@ class Generator:
 
         The completion assertion reads `branchExploration`, not Frontier's board:
         a gate owed a side and neither walked nor declared here fails the run.
-        Frontier names gates by `fieldId`, which is per-page, so the questionId
-        this class allocated is what the entries carry.
+        Frontier names gates by `fieldId`; the questionId this class allocated
+        is what the entries carry.
         """
         exploration = self.metadata_doc.branchExploration
         for field_id in walked_all:

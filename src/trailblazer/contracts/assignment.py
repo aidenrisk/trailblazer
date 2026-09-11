@@ -82,6 +82,13 @@ class Assignment(BaseModel):
     which is set by label against the parent.
     """
 
+    tag: str = ""
+    """The control's DOM tag from the extractor (`input`, `textarea`, `select`).
+
+    Copied from `Control.tag`. The filler and vision address the live element
+    by this, not by `Control.type`, which is a normalised enum.
+    """
+
     typeahead: bool = False
     """The control is typed into and then a suggestion is picked. The filler
     types the value, waits for the suggestions it raises, and clicks the one

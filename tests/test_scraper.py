@@ -208,7 +208,7 @@ def test_an_extra_control_is_added_and_positive() -> None:
 
 
 def test_alignment_is_by_locator_not_field_id() -> None:
-    """`fieldId` is a per-page counter and does not survive a re-perceive."""
+    """Diff aligns on locator. A new look's fieldId is not what decides polarity."""
     prior = _page([_control(fieldId="q_007")])
     new = _page([_control(fieldId="q_001")])
 
@@ -254,7 +254,7 @@ def test_ambiguous_assignment_leaves_revealed_by_null() -> None:
 
 
 def test_finalize_renumbers_field_ids_from_one() -> None:
-    """`fieldId` is a per-page counter assigned in code; the model never sets it."""
+    """`fieldId` is assigned in code; the model never sets it."""
     page = _page(
         [
             _control(fieldId="", locator="#a"),
@@ -279,7 +279,7 @@ def test_finalize_builds_stage_id_from_page_index_and_slug() -> None:
 
 
 def test_finalize_numbers_every_control_in_order() -> None:
-    """`fieldId` is a per-page counter; downstream joins depend on the order."""
+    """`fieldId` is assigned in control order on first sight; downstream joins depend on it."""
     page = _page(
         [
             _control(fieldId="", locator="#name", type="text", options=None),

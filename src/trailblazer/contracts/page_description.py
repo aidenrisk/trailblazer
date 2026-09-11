@@ -68,9 +68,9 @@ class Control(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     fieldId: str
-    """`q_001`, per stage. Kept across looks at the same stage, matched by
-    locator; a control seen for the first time takes the next unused number.
-    Not cross-page identity."""
+    """`q_001`, unique for the crawl. Issued when the control first appears,
+    then kept for every later look and remount. Never reused for a different
+    control."""
 
     key: str = Field(exclude=True)
     """The extractor payload's per-element key (`el_0`), echoed back by the model.
@@ -99,6 +99,14 @@ class Control(BaseModel):
     """Playwright address. Never a snapshot ref."""
 
     unique: bool
+    """Verified by `page.locator(locator).count() == 1`."""
+
+    tag: str = Field(default="", exclude=True)
+    """The element's `tagName` as the extractor read it (`input`, `textarea`,
+    `select`). `type` is the model's five-value enum and collapses a textarea
+    into `text`; selectors that name a tag have to use this, not `type`.
+    Measured and restored like `formatHint`.
+    """
 
     disabled: bool = False
     """Not interactable: `disabled`, `readonly`, or `aria-disabled`.
@@ -107,7 +115,6 @@ class Control(BaseModel):
     be touched. Without this the field looks like an ordinary control, and an
     assignment against it spends the filler's click timeout before failing.
     """
-    """Verified by `page.locator(locator).count() == 1`."""
 
     revealedBy: RevealedBy | None
 

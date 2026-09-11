@@ -65,8 +65,9 @@ class GenerationState(BaseModel):
     questionIds: list[str] = []
     """Allocated question ids, in order. `q_001` onward, stable across the flow.
 
-    Distinct from `Control.fieldId`, which is a per-page counter reset at every
-    perceive. The artifacts join on this one, so the Generator owns allocation.
+    Distinct from `Control.fieldId`, which is issued when a control first
+    appears. This one is issued on first fill, which is what the artifacts join
+    on, so the Generator owns allocation.
     """
 
     stages: list[str] = []

@@ -99,10 +99,10 @@ def test_question_ids_are_monotonic_across_two_pages(gen: Generator) -> None:
 
 
 def test_a_reused_field_id_on_page_two_gets_a_new_question_id(gen: Generator) -> None:
-    """`Control.fieldId` is a per-page counter, so it is not the join key.
+    """Two fills of the same fieldId on different stages are two questions.
 
-    Two different facts both arriving as `q_001` must not collapse into one
-    question, which is what using fieldId as identity would do.
+    Generator still keys on `(stageId, fieldId)`, so a historical reuse of
+    `q_001` across pages does not collapse into one question.
     """
     p1 = page("form_page_1_business", [control("q_001", "Legal Business Name")])
     gen.append(request(p1, fill("q_001", "#legalName", "Acme LLC")))
@@ -280,7 +280,7 @@ def test_merge_fields_are_stripped_from_labels(gen: Generator) -> None:
 
 
 def test_conditional_resolves_a_field_id_to_a_question_id(gen: Generator) -> None:
-    """`revealedBy` names a per-page fieldId; the artifact must name a questionId."""
+    """`revealedBy` names a fieldId; the artifact must name a questionId."""
     gate = control(
         "q_001",
         "Do you have multiple locations?",

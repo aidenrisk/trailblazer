@@ -6,8 +6,9 @@ controls appeared as a result of which assignment, and which walk each fill
 belongs to.
 
 A board covers exactly one `stageId`. Advancing to a new stage retires the
-previous board rather than extending it, because `fieldId` is a per-page counter
-(`page_description.Control.fieldId`) and carries no cross-page identity.
+previous board rather than extending it: presence, gates and walked sides are
+facts about one page. `fieldId` is unique on the crawl, but a board still
+answers one page at a time.
 """
 
 import logging
