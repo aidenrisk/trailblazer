@@ -25,6 +25,49 @@ from trailblazer.observability.logging import get_logger
 
 log = get_logger(__name__)
 
+_WATCHED = "_tb_error_log"
+"""Set on a Page after its error listeners are attached, so a second attach
+does not double every console line."""
+
+
+def watch_page_errors(page: Page) -> None:
+    """Write page, console and failed-request errors into the crawl log.
+
+    Playwright's default is silent: a JS exception, `console.error`, or a
+    failed XHR never reached crawl.log, and a headed run that 'just stopped'
+    left no trace of what the page itself had thrown.
+    """
+    if getattr(page, _WATCHED, False):
+        return
+    setattr(page, _WATCHED, True)
+    page.on("pageerror", lambda err: log.error("pageerror %s", err))
+    page.on("crash", lambda: log.error("page crash url=%s", page.url))
+    page.on("console", _log_console)
+    page.on("requestfailed", _log_request_failed)
+
+
+def watch_context_errors(context) -> None:
+    """Watch every current tab and every tab opened later in this context."""
+    for existing in context.pages:
+        watch_page_errors(existing)
+    context.on("page", watch_page_errors)
+
+
+def _log_console(msg) -> None:
+    if msg.type != "error":
+        return
+    log.error("console %s", msg.text)
+
+
+def _log_request_failed(request) -> None:
+    failure = request.failure
+    log.warning(
+        "requestfailed type=%s url=%s error=%s",
+        request.resource_type,
+        request.url,
+        failure if failure else "unknown",
+    )
+
 
 def _devtools_version(port: int, host: str = "127.0.0.1") -> dict | None:
     """Return `/json/version` if a DevTools server answers on `port`, else None.
@@ -169,6 +212,7 @@ class BrowserSession:
         context = contexts[0] if contexts else self.browser.new_context()
         pages = context.pages
         self.page = pages[0] if pages else context.new_page()
+        watch_context_errors(context)
         log.info("browser attached cdp_endpoint=%s", self.cdp_endpoint)
         return self
 
@@ -264,6 +308,7 @@ class AttachedSession:
             # Last page, not first: a human opening the page to scrape opens a
             # new tab, and the first is whatever they logged in through.
             self.page = pages[-1]
+            watch_context_errors(contexts[0])
             log.info(
                 "attached cdp_endpoint=%s tabs=%d url=%s",
                 self.cdp_endpoint,
