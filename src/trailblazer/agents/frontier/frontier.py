@@ -50,7 +50,7 @@ class Frontier:
 
     One instance spans a whole crawl. The board inside it is per page: a
     PageDescription carrying a new `stageId` retires the previous board, because
-    `fieldId` is a per-page counter and does not identify a control across pages.
+    presence and owed sides are facts about one page.
     """
 
     def __init__(
@@ -92,8 +92,8 @@ class Frontier:
 
         A gate on page 1 decides what page 4 renders, so its owed side is still
         owed once page 4 is reached and the board that records it has to outlive
-        its page. `fieldId` is a per-page counter, which is why boards are keyed
-        by stage rather than merged.
+        its page. Boards stay keyed by stage because each page has its own
+        presence and walk state.
         """
 
         self.stage_order: list[str] = []
@@ -373,21 +373,23 @@ class Frontier:
                 board.advanced.add(report.locator)
             return
 
-        if report.intent == "expand" and report.ok and report.optionsRevealed:
+        if report.intent == "expand":
             # An `expand` reads the choices and commits nothing, so the control
-            # is still unanswered: marking it attempted would spend its only
-            # turn on the read and leave it with no value and no gate side. The
-            # options are recorded before the `board.add` loop in `observe`, so
-            # the control picks them up on this pass and `gate_sides` sees the
-            # count on the same turn it was read.
-            #
-            # An expand that failed, or that opened onto nothing, falls through
-            # and is marked attempted: the control has no options either way, so
-            # re-issuing would expand it forever.
-            board.revealed_options[report.fieldId] = [
-                Option(label=o["label"], locator=o.get("locator"))
-                for o in report.optionsRevealed
-            ]
+            # is still unanswered. Marking it attempted let Reason For Lapse
+            # stay blank while Claims and Total Incurred were filled.
+            if report.ok and report.optionsRevealed:
+                # Recorded before the `board.add` loop in `observe`, so the
+                # control picks them up on this pass and the next assignment
+                # is a `select` of the same field.
+                board.revealed_options[report.fieldId] = [
+                    Option(label=o["label"], locator=o.get("locator"))
+                    for o in report.optionsRevealed
+                ]
+                return
+            board.record_failure(
+                report.fieldId,
+                (report.blocked or {}).get("whatYouTried", "expand opened onto no choices"),
+            )
             return
 
         if not report.ok:
@@ -571,17 +573,14 @@ class Frontier:
         assert self.board is not None and self.page is not None
         unfilled = self.board.unfilled()
         if unfilled and self.page.next:
-            # Every field the page renders has to be filled before the crawl
-            # leaves it: the replay script carries every field the crawl saw,
-            # and a walk that advanced over a blank one cannot be reproduced.
-            # Nothing is left to assign -- `_first_unattempted` ran before this
-            # -- so the fields here are the ones vision could not address and
-            # the filler could not get accepted.
+            # The head of `unfilled` blocked assignment: later fields were not
+            # attempted. Named alone so the stuck reason is the field that
+            # stopped the walk, not the ones sitting behind it.
+            field_id = unfilled[0]
+            label = self.board.controls[field_id].label[:40]
             self.mark_stuck(
-                f"{len(unfilled)} field(s) on {self.board.stage_id} could not be filled: "
-                + ", ".join(
-                    f"{f} ({self.board.controls[f].label[:40]})" for f in unfilled
-                )
+                f"{field_id} ({label}) on {self.board.stage_id} was not filled; "
+                "later fields were not attempted"
             )
             return None
         if not self.page.next:
@@ -639,8 +638,7 @@ class Frontier:
         """A value the caller supplied for this control, matched on its label.
 
         Matched by label substring because `Control` carries no canonical key --
-        that is assigned later, by the Generator -- and `fieldId` is a per-page
-        counter that names nothing.
+        that is assigned later, by the Generator.
         """
         haystack = f"{control.label} {control.locator}".casefold()
         for needle, value in self.seed_values.items():
@@ -737,31 +735,36 @@ class Frontier:
         )
 
     def _first_unattempted(self) -> Assignment | None:
-        """One assignment for the next field with no FillReport.
+        """One assignment for the earliest present field with no accepted fill.
+
+        Later fields wait. `unattempted` skips a field at the failure cap, which
+        let a neighbour be filled while this one was still blank; this reads
+        `unfilled` and stops at its head. A given-up head returns None so the
+        page sticks on it instead of walking past.
 
         A gate is assigned its first side by name rather than left to the
         filler: the board has to know which side was taken to know which one is
         still owed, and a value Frontier did not choose cannot be accounted for.
-
-        Board order, which is the order the page produced the controls, and
-        nothing else: a refused control is retried in place until `MAX_FAILURES`
-        gives it up, and the controls after it wait.
         """
         assert self.board is not None
-        for field_id in self.board.unattempted():
-            control = self.board.controls[field_id]
-            gate = self.board.gates.get(field_id)
-            pinned = self.board.pinned.get(field_id)
-            if pinned is not None:
-                # Holding the branch that mounts a deeper gate. The side is
-                # already walked, so `_apply` credits nothing new.
-                return self._assign(control, pinned)
-            if gate is not None and gate.remaining:
-                value = gate.remaining[0]
-                gate.take(value)
-                return self._assign(control, value)
-            return self._assign(control)
-        return None
+        unfilled = self.board.unfilled()
+        if not unfilled:
+            return None
+        field_id = unfilled[0]
+        if self.board.failures.get(field_id, 0) >= MAX_FAILURES:
+            return None
+        control = self.board.controls[field_id]
+        gate = self.board.gates.get(field_id)
+        pinned = self.board.pinned.get(field_id)
+        if pinned is not None:
+            # Holding the branch that mounts a deeper gate. The side is
+            # already walked, so `_apply` credits nothing new.
+            return self._assign(control, pinned)
+        if gate is not None and gate.remaining:
+            value = gate.remaining[0]
+            gate.take(value)
+            return self._assign(control, value)
+        return self._assign(control)
 
     def _restart_for_gate(self) -> Restart | None:
         """Ask Loop to reset the page so a gate's owed side can be taken cleanly.
@@ -1070,7 +1073,7 @@ class Frontier:
                 # The choices are not in the DOM until the widget is opened.
                 return Assignment(
                     intent="expand", locator=control.locator, fieldId=control.fieldId,
-                    label=control.label,
+                    label=control.label, tag=control.tag,
                 )
             if control.typeahead:
                 # Opening a typeahead reveals nothing; its choices answer what is
@@ -1082,6 +1085,7 @@ class Frontier:
                     fieldId=control.fieldId,
                     label=control.label,
                     value=self._seed_for(control),
+                    tag=control.tag,
                     typeahead=True,
                     constraintHint=self._hint_for(control),
                     helpText=control.helpText or None,
@@ -1097,6 +1101,7 @@ class Frontier:
                     fieldId=control.fieldId,
                     label=control.label,
                     value=value,
+                    tag=control.tag,
                     constraintHint=self._hint_for(control),
                 )
             return Assignment(
@@ -1105,6 +1110,7 @@ class Frontier:
                 fieldId=control.fieldId,
                 label=control.label,
                 value=self._seed_for(control),
+                tag=control.tag,
                 constraintHint=self._hint_for(control),
                 helpText=control.helpText or None,
                 shownBecause=self._shown_because(control),
@@ -1129,6 +1135,7 @@ class Frontier:
                 if value is None else None
             ),
             constraintHint=self._hint_for(control),
+            tag=control.tag,
             helpText=control.helpText or None,
             shownBecause=self._shown_because(control),
         )

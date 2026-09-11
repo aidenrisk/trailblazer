@@ -599,7 +599,7 @@ def test_a_revealed_field_is_added_to_the_board_and_walked(frontier: Frontier) -
 
 
 def test_a_new_stage_id_retires_the_previous_board(frontier: Frontier) -> None:
-    """`fieldId` is a per-page counter and carries no cross-page identity."""
+    """A new stage opens its own board. Presence and attempted fills do not carry over."""
     walk(frontier, page([control("q_001", type="text")]))
 
     frontier.observe(page([control("q_001", type="text")], stage_id="form_page_2_locations"))
