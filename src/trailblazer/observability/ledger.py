@@ -36,8 +36,8 @@ class Step:
     their own, and Frontier and the Generator are deterministic."""
 
     unpriced: bool = False
-    """A call was made but could not be priced: an Anthropic model missing from
-    the local table. Distinct from a step that legitimately cost nothing."""
+    """A call was made but OpenRouter returned no cost. Distinct from a step
+    that legitimately cost nothing."""
 
     ms: int = 0
     ok: bool = True

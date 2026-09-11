@@ -13,15 +13,7 @@ uv run playwright install chromium
 venv. It is a per-user download, not a system-wide install, and `uv` cannot manage it
 because `uv` handles Python distributions only.
 
-Then copy `.env.example` to `.env` and fill in a key:
-
-```bash
-cp .env.example .env
-```
-
-`LLM_PROVIDER=openrouter` needs `OPENROUTER_API_KEY`; `anthropic` needs an
-`ANTHROPIC_API_KEY` from the Anthropic Console. A Claude Code OAuth token
-(`sk-ant-oat01-*`) will not work — the Messages API rejects it.
+Then copy `.env.example` to `.env` and set `OPENROUTER_API_KEY`.
 
 ## Run
 
@@ -73,9 +65,8 @@ duration, one line per LLM call with its USD cost, the diff polarity, and where 
 written. DEBUG adds the extractor payload size and each locator that failed uniqueness.
 
 Cost appears in the logs only — it is not in `ScraperResult` and is not written to disk.
-OpenRouter reports the amount it actually charged; the Anthropic path is priced from a small
-local table, and a model missing from it logs a warning and reports `usd=unknown` rather
-than guessing.
+OpenRouter reports the amount it actually charged. A response with no cost logs a warning
+and reports `usd=unknown` rather than guessing.
 
 ## Test
 

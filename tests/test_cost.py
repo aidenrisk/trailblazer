@@ -1,8 +1,8 @@
 """Cost parsing, fed fake `LLMResult`s. No provider, no API key.
 
-The two providers hand cost back in different shapes, and the Anthropic one has
-a trap in it, so both are pinned here against constructed responses rather than
-against a live call that would cost money to run.
+OpenRouter hands the charged amount back in response metadata, so the tracker
+is pinned here against a constructed response rather than a live call that
+would cost money to run.
 """
 
 from langchain_core.messages import AIMessage
@@ -36,42 +36,8 @@ def test_openrouter_cost_is_read_from_response_metadata() -> None:
     assert row["model"] == "x-ai/grok-4.5"
 
 
-def test_anthropic_cost_prices_cache_buckets_separately() -> None:
-    """The trap: `input_tokens` already contains the cache buckets.
-
-    langchain_anthropic adds cache_read and cache_creation back into
-    `input_tokens`, so charging that total at the base rate overcharges. Here
-    1000 plain + 4000 read + 1000 write must be priced 1000 at 1.0x, 4000 at
-    0.1x and 1000 at 1.25x -- not 6000 at 1.0x.
-    """
-    tracker = CostTracker(step="perceive")
-    tracker.on_llm_end(
-        _result(
-            AIMessage(
-                content="ok",
-                response_metadata={"model_name": "claude-sonnet-4-5"},
-                usage_metadata={
-                    "input_tokens": 6000,  # 1000 plain + 4000 read + 1000 write
-                    "output_tokens": 500,
-                    "total_tokens": 6500,
-                    "input_token_details": {"cache_read": 4000, "cache_creation": 1000},
-                },
-            )
-        )
-    )
-
-    input_rate, output_rate = 3.0 / 1e6, 15.0 / 1e6
-    expected = (
-        1000 * input_rate + 4000 * input_rate * 0.1 + 1000 * input_rate * 1.25 + 500 * output_rate
-    )
-    assert tracker.calls[0]["usd"] == expected
-
-    naive = 6000 * input_rate + 500 * output_rate
-    assert tracker.calls[0]["usd"] < naive  # the overcharge is avoided
-
-
-def test_unpriced_anthropic_model_reports_unknown_not_a_guess(caplog) -> None:
-    """A model missing from the table is reported as unknown, never estimated."""
+def test_missing_cost_reports_unknown_not_a_guess(caplog) -> None:
+    """A reply with no OpenRouter cost is reported as unknown, never estimated."""
     ledger = RunLedger(job_id="j1")
     tracker = CostTracker(step="vision", ledger=ledger)
     with caplog.at_level("WARNING", logger="trailblazer"):
@@ -79,7 +45,7 @@ def test_unpriced_anthropic_model_reports_unknown_not_a_guess(caplog) -> None:
             _result(
                 AIMessage(
                     content="ok",
-                    response_metadata={"model_name": "claude-something-unreleased"},
+                    response_metadata={"model_name": "x-ai/grok-4.5"},
                     usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
                 )
             )
@@ -87,7 +53,7 @@ def test_unpriced_anthropic_model_reports_unknown_not_a_guess(caplog) -> None:
 
     assert tracker.calls[0]["usd"] is None
     assert tracker.total_usd() is None
-    assert "no price for model" in caplog.text
+    assert "no cost in response" in caplog.text
     assert ledger.steps[0].unpriced is True
     assert ledger.steps[0].usd == 0.0
     assert ledger.steps[0].agent == "vision"

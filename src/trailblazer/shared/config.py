@@ -10,13 +10,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    llm_provider: Literal["openrouter", "anthropic"] = "openrouter"
-
     openrouter_api_key: str | None = None
     openrouter_model: str = "x-ai/grok-4.5"
-
-    anthropic_api_key: str | None = None
-    anthropic_model: str = "claude-sonnet-4-5"
 
     vision_model: str = "google/gemini-2.5-pro"
     """The model the vision fallback sends its screenshot to. Separate from
