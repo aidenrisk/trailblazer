@@ -25,7 +25,7 @@ jobs:
           else
             before="${{ github.event.before }}"
             if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-              before=$(git rev-list --max-parents=0 HEAD)
+              before=$(default_branch="${{ github.event.repository.default_branch }}"; git fetch origin "$default_branch" --depth=1000 >/dev/null 2>&1; git merge-base "origin/$default_branch" HEAD 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
               echo "range=${before}..HEAD" >> "$GITHUB_OUTPUT"
             else
               echo "range=${before}..HEAD" >> "$GITHUB_OUTPUT"
