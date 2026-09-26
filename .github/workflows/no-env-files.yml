@@ -1,0 +1,56 @@
+name: No env files
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  no-env-files:
+    name: PR adds no env files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            echo "range=origin/${{ github.base_ref }}...HEAD" >> "$GITHUB_OUTPUT"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              before=$(git rev-list --max-parents=0 HEAD)
+              echo "range=${before}..HEAD" >> "$GITHUB_OUTPUT"
+            else
+              echo "range=${before}..HEAD" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # Enforced here because there is no husky in this repo; this and the org
+      # server-side push ruleset are the only enforcement points.
+      - name: Refuse env files and private keys added or changed in this range
+        run: |
+          blocked=$(git diff --name-only --diff-filter=ACMR "${{ steps.range.outputs.range }}" \
+            | grep -E '(^|/)\.env($|\.)|(^|/)\.envrc$|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)id_rsa|(^|/)id_ed25519|\.keystore$' \
+            | grep -vE '(^|/)\.env\.example$' || true)
+          if [ -n "$blocked" ]; then
+            echo "::error::This change adds env files or private keys, which hold secrets. Only .env.example may be committed:"
+            echo "$blocked"
+            exit 1
+          fi
+          echo "No env files or private keys in this range."
+
+      - name: Download gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+
+      - name: Scan range for secrets with gitleaks
+        run: |
+          ./gitleaks detect --source . --log-opts="${{ steps.range.outputs.range }}" --redact --exit-code 1
