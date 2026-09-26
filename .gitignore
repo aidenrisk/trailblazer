@@ -1,3 +1,13 @@
 inputs/
 outputs/
 .venv/
+
+# Env files and private keys hold secrets; .env.example is the only exception.
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
